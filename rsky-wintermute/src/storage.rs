@@ -2,6 +2,16 @@ use crate::config::{BLOCK_SIZE, CACHE_SIZE, FSYNC_MS, MEMTABLE_SIZE, WRITE_BUFFE
 
 const LIVE_SEQ_READ_CURSOR: &str = "live_seq_read";
 const LIVE_LEGACY_DRAINED: &str = "live_legacy_drained";
+/// `first_key_value` on a tombstone-heavy partition walks every tombstone, so
+/// the stale-cursor (wipe) check runs at most once per this window.
+const LIVE_WIPE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+/// A live-queue scan re-checks the shutdown flag after this many yielded keys.
+const LIVE_SCAN_SHUTDOWN_CHECK_EVERY: usize = 256;
+/// Compaction triggers: a live partition is considered bloated once it holds
+/// this many dead entries beyond its live estimate AND is materially on disk.
+const LIVE_COMPACT_MIN_DEAD: usize = 10_000;
+const LIVE_COMPACT_MIN_BYTES: u64 = 64 * 1024 * 1024;
+const LIVE_COMPACT_MIN_SEGMENTS: usize = 8;
 use crate::types::{BackfillJob, FirehoseEvent, IndexJob, WintermuteError};
 use fjall::{Config, Keyspace, PartitionCreateOptions, PartitionHandle};
 use heed::types::Bytes;
@@ -42,6 +52,21 @@ pub struct Storage {
     live_seq_next: AtomicU64,
     legacy_live_drained: AtomicBool,
     live_notify: tokio::sync::Notify,
+    // Rate limiter for the stale-cursor check in `dequeue_live_seq_batch`.
+    live_wipe_check_at: std::sync::Mutex<Option<std::time::Instant>>,
+    live_wipe_checks: AtomicU64,
+    // Guards against overlapping live-partition compactions.
+    live_compaction_running: AtomicBool,
+}
+
+/// Cheap, metadata-only size figures for a live queue partition.
+#[derive(Debug, Clone)]
+pub struct LivePartitionStats {
+    pub name: &'static str,
+    /// Items in segment metadata plus memtable; counts tombstones too.
+    pub approximate_len: usize,
+    pub segments: usize,
+    pub disk_bytes: u64,
 }
 
 impl Storage {
@@ -171,6 +196,22 @@ impl Storage {
             .map(|b| b.to_vec());
         let legacy_drained = cursors.get(LIVE_LEGACY_DRAINED.as_bytes())?.is_some();
 
+        // Reclaim dequeue tombstones before anything scans these partitions:
+        // every live job is inserted once and removed once, and leveled
+        // compaction never catches up, so a partition can be tens of GB of
+        // tombstones over a few thousand live jobs. Live counts come from the
+        // seq cursor (O(1)), so a healthy store starts instantly.
+        let seq_live_estimate = seq_read_cursor
+            .as_deref()
+            .and_then(|c| <[u8; 8]>::try_from(c).ok())
+            .map_or(live_seq_start, |b| {
+                live_seq_start.saturating_sub(u64::from_be_bytes(b).saturating_add(1))
+            });
+        let seq_live_estimate = usize::try_from(seq_live_estimate).unwrap_or(usize::MAX);
+        let legacy_live_estimate = if legacy_drained { 0 } else { usize::MAX };
+        Self::compact_if_bloated("firehose_live_seq", &firehose_live_seq, seq_live_estimate);
+        Self::compact_if_bloated("firehose_live", &firehose_live, legacy_live_estimate);
+
         Ok(Self {
             db,
             firehose_events,
@@ -186,7 +227,132 @@ impl Storage {
             live_seq_next: AtomicU64::new(live_seq_start),
             legacy_live_drained: AtomicBool::new(legacy_drained),
             live_notify: tokio::sync::Notify::new(),
+            live_wipe_check_at: std::sync::Mutex::new(None),
+            live_wipe_checks: AtomicU64::new(0),
+            live_compaction_running: AtomicBool::new(false),
         })
+    }
+
+    fn partition_stats(name: &'static str, partition: &PartitionHandle) -> LivePartitionStats {
+        LivePartitionStats {
+            name,
+            approximate_len: partition.approximate_len(),
+            segments: partition.segment_count(),
+            disk_bytes: partition.disk_space(),
+        }
+    }
+
+    /// Segment count / disk bytes / approximate item count of the two live
+    /// queue partitions, from segment metadata only (no scan).
+    pub fn live_partition_stats(&self) -> Vec<LivePartitionStats> {
+        vec![
+            Self::partition_stats("firehose_live", &self.firehose_live),
+            Self::partition_stats("firehose_live_seq", &self.firehose_live_seq),
+        ]
+    }
+
+    /// `approximate_len` counts tombstones, so anything above the live
+    /// estimate is dead weight; compaction is worth it once that is large and
+    /// the partition is materially on disk.
+    fn live_partition_bloated(stats: &LivePartitionStats, live_estimate: usize) -> bool {
+        let dead = stats.approximate_len.saturating_sub(live_estimate);
+        dead > live_estimate.max(LIVE_COMPACT_MIN_DEAD)
+            && (stats.disk_bytes >= LIVE_COMPACT_MIN_BYTES
+                || stats.segments >= LIVE_COMPACT_MIN_SEGMENTS)
+    }
+
+    fn compact_if_bloated(name: &'static str, partition: &PartitionHandle, live_estimate: usize) {
+        let stats = Self::partition_stats(name, partition);
+        if Self::live_partition_bloated(&stats, live_estimate) {
+            tracing::info!(
+                partition = name,
+                approximate_len = stats.approximate_len,
+                segments = stats.segments,
+                disk_bytes = stats.disk_bytes,
+                live_estimate,
+                "live queue partition is mostly tombstones, compacting before start"
+            );
+            if let Err(e) = Self::compact_partition(name, partition) {
+                tracing::error!(partition = name, "startup compaction failed: {e}");
+            }
+        }
+    }
+
+    /// Major-compact one live partition, blocking the caller. Logs duration
+    /// and before/after size.
+    ///
+    /// Safe with concurrent writers (the ingester enqueues while this runs):
+    /// fjall 2.11.2 `PartitionHandle::major_compact` (partition/mod.rs:939)
+    /// calls lsm-tree 2.10.3 `Tree::major_compact` (tree/mod.rs:94), which
+    /// takes the tree's major-compaction write lock so it is the only
+    /// compaction in progress and merges only sealed segments; inserts and
+    /// removes keep landing in the active memtable meanwhile. Everything is
+    /// written to the last level, so tombstones not covered by an open
+    /// snapshot are dropped. The memtable is rotated first so its tombstones
+    /// take part in the merge (a memtable-only tree would otherwise keep them).
+    fn compact_partition(
+        name: &'static str,
+        partition: &PartitionHandle,
+    ) -> Result<LivePartitionStats, WintermuteError> {
+        let started = std::time::Instant::now();
+        let before = Self::partition_stats(name, partition);
+        partition.rotate_memtable_and_wait()?;
+        partition.major_compact()?;
+        let after = Self::partition_stats(name, partition);
+        tracing::info!(
+            partition = name,
+            duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            disk_bytes_before = before.disk_bytes,
+            disk_bytes_after = after.disk_bytes,
+            segments_before = before.segments,
+            segments_after = after.segments,
+            approximate_len_before = before.approximate_len,
+            approximate_len_after = after.approximate_len,
+            "compacted live queue partition"
+        );
+        Ok(after)
+    }
+
+    /// Compact the live queue partitions if they look bloated (or always when
+    /// `force`), skipping while shutdown is set or another compaction is
+    /// running. Meant for a blocking thread once the queue has drained, so the
+    /// live estimate is zero for the seq partition and for a drained legacy
+    /// partition. Returns how many partitions were compacted.
+    pub fn compact_live_partitions(&self, force: bool) -> usize {
+        if crate::SHUTDOWN.load(Ordering::Relaxed) {
+            return 0;
+        }
+        if self
+            .live_compaction_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return 0;
+        }
+        let legacy_estimate = if self.legacy_live_drained.load(Ordering::Relaxed) {
+            0
+        } else {
+            usize::MAX
+        };
+        let targets = [
+            ("firehose_live_seq", &self.firehose_live_seq, 0usize),
+            ("firehose_live", &self.firehose_live, legacy_estimate),
+        ];
+        let mut compacted = 0;
+        for (name, partition, live_estimate) in targets {
+            let stats = Self::partition_stats(name, partition);
+            if !force && !Self::live_partition_bloated(&stats, live_estimate) {
+                continue;
+            }
+            match Self::compact_partition(name, partition) {
+                Ok(_) => compacted += 1,
+                Err(e) => {
+                    tracing::error!(partition = name, "live partition compaction failed: {e}");
+                }
+            }
+        }
+        self.live_compaction_running.store(false, Ordering::Release);
+        compacted
     }
 
     pub fn write_firehose_event(
@@ -348,13 +514,26 @@ impl Storage {
         Ok(())
     }
 
+    /// Walk `iter`, collecting up to `limit` jobs. Re-checks `shutdown` every
+    /// `LIVE_SCAN_SHUTDOWN_CHECK_EVERY` yielded keys and returns what it has,
+    /// so a large batch cannot pin shutdown. Note the limit of this: fjall
+    /// skips tombstones inside `next()`, so a dense tombstone run before the
+    /// first live key is not interruptible here; compaction keeps that run
+    /// short and the runtime's shutdown timeout abandons a stuck thread.
     fn collect_live_entries(
         iter: impl Iterator<Item = Result<(fjall::Slice, fjall::Slice), fjall::Error>>,
         limit: usize,
         results: &mut Vec<(Vec<u8>, IndexJob)>,
         poisoned: &mut Vec<Vec<u8>>,
+        shutdown: &AtomicBool,
     ) -> Result<(), WintermuteError> {
-        for entry in iter.take(limit - results.len()) {
+        for (seen, entry) in iter.take(limit - results.len()).enumerate() {
+            if seen > 0
+                && seen % LIVE_SCAN_SHUTDOWN_CHECK_EVERY == 0
+                && shutdown.load(Ordering::Relaxed)
+            {
+                return Ok(());
+            }
             let (key, value) = entry?;
             match ciborium::from_reader(value.as_ref()) {
                 Ok(job) => results.push((key.to_vec(), job)),
@@ -375,12 +554,22 @@ impl Storage {
         &self,
         limit: usize,
     ) -> Result<Vec<(Vec<u8>, IndexJob)>, WintermuteError> {
+        self.dequeue_firehose_live_batch_with_shutdown(limit, &crate::SHUTDOWN)
+    }
+
+    /// `dequeue_firehose_live_batch` with an explicit shutdown flag: the scan
+    /// stops early and the stale-cursor check is skipped once it is set.
+    pub fn dequeue_firehose_live_batch_with_shutdown(
+        &self,
+        limit: usize,
+        shutdown: &AtomicBool,
+    ) -> Result<Vec<(Vec<u8>, IndexJob)>, WintermuteError> {
         let start = std::time::Instant::now();
         let mut legacy = false;
         let results = if self.legacy_live_drained.load(Ordering::Relaxed) {
-            self.dequeue_live_seq_batch(limit)?
+            self.dequeue_live_seq_batch(limit, shutdown)?
         } else {
-            let legacy_results = self.dequeue_live_legacy_batch(limit)?;
+            let legacy_results = self.dequeue_live_legacy_batch(limit, shutdown)?;
             if legacy_results.is_empty() {
                 self.legacy_live_drained.store(true, Ordering::Relaxed);
                 if let Err(e) = self
@@ -390,7 +579,7 @@ impl Storage {
                     tracing::warn!("failed to persist legacy-drained flag: {e}");
                 }
                 tracing::info!("legacy firehose_live partition drained, switching to seq keys");
-                self.dequeue_live_seq_batch(limit)?
+                self.dequeue_live_seq_batch(limit, shutdown)?
             } else {
                 legacy = true;
                 legacy_results
@@ -410,6 +599,7 @@ impl Storage {
     fn dequeue_live_seq_batch(
         &self,
         limit: usize,
+        shutdown: &AtomicBool,
     ) -> Result<Vec<(Vec<u8>, IndexJob)>, WintermuteError> {
         let cursor = self
             .firehose_live_seq_cursor
@@ -425,6 +615,7 @@ impl Storage {
                 limit,
                 &mut results,
                 &mut poisoned,
+                shutdown,
             )?;
         } else {
             Self::collect_live_entries(
@@ -432,6 +623,7 @@ impl Storage {
                 limit,
                 &mut results,
                 &mut poisoned,
+                shutdown,
             )?;
         }
 
@@ -443,9 +635,12 @@ impl Storage {
             self.cursors
                 .insert(LIVE_SEQ_READ_CURSOR.as_bytes(), key.as_slice())?;
             *guard = Some(key);
-        } else if results.is_empty() && poisoned.is_empty() {
+        } else if results.is_empty() && poisoned.is_empty() && self.should_check_live_wipe(shutdown)
+        {
             // A wiped-and-recreated partition restarts seq keys from zero; a
             // persisted cursor from before the wipe would then skip everything.
+            // `first_key_value` walks every tombstone ahead of the first live
+            // key, so this is rate-limited (see `should_check_live_wipe`).
             if let Some((first, _)) = self.firehose_live_seq.first_key_value()? {
                 let stale = self
                     .firehose_live_seq_cursor
@@ -475,6 +670,26 @@ impl Storage {
         Ok(results)
     }
 
+    /// Whether an empty poll should run the stale-cursor check now: never
+    /// during shutdown, never on an empty partition (nothing to be behind;
+    /// `approximate_len` is 0 only when there are no entries and no
+    /// tombstones), and otherwise at most once per `LIVE_WIPE_CHECK_INTERVAL`.
+    fn should_check_live_wipe(&self, shutdown: &AtomicBool) -> bool {
+        if shutdown.load(Ordering::Relaxed) || self.firehose_live_seq.approximate_len() == 0 {
+            return false;
+        }
+        let Ok(mut last) = self.live_wipe_check_at.lock() else {
+            return false;
+        };
+        if last.is_some_and(|t| t.elapsed() < LIVE_WIPE_CHECK_INTERVAL) {
+            return false;
+        }
+        *last = Some(std::time::Instant::now());
+        drop(last);
+        self.live_wipe_checks.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
     /// Sweep-cursor scan of the legacy uri-keyed partition: resumes after the
     /// last dequeued key and wraps to the partition start when exhausted.
     /// Undeserializable entries are removed and skipped so a poison entry
@@ -482,6 +697,7 @@ impl Storage {
     fn dequeue_live_legacy_batch(
         &self,
         limit: usize,
+        shutdown: &AtomicBool,
     ) -> Result<Vec<(Vec<u8>, IndexJob)>, WintermuteError> {
         let cursor = self.firehose_live_cursor.lock().map_or(None, |c| c.clone());
 
@@ -498,6 +714,7 @@ impl Storage {
                 limit,
                 &mut results,
                 &mut poisoned,
+                shutdown,
             )?;
         }
         if results.is_empty() && poisoned.is_empty() {
@@ -507,6 +724,7 @@ impl Storage {
                 limit,
                 &mut results,
                 &mut poisoned,
+                shutdown,
             )?;
         }
 
@@ -1728,6 +1946,202 @@ mod tests {
         let total = first.len() + second.len();
         assert_eq!(total, 1, "job behind a stale cursor must not be skipped");
         drop(dir);
+    }
+
+    /// Empty polls used to call `first_key_value` (O(tombstones)) every time;
+    /// the stale-cursor check must run once per window, not per poll.
+    #[test]
+    fn empty_polls_rate_limit_the_stale_cursor_check() {
+        let (storage, _dir) = setup_test_storage();
+        let total = 20_000;
+        for i in 0..total {
+            storage
+                .enqueue_firehose_live(&live_job(&format!(
+                    "at://did:plc:a/app.bsky.feed.post/t{i}"
+                )))
+                .unwrap();
+        }
+        assert_eq!(
+            storage.dequeue_firehose_live_batch(total).unwrap().len(),
+            total
+        );
+        // The partition is now all tombstones (approximate_len counts them).
+        assert!(storage.firehose_live_seq.approximate_len() > 0);
+        let checks_before = storage.live_wipe_checks.load(Ordering::Relaxed);
+
+        let started = std::time::Instant::now();
+        for _ in 0..100 {
+            assert!(
+                storage
+                    .dequeue_firehose_live_batch(total)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        let elapsed = started.elapsed();
+        assert_eq!(
+            storage.live_wipe_checks.load(Ordering::Relaxed) - checks_before,
+            1,
+            "one stale-cursor check per window across 100 empty polls"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "100 empty polls over 20k tombstones took {elapsed:?}"
+        );
+
+        // While shutting down the check is skipped entirely.
+        let shutdown = AtomicBool::new(true);
+        let (mut results, mut poisoned) = (Vec::new(), Vec::new());
+        assert!(!storage.should_check_live_wipe(&shutdown));
+        Storage::collect_live_entries(
+            storage.firehose_live_seq.iter(),
+            10,
+            &mut results,
+            &mut poisoned,
+            &shutdown,
+        )
+        .unwrap();
+        assert!(results.is_empty() && poisoned.is_empty());
+    }
+
+    /// A batch scan re-checks the shutdown flag every
+    /// `LIVE_SCAN_SHUTDOWN_CHECK_EVERY` keys and returns what it has.
+    #[test]
+    fn live_scan_stops_early_when_shutdown_is_set() {
+        let (storage, _dir) = setup_test_storage();
+        let total = LIVE_SCAN_SHUTDOWN_CHECK_EVERY * 4;
+        for i in 0..total {
+            storage
+                .enqueue_firehose_live(&live_job(&format!(
+                    "at://did:plc:a/app.bsky.feed.post/s{i}"
+                )))
+                .unwrap();
+        }
+
+        let running = AtomicBool::new(false);
+        let (mut results, mut poisoned) = (Vec::new(), Vec::new());
+        Storage::collect_live_entries(
+            storage.firehose_live_seq.iter(),
+            total,
+            &mut results,
+            &mut poisoned,
+            &running,
+        )
+        .unwrap();
+        assert_eq!(results.len(), total, "no shutdown: the full batch");
+
+        let stopping = AtomicBool::new(true);
+        let (mut results, mut poisoned) = (Vec::new(), Vec::new());
+        Storage::collect_live_entries(
+            storage.firehose_live_seq.iter(),
+            total,
+            &mut results,
+            &mut poisoned,
+            &stopping,
+        )
+        .unwrap();
+        assert_eq!(
+            results.len(),
+            LIVE_SCAN_SHUTDOWN_CHECK_EVERY,
+            "shutdown: stops at the first check"
+        );
+        assert!(poisoned.is_empty());
+
+        // Through the public path the partial batch is still dequeued
+        // (removed) and the cursor advanced, so nothing is lost or repeated.
+        let partial = storage
+            .dequeue_firehose_live_batch_with_shutdown(total, &stopping)
+            .unwrap();
+        assert_eq!(partial.len(), LIVE_SCAN_SHUTDOWN_CHECK_EVERY);
+        let rest = storage.dequeue_firehose_live_batch(total).unwrap();
+        assert_eq!(rest.len(), total - LIVE_SCAN_SHUTDOWN_CHECK_EVERY);
+    }
+
+    /// Enqueue/dequeue churn leaves a partition of pure tombstones; major
+    /// compaction must reclaim it (and must not lose live jobs).
+    #[test]
+    fn major_compaction_reclaims_live_queue_tombstones() {
+        // Surface the measured sizes under `--nocapture`; another test may
+        // already have installed a subscriber, which is fine.
+        drop(tracing_subscriber::fmt().with_test_writer().try_init());
+        let (storage, _dir) = setup_test_storage();
+        let churn = 100_000;
+        for i in 0..churn {
+            storage
+                .enqueue_firehose_live(&live_job(&format!(
+                    "at://did:plc:a/app.bsky.feed.post/c{i}"
+                )))
+                .unwrap();
+        }
+        // Flush the values to a segment before dequeuing, as in production
+        // where a job is indexed long after its memtable was flushed: the
+        // tombstones then land in a later segment and leveled compaction
+        // never merges the two, so the dead values keep their disk space.
+        storage
+            .firehose_live_seq
+            .rotate_memtable_and_wait()
+            .unwrap();
+        let mut drained = 0;
+        while drained < churn {
+            let batch = storage.dequeue_firehose_live_batch(10_000).unwrap();
+            assert!(!batch.is_empty());
+            drained += batch.len();
+        }
+        // One live job that must survive the compaction.
+        storage
+            .enqueue_firehose_live(&live_job("at://did:plc:a/app.bsky.feed.post/survivor"))
+            .unwrap();
+
+        // Put the tombstones on disk too so the figures are real segments.
+        storage
+            .firehose_live_seq
+            .rotate_memtable_and_wait()
+            .unwrap();
+        let before = storage
+            .live_partition_stats()
+            .into_iter()
+            .find(|s| s.name == "firehose_live_seq")
+            .unwrap();
+        assert!(
+            before.segments >= 2,
+            "values and tombstones in separate segments: {before:?}"
+        );
+        assert!(before.disk_bytes > 0);
+        assert!(
+            before.approximate_len > 2 * churn,
+            "dead values and their tombstones are both counted: {before:?}"
+        );
+
+        let compacted = storage.compact_live_partitions(true);
+        assert_eq!(compacted, 2, "both live partitions compacted when forced");
+
+        let after = storage
+            .live_partition_stats()
+            .into_iter()
+            .find(|s| s.name == "firehose_live_seq")
+            .unwrap();
+        tracing::info!(
+            disk_bytes_before = before.disk_bytes,
+            segments_before = before.segments,
+            approximate_len_before = before.approximate_len,
+            disk_bytes_after = after.disk_bytes,
+            segments_after = after.segments,
+            approximate_len_after = after.approximate_len,
+            "MEASURED firehose_live_seq compaction"
+        );
+        assert_eq!(after.approximate_len, 1, "only the survivor remains");
+        assert!(after.segments <= 1);
+        assert!(after.disk_bytes < before.disk_bytes / 10);
+
+        let survivor = storage.dequeue_firehose_live_batch(10).unwrap();
+        assert_eq!(survivor.len(), 1);
+        assert_eq!(
+            survivor[0].1.uri,
+            "at://did:plc:a/app.bsky.feed.post/survivor"
+        );
+
+        // A second pass sees nothing bloated without `force`.
+        assert_eq!(storage.compact_live_partitions(false), 0);
     }
 
     #[test]

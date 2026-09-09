@@ -8,7 +8,8 @@ use crate::config::{
     IDENTITY_RESOLVER_TIMEOUT, INLINE_CONCURRENCY, WORKERS_INDEXER,
 };
 use crate::config::{
-    FIREHOSE_LIVE_DRAIN_BATCH, FIREHOSE_LIVE_SHARDS, INDEXER_BATCH_SIZE, INDEXER_BATCH_WORKERS,
+    FIREHOSE_LIVE_COMPACT_SECS, FIREHOSE_LIVE_DRAIN_BATCH, FIREHOSE_LIVE_SHARDS,
+    FIREHOSE_LIVE_SHUTDOWN_GRACE_SECS, INDEXER_BATCH_SIZE, INDEXER_BATCH_WORKERS,
     LIVE_LIKE_SERIALIZE,
 };
 use crate::storage::Storage;
@@ -23,7 +24,7 @@ use rsky_identity::IdResolver;
 use rsky_identity::types::IdentityResolverOpts;
 use rsky_syntax::aturi::AtUri;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
@@ -57,6 +58,35 @@ type LabelJobWithMetadata = (Vec<u8>, LabelEvent);
 type JobTaskResult = (Vec<u8>, QueueSource, Result<(), WintermuteError>);
 type LabelTaskResult = (Vec<u8>, Result<(), WintermuteError>);
 type LabelTaskHandle = tokio::task::JoinHandle<LabelTaskResult>;
+type LiveJobResult = (Vec<u8>, Result<(), WintermuteError>);
+type LiveShards = Arc<Vec<Vec<(Vec<u8>, IndexJob)>>>;
+
+/// How often a blocking wait in the indexer loops re-checks the shutdown flag.
+const SHUTDOWN_POLL: Duration = Duration::from_millis(250);
+
+/// Outcome of one handle-resolution batch.
+struct HandleDrain {
+    /// Resolutions that completed and reported a changed handle.
+    resolved: usize,
+    /// Resolutions still in flight or never started when shutdown was seen.
+    abandoned: usize,
+}
+
+/// How a live batch's shard tasks ended.
+enum LiveBatchOutcome {
+    /// Every shard task returned. `lost_shards` are shard indices whose task
+    /// panicked or was cancelled and so produced no per-job results.
+    Completed {
+        results: Vec<LiveJobResult>,
+        lost_shards: Vec<usize>,
+    },
+    /// Shutdown was requested and the grace budget ran out first; the still
+    /// running shard tasks were aborted.
+    Aborted {
+        shards_aborted: usize,
+        grace_used: Duration,
+    },
+}
 
 fn sanitize_text(s: &str) -> String {
     s.replace('\0', "")
@@ -182,13 +212,16 @@ impl IndexerManager {
                 tokio::join!(live_handle, backfill_handle, labels_handle, handles_handle);
         });
 
+        // Dropping the runtime would block until every spawn_blocking thread
+        // returns; a dequeue stuck walking Fjall tombstones would then hold
+        // the process past shutdown. Give them a moment, then leak them: the
+        // process is exiting.
+        rt.shutdown_timeout(Duration::from_secs(5));
+
         Ok(())
     }
 
     async fn process_handle_resolution_loop(&self) {
-        type HandleFuture =
-            std::pin::Pin<Box<dyn std::future::Future<Output = Option<bool>> + Send>>;
-
         let max_concurrent = *HANDLE_RESOLUTION_CONCURRENCY;
         tracing::info!(
             "handle resolution processor started (concurrency={max_concurrent}, batch={})",
@@ -203,19 +236,32 @@ impl IndexerManager {
                 break;
             }
 
-            // Query actors with NULL handle or stale indexedAt
-            let dids_to_resolve = match self.get_actors_needing_handle_resolution().await {
+            // Query actors with NULL handle or stale indexedAt. The query is
+            // unbounded, so race it against the shutdown flag: a slow scan must
+            // not pin the runtime past SIGTERM. Dropping the future returns the
+            // client to the pool; the process is exiting anyway.
+            let query = tokio::select! {
+                res = self.get_actors_needing_handle_resolution() => res,
+                () = Self::wait_for_shutdown(&SHUTDOWN) => {
+                    tracing::info!(
+                        "shutdown requested for handle resolution processor while querying actors"
+                    );
+                    break;
+                }
+            };
+            let dids_to_resolve = match query {
                 Ok(dids) => dids,
                 Err(e) => {
                     tracing::warn!("failed to get actors needing handle resolution: {e}");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    Self::sleep_or_shutdown(Duration::from_secs(5), &SHUTDOWN).await;
                     continue;
                 }
             };
 
             if dids_to_resolve.is_empty() {
-                // No work to do, sleep longer
-                tokio::time::sleep(Duration::from_secs(10)).await;
+                // No work to do, sleep longer (returns early on shutdown; the
+                // loop top then exits).
+                Self::sleep_or_shutdown(Duration::from_secs(10), &SHUTDOWN).await;
                 continue;
             }
 
@@ -228,52 +274,40 @@ impl IndexerManager {
             let id_resolver = Arc::clone(&self.id_resolver);
             let pool = self.pool_labels.clone();
 
-            // Process handles in parallel using FuturesUnordered with boxed futures
-            let mut in_flight: FuturesUnordered<HandleFuture> = FuturesUnordered::new();
-            let mut pending_dids = dids_to_resolve.into_iter();
-            let mut resolved_count = 0usize;
-
-            let make_future = |pool: Pool,
-                               id_resolver: Arc<IdResolver>,
-                               did: String,
-                               timestamp: String|
-             -> HandleFuture {
-                Box::pin(async move {
+            let make_future = |did: String| {
+                let pool = pool.clone();
+                let id_resolver = Arc::clone(&id_resolver);
+                let timestamp = timestamp.clone();
+                async move {
                     let client = pool.get().await.ok()?;
                     Self::index_handle(&client, &id_resolver, &did, &timestamp, false)
                         .await
                         .ok()
-                })
+                }
             };
 
-            // Seed initial batch of concurrent tasks
-            for did in pending_dids.by_ref().take(max_concurrent) {
-                in_flight.push(make_future(
-                    pool.clone(),
-                    Arc::clone(&id_resolver),
-                    did,
-                    timestamp.clone(),
-                ));
-            }
-
-            // Process results and spawn new tasks as slots free up
-            while let Some(result) = in_flight.next().await {
-                if result == Some(true) {
-                    resolved_count += 1;
-                }
-
-                // Spawn next task if there are more DIDs
-                if let Some(did) = pending_dids.next() {
-                    in_flight.push(make_future(
-                        pool.clone(),
-                        Arc::clone(&id_resolver),
-                        did,
-                        timestamp.clone(),
-                    ));
-                }
-            }
-
+            // Resolve handles concurrently, checking the shutdown flag between
+            // results and every SHUTDOWN_POLL while waiting on slow resolvers.
+            let drain = Self::drain_handle_resolutions(
+                dids_to_resolve,
+                max_concurrent,
+                make_future,
+                &SHUTDOWN,
+            )
+            .await;
+            let resolved_count = drain.resolved;
             total_resolved += resolved_count as u64;
+
+            if SHUTDOWN.load(Ordering::Relaxed) {
+                // Nothing to requeue: unresolved actors still have a NULL or
+                // stale handle and are selected again on the next start.
+                tracing::info!(
+                    abandoned = drain.abandoned,
+                    resolved = resolved_count,
+                    "shutdown requested for handle resolution processor, abandoned in-flight resolutions"
+                );
+                break;
+            }
 
             // Log progress every 10 batches or when handles are resolved
             if batch_count % 10 == 1 || resolved_count > 0 {
@@ -283,7 +317,75 @@ impl IndexerManager {
             }
 
             // Small delay between batches to avoid overwhelming the system
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            Self::sleep_or_shutdown(Duration::from_millis(100), &SHUTDOWN).await;
+        }
+    }
+
+    /// Resolve up to `max_concurrent` handles at a time from `dids`, topping
+    /// up as slots free, until every DID is done or `shutdown` flips. The flag
+    /// is checked after every completed resolution and every `SHUTDOWN_POLL`
+    /// while waiting, so neither a long batch nor a stalled resolver can hold
+    /// the loop past shutdown. On shutdown the in-flight futures are dropped
+    /// (cancelled) and counted, together with the DIDs never started, as
+    /// `abandoned`. No grace period: abandoning a resolution costs nothing,
+    /// the actor is simply selected again on the next start.
+    async fn drain_handle_resolutions<F, Fut>(
+        dids: Vec<String>,
+        max_concurrent: usize,
+        mut make_future: F,
+        shutdown: &AtomicBool,
+    ) -> HandleDrain
+    where
+        F: FnMut(String) -> Fut + Send,
+        Fut: std::future::Future<Output = Option<bool>> + Send,
+    {
+        let mut pending = dids.into_iter();
+        let mut in_flight: FuturesUnordered<Fut> = FuturesUnordered::new();
+        for did in pending.by_ref().take(max_concurrent) {
+            in_flight.push(make_future(did));
+        }
+
+        let mut resolved = 0usize;
+        loop {
+            if shutdown.load(Ordering::Relaxed) {
+                return HandleDrain {
+                    resolved,
+                    abandoned: in_flight.len() + pending.len(),
+                };
+            }
+            if in_flight.is_empty() {
+                return HandleDrain {
+                    resolved,
+                    abandoned: 0,
+                };
+            }
+            tokio::select! {
+                Some(result) = in_flight.next() => {
+                    if result == Some(true) {
+                        resolved += 1;
+                    }
+                    if let Some(did) = pending.next() {
+                        in_flight.push(make_future(did));
+                    }
+                }
+                () = tokio::time::sleep(SHUTDOWN_POLL) => {}
+            }
+        }
+    }
+
+    /// Resolve once `shutdown` is set, polling every `SHUTDOWN_POLL`.
+    async fn wait_for_shutdown(shutdown: &AtomicBool) {
+        while !shutdown.load(Ordering::Relaxed) {
+            tokio::time::sleep(SHUTDOWN_POLL).await;
+        }
+    }
+
+    /// Sleep for `duration` unless `shutdown` flips first. Returns `true` when
+    /// it returned early because of shutdown.
+    async fn sleep_or_shutdown(duration: Duration, shutdown: &AtomicBool) -> bool {
+        tokio::select! {
+            () = tokio::time::sleep(duration) => false,
+            () = Self::wait_for_shutdown(shutdown) => true,
         }
     }
 
@@ -339,8 +441,16 @@ impl IndexerManager {
 
     async fn process_firehose_live_loop(&self) {
         let batch_size = *FIREHOSE_LIVE_DRAIN_BATCH;
+        let shutdown_grace = Duration::from_secs(*FIREHOSE_LIVE_SHUTDOWN_GRACE_SECS);
+        let compact_interval = Duration::from_secs(*FIREHOSE_LIVE_COMPACT_SECS);
+        let mut last_compaction = std::time::Instant::now();
 
-        tracing::info!(batch_size, "firehose_live processor started (batch drain)");
+        tracing::info!(
+            batch_size,
+            shutdown_grace_secs = shutdown_grace.as_secs(),
+            compact_interval_secs = compact_interval.as_secs(),
+            "firehose_live processor started (batch drain)"
+        );
         let mut processed_count = 0u64;
         let mut last_processed_count = 0u64;
         let mut last_log = std::time::Instant::now();
@@ -370,7 +480,23 @@ impl IndexerManager {
 
         loop {
             if SHUTDOWN.load(Ordering::Relaxed) {
-                tracing::info!("shutdown requested for firehose_live processor");
+                // The prefetch already removed the next batch from Fjall. It is
+                // fully resolved here: `prefetched = prefetch.await` at the end
+                // of the previous iteration is the only writer, so no dequeue
+                // is still in flight. Put the jobs back or they are lost on
+                // restart. Re-enqueuing assigns fresh seq keys, so these jobs
+                // move behind anything the ingester appended meanwhile; that
+                // reordering is accepted over the alternative of a
+                // peek-then-delete dequeue.
+                let requeued = Self::requeue_live_jobs(
+                    &self.storage,
+                    &prefetched.take().unwrap_or_default(),
+                    "shutdown",
+                );
+                tracing::info!(
+                    requeued,
+                    "shutdown requested for firehose_live processor, prefetched batch returned to queue"
+                );
                 break;
             }
 
@@ -384,6 +510,17 @@ impl IndexerManager {
             };
 
             if batch.is_empty() {
+                // The queue is drained: a good moment to reclaim dequeue
+                // tombstones. Runs on a blocking thread and is not awaited, so
+                // neither indexing nor shutdown waits on it; Storage skips it
+                // while another compaction runs or shutdown is set.
+                if last_compaction.elapsed() >= compact_interval {
+                    last_compaction = std::time::Instant::now();
+                    let storage = Arc::clone(&self.storage);
+                    drop(tokio::task::spawn_blocking(move || {
+                        storage.compact_live_partitions(false)
+                    }));
+                }
                 self.storage
                     .wait_for_live_enqueue(Duration::from_millis(50))
                     .await;
@@ -392,10 +529,34 @@ impl IndexerManager {
 
             let prefetch = dequeue(Arc::clone(&self.storage));
             let bulk_mode = !*crate::config::LIVE_AGGREGATES;
-            let shard_batches = Self::shard_live_jobs(batch, *FIREHOSE_LIVE_SHARDS);
-            let results =
-                Self::process_live_shards(&self.pool_live, &shard_batches, bulk_mode).await;
+            let skip_boilerplate = *crate::config::RECORD_SKIP_BOILERPLATE;
+            let shard_batches: LiveShards =
+                Arc::new(Self::shard_live_jobs(batch, *FIREHOSE_LIVE_SHARDS));
+            let pool = self.pool_live.clone();
+            let outcome = Self::run_live_batch(
+                &self.storage,
+                &shard_batches,
+                shutdown_grace,
+                &SHUTDOWN,
+                move |idx, shards: LiveShards| {
+                    let pool = pool.clone();
+                    async move {
+                        Self::process_jobs_batch(&pool, &shards[idx], bulk_mode, skip_boilerplate)
+                            .await
+                            .0
+                    }
+                },
+            )
+            .await;
+            // Always collect the prefetch first so the shutdown check above can
+            // return it to the queue; it resolves quickly since the dequeue is
+            // already running on its blocking thread.
             prefetched = prefetch.await.ok().and_then(Result::ok);
+            let Some(results) = outcome else {
+                // The batch was aborted and requeued; the loop top sees the
+                // shutdown flag next and returns the prefetched batch too.
+                continue;
+            };
             let jobs_by_key: std::collections::HashMap<&[u8], &IndexJob> = shard_batches
                 .iter()
                 .flatten()
@@ -413,8 +574,13 @@ impl IndexerManager {
                         tracing::error!("dropping unprocessable firehose_live job: {msg}");
                     } else if let Some(job) = jobs_by_key.get(key.as_slice()) {
                         tracing::warn!("requeueing failed firehose_live job {}: {msg}", job.uri);
-                        if let Err(e2) = self.storage.enqueue_firehose_live(job) {
-                            tracing::error!("failed to requeue firehose_live job: {e2}");
+                        match self.storage.enqueue_firehose_live(job) {
+                            Ok(()) => crate::metrics::INDEXER_LIVE_JOBS_REQUEUED_TOTAL
+                                .with_label_values(&["failed"])
+                                .inc(),
+                            Err(e2) => {
+                                tracing::error!("failed to requeue firehose_live job: {e2}");
+                            }
                         }
                     }
                 }
@@ -433,6 +599,163 @@ impl IndexerManager {
                 }
                 last_processed_count = processed_count;
                 last_log = std::time::Instant::now();
+            }
+        }
+    }
+
+    /// Return already-dequeued live jobs to the `firehose_live` queue so they
+    /// are indexed on a later pass instead of being dropped. Each job gets a
+    /// new seq key, so the batch lands at the back of the queue. Returns how
+    /// many jobs were re-enqueued; failures are logged and counted as lost.
+    fn requeue_live_jobs(storage: &Storage, jobs: &[(Vec<u8>, IndexJob)], reason: &str) -> usize {
+        let mut requeued = 0usize;
+        for (_key, job) in jobs {
+            match storage.enqueue_firehose_live(job) {
+                Ok(()) => requeued += 1,
+                Err(e) => {
+                    tracing::error!(
+                        reason,
+                        "failed to requeue firehose_live job {}: {e}",
+                        job.uri
+                    );
+                }
+            }
+        }
+        if requeued > 0 {
+            crate::metrics::INDEXER_LIVE_JOBS_REQUEUED_TOTAL
+                .with_label_values(&[reason])
+                .inc_by(requeued as u64);
+        }
+        requeued
+    }
+
+    /// Run one sharded live batch under the shutdown grace budget and settle
+    /// what the shard tasks left behind. Returns the per-job results when every
+    /// shard ran to completion, or `None` when shutdown aborted the batch.
+    ///
+    /// On abort EVERY job of the batch is returned to the queue, including
+    /// jobs whose shard already committed. That is safe: record writes are
+    /// upserts keyed by URI/CID and the aggregate paths are replay-safe (see
+    /// tests `bulk_aggregates_increment_exactly_and_are_replay_safe` and
+    /// `batch_toggle_sequence_keeps_final_like_and_exact_counts`), so
+    /// re-applying a committed job is a no-op. The Postgres connections are
+    /// not touched: aborting the task drops its client back into the pool,
+    /// which rolls back any open transaction.
+    async fn run_live_batch<F, Fut>(
+        storage: &Storage,
+        shard_batches: &LiveShards,
+        grace: Duration,
+        shutdown: &AtomicBool,
+        run_shard: F,
+    ) -> Option<Vec<LiveJobResult>>
+    where
+        F: Fn(usize, LiveShards) -> Fut,
+        Fut: std::future::Future<Output = Vec<LiveJobResult>> + Send + 'static,
+    {
+        match Self::run_live_shards_with_grace(shard_batches, grace, shutdown, run_shard).await {
+            LiveBatchOutcome::Completed {
+                results,
+                lost_shards,
+            } => {
+                for idx in lost_shards {
+                    let requeued =
+                        Self::requeue_live_jobs(storage, &shard_batches[idx], "shard_failed");
+                    tracing::error!(
+                        shard = idx,
+                        requeued,
+                        "firehose_live shard task did not return results; jobs requeued"
+                    );
+                }
+                Some(results)
+            }
+            LiveBatchOutcome::Aborted {
+                shards_aborted,
+                grace_used,
+            } => {
+                let batch_size: usize = shard_batches.iter().map(Vec::len).sum();
+                let requeued: usize = shard_batches
+                    .iter()
+                    .map(|shard| Self::requeue_live_jobs(storage, shard, "shutdown_inflight"))
+                    .sum();
+                tracing::warn!(
+                    batch_size,
+                    shards_aborted,
+                    requeued,
+                    grace_used_ms = u64::try_from(grace_used.as_millis()).unwrap_or(u64::MAX),
+                    "firehose_live: shutdown grace exhausted, aborted in-flight batch and requeued it"
+                );
+                None
+            }
+        }
+    }
+
+    /// Spawn every non-empty shard into a `JoinSet` and collect their results
+    /// while polling `shutdown` every `SHUTDOWN_POLL`. Once shutdown is
+    /// seen the batch gets `grace` more time; if any shard is still running
+    /// after that, all remaining tasks are aborted and awaited. The flag is a
+    /// parameter (production passes the global `SHUTDOWN`) so tests can drive
+    /// it without mutating process-wide state.
+    async fn run_live_shards_with_grace<F, Fut>(
+        shard_batches: &LiveShards,
+        grace: Duration,
+        shutdown: &AtomicBool,
+        run_shard: F,
+    ) -> LiveBatchOutcome
+    where
+        F: Fn(usize, LiveShards) -> Fut,
+        Fut: std::future::Future<Output = Vec<LiveJobResult>> + Send + 'static,
+    {
+        let mut set: tokio::task::JoinSet<(usize, Vec<LiveJobResult>)> =
+            tokio::task::JoinSet::new();
+        let mut pending: Vec<usize> = Vec::new();
+        for (idx, shard) in shard_batches.iter().enumerate() {
+            if shard.is_empty() {
+                continue;
+            }
+            pending.push(idx);
+            let fut = run_shard(idx, Arc::clone(shard_batches));
+            set.spawn(async move { (idx, fut.await) });
+        }
+
+        let mut results: Vec<LiveJobResult> =
+            Vec::with_capacity(shard_batches.iter().map(Vec::len).sum());
+        let mut shutdown_seen: Option<std::time::Instant> = None;
+        loop {
+            if set.is_empty() {
+                return LiveBatchOutcome::Completed {
+                    results,
+                    lost_shards: pending,
+                };
+            }
+            if let Some(seen) = shutdown_seen {
+                if seen.elapsed() >= grace {
+                    let shards_aborted = set.len();
+                    set.abort_all();
+                    while set.join_next().await.is_some() {}
+                    return LiveBatchOutcome::Aborted {
+                        shards_aborted,
+                        grace_used: seen.elapsed(),
+                    };
+                }
+            }
+            let tick = shutdown_seen.map_or(SHUTDOWN_POLL, |seen| {
+                grace.saturating_sub(seen.elapsed()).min(SHUTDOWN_POLL)
+            });
+            tokio::select! {
+                joined = set.join_next() => match joined {
+                    Some(Ok((idx, shard_results))) => {
+                        pending.retain(|p| *p != idx);
+                        results.extend(shard_results);
+                    }
+                    Some(Err(e)) => {
+                        tracing::error!("firehose_live shard task failed: {e}");
+                    }
+                    None => {}
+                },
+                () = tokio::time::sleep(tick) => {}
+            }
+            if shutdown_seen.is_none() && shutdown.load(Ordering::Relaxed) {
+                shutdown_seen = Some(std::time::Instant::now());
             }
         }
     }
@@ -460,29 +783,37 @@ impl IndexerManager {
         out
     }
 
-    /// Run `process_jobs_batch` for every non-empty shard concurrently and
-    /// merge the per-job results. Awaiting all shards before the next dequeue
-    /// keeps per-repo ordering intact across batches.
+    /// Test helper: run every non-empty shard through the same `JoinSet`
+    /// runner the live loop uses, with an unbounded grace budget so the batch
+    /// always runs to completion, and merge the per-job results.
+    #[cfg(test)]
     async fn process_live_shards(
         pool: &Pool,
         shard_batches: &[Vec<(Vec<u8>, IndexJob)>],
         bulk_mode: bool,
-    ) -> Vec<(Vec<u8>, Result<(), WintermuteError>)> {
+    ) -> Vec<LiveJobResult> {
         let skip_boilerplate = *crate::config::RECORD_SKIP_BOILERPLATE;
-        futures::future::join_all(shard_batches.iter().filter(|shard| !shard.is_empty()).map(
-            |shard| {
-                Box::pin(Self::process_jobs_batch(
-                    pool,
-                    shard,
-                    bulk_mode,
-                    skip_boilerplate,
-                ))
+        let shards: LiveShards = Arc::new(shard_batches.to_vec());
+        let pool = pool.clone();
+        match Self::run_live_shards_with_grace(
+            &shards,
+            Duration::MAX,
+            &SHUTDOWN,
+            move |idx, shards| {
+                let pool = pool.clone();
+                async move {
+                    Self::process_jobs_batch(&pool, &shards[idx], bulk_mode, skip_boilerplate)
+                        .await
+                        .0
+                }
             },
-        ))
+        )
         .await
-        .into_iter()
-        .flat_map(|(results, _batch_failed)| results)
-        .collect()
+        {
+            LiveBatchOutcome::Completed { results, .. } => results,
+            // Unreachable with `Duration::MAX`: the grace never elapses.
+            LiveBatchOutcome::Aborted { .. } => Vec::new(),
+        }
     }
 
     async fn process_firehose_backfill_loop(&self) {
