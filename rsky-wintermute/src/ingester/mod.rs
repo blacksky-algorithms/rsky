@@ -122,6 +122,10 @@ impl IngesterManager {
             }
         });
 
+        // Do not let a stuck blocking task hold the process past shutdown;
+        // leak it instead, the process is exiting.
+        rt.shutdown_timeout(std::time::Duration::from_secs(5));
+
         Ok(())
     }
 

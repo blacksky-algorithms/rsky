@@ -8,8 +8,9 @@ use crate::config::{
     IDENTITY_RESOLVER_TIMEOUT, INLINE_CONCURRENCY, WORKERS_INDEXER,
 };
 use crate::config::{
-    FIREHOSE_LIVE_DRAIN_BATCH, FIREHOSE_LIVE_SHARDS, FIREHOSE_LIVE_SHUTDOWN_GRACE_SECS,
-    INDEXER_BATCH_SIZE, INDEXER_BATCH_WORKERS, LIVE_LIKE_SERIALIZE,
+    FIREHOSE_LIVE_COMPACT_SECS, FIREHOSE_LIVE_DRAIN_BATCH, FIREHOSE_LIVE_SHARDS,
+    FIREHOSE_LIVE_SHUTDOWN_GRACE_SECS, INDEXER_BATCH_SIZE, INDEXER_BATCH_WORKERS,
+    LIVE_LIKE_SERIALIZE,
 };
 use crate::storage::Storage;
 #[cfg(test)]
@@ -210,6 +211,12 @@ impl IndexerManager {
             let _results =
                 tokio::join!(live_handle, backfill_handle, labels_handle, handles_handle);
         });
+
+        // Dropping the runtime would block until every spawn_blocking thread
+        // returns; a dequeue stuck walking Fjall tombstones would then hold
+        // the process past shutdown. Give them a moment, then leak them: the
+        // process is exiting.
+        rt.shutdown_timeout(Duration::from_secs(5));
 
         Ok(())
     }
@@ -435,10 +442,13 @@ impl IndexerManager {
     async fn process_firehose_live_loop(&self) {
         let batch_size = *FIREHOSE_LIVE_DRAIN_BATCH;
         let shutdown_grace = Duration::from_secs(*FIREHOSE_LIVE_SHUTDOWN_GRACE_SECS);
+        let compact_interval = Duration::from_secs(*FIREHOSE_LIVE_COMPACT_SECS);
+        let mut last_compaction = std::time::Instant::now();
 
         tracing::info!(
             batch_size,
             shutdown_grace_secs = shutdown_grace.as_secs(),
+            compact_interval_secs = compact_interval.as_secs(),
             "firehose_live processor started (batch drain)"
         );
         let mut processed_count = 0u64;
@@ -500,6 +510,17 @@ impl IndexerManager {
             };
 
             if batch.is_empty() {
+                // The queue is drained: a good moment to reclaim dequeue
+                // tombstones. Runs on a blocking thread and is not awaited, so
+                // neither indexing nor shutdown waits on it; Storage skips it
+                // while another compaction runs or shutdown is set.
+                if last_compaction.elapsed() >= compact_interval {
+                    last_compaction = std::time::Instant::now();
+                    let storage = Arc::clone(&self.storage);
+                    drop(tokio::task::spawn_blocking(move || {
+                        storage.compact_live_partitions(false)
+                    }));
+                }
                 self.storage
                     .wait_for_live_enqueue(Duration::from_millis(50))
                     .await;
