@@ -34,6 +34,9 @@ COPY rsky-identity/src rsky-identity/src
 COPY rsky-lexicon/src rsky-lexicon/src
 COPY rsky-oauth/src rsky-oauth/src
 COPY rsky-repo/src rsky-repo/src
+# rsky-repo declares a [[bench]] target; cargo refuses to parse the manifest
+# unless the bench source is present, even though this build never builds it.
+COPY rsky-repo/benches rsky-repo/benches
 COPY rsky-syntax/src rsky-syntax/src
 
 # Stub out binary workspace members so cargo can resolve the workspace
