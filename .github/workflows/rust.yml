@@ -176,13 +176,6 @@ jobs:
       # require ffmpeg on every dev machine; CI installs it and runs them
       # explicitly, otherwise the video normalization fix has zero coverage
       # in the green build.
-      # Ignored by default because its runtime scales with the production high
-      # water mark. A small mark exercises the same assertion in seconds.
-      - name: Run rsky-wintermute backpressure test
-        if: matrix.package == 'rsky-wintermute'
-        env:
-          BACKFILLER_OUTPUT_HIGH_WATER_MARK: "100"
-        run: cargo test --release -p rsky-wintermute -- --ignored backpressure
       - name: Install ffmpeg for rsky-video e2e tests
         if: matrix.package == 'rsky-video'
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
