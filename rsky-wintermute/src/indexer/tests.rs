@@ -327,6 +327,95 @@ mod indexer_tests {
         assert_eq!(requeued_total("shard_failed") - before, victim_len as u64);
     }
 
+    /// Handle resolution mid-batch: flipping the flag returns promptly even
+    /// though every resolution future is stalled, and reports the abandoned
+    /// count (in flight plus never started).
+    #[tokio::test]
+    async fn test_drain_handle_resolutions_abandons_on_shutdown() {
+        let shutdown = Arc::new(flag(false));
+        let dids: Vec<String> = (0..20).map(|i| format!("did:plc:stalled{i}")).collect();
+        let total = dids.len();
+        let flipper = {
+            let shutdown = Arc::clone(&shutdown);
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+            })
+        };
+
+        let started = std::time::Instant::now();
+        let drain = IndexerManager::drain_handle_resolutions(
+            dids,
+            4,
+            |_did| async {
+                // A resolver that never answers (DNS/HTTP hang).
+                futures::future::pending::<()>().await;
+                Some(true)
+            },
+            &shutdown,
+        )
+        .await;
+        let elapsed = started.elapsed();
+        flipper.await.unwrap();
+
+        assert_eq!(drain.resolved, 0);
+        assert_eq!(drain.abandoned, total, "4 in flight + 16 never started");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "must return within one poll of the flag flipping: {elapsed:?}"
+        );
+    }
+
+    /// Without shutdown the drain runs every DID to completion and counts
+    /// only the resolutions that reported a change.
+    #[tokio::test]
+    async fn test_drain_handle_resolutions_completes_without_shutdown() {
+        let shutdown = flag(false);
+        let dids: Vec<String> = (0..10).map(|i| format!("did:plc:ok{i}")).collect();
+
+        let drain = IndexerManager::drain_handle_resolutions(
+            dids,
+            3,
+            |did| async move {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                // Even suffixes "changed", odd ones did not, one failed.
+                let n: usize = did.trim_start_matches("did:plc:ok").parse().unwrap();
+                if n == 9 { None } else { Some(n % 2 == 0) }
+            },
+            &shutdown,
+        )
+        .await;
+
+        assert_eq!(drain.resolved, 5);
+        assert_eq!(drain.abandoned, 0);
+    }
+
+    /// The idle waits between handle batches return as soon as the flag flips.
+    #[tokio::test]
+    async fn test_sleep_or_shutdown_returns_early_on_shutdown() {
+        let shutdown = Arc::new(flag(false));
+        let flipper = {
+            let shutdown = Arc::clone(&shutdown);
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+            })
+        };
+        let started = std::time::Instant::now();
+        let interrupted =
+            IndexerManager::sleep_or_shutdown(std::time::Duration::from_secs(10), &shutdown).await;
+        flipper.await.unwrap();
+        assert!(interrupted);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+
+        let quiet = flag(false);
+        let started = std::time::Instant::now();
+        let interrupted =
+            IndexerManager::sleep_or_shutdown(std::time::Duration::from_millis(150), &quiet).await;
+        assert!(!interrupted);
+        assert!(started.elapsed() >= std::time::Duration::from_millis(150));
+    }
+
     #[tokio::test]
     async fn test_index_job_processing() {
         let (storage, _dir) = setup_test_storage();
