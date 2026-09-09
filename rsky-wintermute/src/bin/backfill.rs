@@ -27,7 +27,9 @@ use rsky_wintermute::backfiller::runner::Runner;
 use rsky_wintermute::backfiller::sink::{NullSink, PgSink, RecordSink};
 use rsky_wintermute::backfiller::source::RepoSource;
 use rsky_wintermute::backfiller::state::RepoStateStore;
-use rsky_wintermute::backfiller::{BackfillConfig, BackfillMode, SinkKind};
+use rsky_wintermute::backfiller::{
+    BackfillConfig, BackfillMode, SinkKind, finish_sink, run_and_finish,
+};
 
 // Same allocator as the daemon. glibc malloc kept ~3.5 GB of freed whale-repo
 // allocations resident across the runtime's threads; mimalloc returns them,
@@ -245,10 +247,12 @@ async fn main() -> Result<()> {
                 r.recover_dry_runs().map_err(|e| eyre!("{e}"))?;
                 r.progress.enumeration_done.store(true, Ordering::Relaxed);
                 let result = r.drain(true).await;
-                drop(r);
-                if let Some(sink) = Arc::into_inner(sink) {
-                    sink.finish().await;
-                }
+                finish_sink(
+                    sink.as_ref(),
+                    r.config().shutdown,
+                    r.shutdown_grace_remaining(),
+                )
+                .await;
                 result.map_err(|e| eyre!("{e}"))?;
                 status(&state)
             }
@@ -261,11 +265,9 @@ async fn main() -> Result<()> {
             }
             SinkKind::Postgres => {
                 let (r, sink) = runner_pg(&args, &cfg, state.clone())?;
-                let result = r.run().await;
-                if let Some(sink) = Arc::into_inner(sink) {
-                    sink.finish().await;
-                }
-                result.map_err(|e| eyre!("{e}"))?;
+                run_and_finish(&r, sink.as_ref())
+                    .await
+                    .map_err(|e| eyre!("{e}"))?;
                 status(&state)
             }
         },

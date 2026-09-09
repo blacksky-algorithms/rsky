@@ -12,8 +12,8 @@
 //! gate: fetch workers ask [`RecordSink::has_capacity`] before claiming work,
 //! so nothing is pulled from a PDS or hubble that Postgres is not ready to take.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
 use deadpool_postgres::Pool;
@@ -46,6 +46,27 @@ pub trait RecordSink: Send + Sync + 'static {
         did: &str,
         body: RepoBody,
     ) -> impl Future<Output = Result<Receipt, WintermuteError>> + Send;
+
+    /// Stop accepting repos and wait for everything already accepted to
+    /// commit. Unbounded by design -- a normal drain must not lose records --
+    /// so a shutdown wraps it in the grace budget (see
+    /// [`super::finish_sink`]).
+    fn finish(&self) -> impl Future<Output = ()> + Send {
+        async {}
+    }
+
+    /// `(repos, records)` accepted but not yet committed.
+    fn uncommitted(&self) -> (usize, usize) {
+        (0, 0)
+    }
+
+    /// Give up on whatever is uncommitted: the writers are stopped and every
+    /// pending receipt resolves as dropped. Called once the grace budget has
+    /// run out; the repos concerned stay claimed and are re-fetched on
+    /// restart.
+    fn abandon(&self) -> impl Future<Output = ()> + Send {
+        async {}
+    }
 }
 
 /// A repo waiting for a writer.
@@ -99,10 +120,13 @@ pub struct SinkCounters {
     pub batches: AtomicU64,
     pub batches_failed: AtomicU64,
     pub records_in_flight: AtomicUsize,
+    pub repos_in_flight: AtomicUsize,
 }
 
 pub struct PgSink {
-    tx: mpsc::Sender<Pending>,
+    /// `None` once [`PgSink::finish`] has closed the intake: the writers exit
+    /// when the last sender is gone.
+    tx: std::sync::Mutex<Option<mpsc::Sender<Pending>>>,
     counters: Arc<SinkCounters>,
     max_records_in_flight: usize,
     writers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -127,11 +151,19 @@ impl PgSink {
             }));
         }
         Self {
-            tx,
+            tx: std::sync::Mutex::new(Some(tx)),
             counters,
             max_records_in_flight: cfg.max_records_in_flight.max(1),
             writers: Mutex::new(writers),
         }
+    }
+
+    /// A handle on the intake, or `None` once it is closed.
+    fn sender(&self) -> Option<mpsc::Sender<Pending>> {
+        self.tx
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     #[must_use]
@@ -142,29 +174,14 @@ impl PgSink {
     /// Repos waiting for a writer.
     #[must_use]
     pub fn queued(&self) -> usize {
-        self.tx.max_capacity() - self.tx.capacity()
+        self.sender()
+            .map_or(0, |tx| tx.max_capacity() - tx.capacity())
     }
 
     /// Records accepted but not yet committed.
     #[must_use]
     pub fn records_in_flight(&self) -> usize {
         self.counters.records_in_flight.load(Ordering::Relaxed)
-    }
-
-    /// Consume the sink: close the channel and wait for every writer to flush
-    /// what it holds. Writers exit once the last sender is gone.
-    pub async fn finish(self) {
-        let Self {
-            tx,
-            counters: _,
-            max_records_in_flight: _,
-            writers,
-        } = self;
-        drop(tx);
-        let handles: Vec<_> = writers.lock().await.drain(..).collect();
-        for h in handles {
-            drop(h.await);
-        }
     }
 }
 
@@ -175,7 +192,8 @@ impl RecordSink for PgSink {
             .set(i64::try_from(self.queued()).unwrap_or(i64::MAX));
         crate::metrics::BACKFILL_SINK_RECORDS_IN_FLIGHT
             .set(i64::try_from(in_flight).unwrap_or(i64::MAX));
-        self.tx.capacity() > 0 && in_flight < self.max_records_in_flight
+        self.sender()
+            .is_some_and(|tx| tx.capacity() > 0 && in_flight < self.max_records_in_flight)
     }
 
     async fn ingest(&self, did: &str, body: RepoBody) -> Result<Receipt, WintermuteError> {
@@ -193,17 +211,31 @@ impl RecordSink for PgSink {
             // Nothing to write; the repo is done as soon as it parsed.
             drop(done_tx.send(Ok(())));
         } else {
+            let closed = || WintermuteError::Other("backfill sink closed".into());
+            let tx = self.sender().ok_or_else(closed)?;
             self.counters
                 .records_in_flight
                 .fetch_add(records, Ordering::Relaxed);
-            self.tx
+            self.counters
+                .repos_in_flight
+                .fetch_add(1, Ordering::Relaxed);
+            if let Err(rejected) = tx
                 .send(Pending {
                     did,
                     jobs,
                     done: done_tx,
                 })
                 .await
-                .map_err(|_| WintermuteError::Other("backfill sink closed".into()))?;
+            {
+                // Never accepted: keep the in-flight counters honest.
+                self.counters
+                    .records_in_flight
+                    .fetch_sub(rejected.0.jobs.len(), Ordering::Relaxed);
+                self.counters
+                    .repos_in_flight
+                    .fetch_sub(1, Ordering::Relaxed);
+                return Err(closed());
+            }
         }
         Ok(Receipt {
             records,
@@ -212,7 +244,76 @@ impl RecordSink for PgSink {
             committed: done_rx,
         })
     }
+
+    /// Close the intake and wait for every writer to flush what it holds.
+    /// Writers exit once the last sender is gone; an `ingest` still holding a
+    /// clone finishes its send first, then sees the sink closed.
+    async fn finish(&self) {
+        drop(
+            self.tx
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(),
+        );
+        let mut writers = self.writers.lock().await;
+        for handle in writers.iter_mut() {
+            drop(handle.await);
+        }
+        writers.clear();
+    }
+
+    fn uncommitted(&self) -> (usize, usize) {
+        (
+            self.counters.repos_in_flight.load(Ordering::Relaxed),
+            self.counters.records_in_flight.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Abort the writers. Every `Pending` they hold is dropped with them, so
+    /// each repo's `committed` receipt resolves as dropped and the runner's
+    /// completion task returns the row to pending instead of completing it; a
+    /// row whose completion task is gone too stays claimed and is recovered
+    /// on restart. Nothing completes twice: a receipt resolves exactly once,
+    /// whichever way.
+    async fn abandon(&self) {
+        drop(
+            self.tx
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(),
+        );
+        // `finish` holds this lock while it waits on a writer; the caller
+        // drops it first. Bounded anyway, so a stop can never park here.
+        let Ok(mut writers) = tokio::time::timeout(ABANDON_STEP, self.writers.lock()).await else {
+            tracing::warn!("backfill sink: writers still locked by the drain; not waiting");
+            return;
+        };
+        let handles: Vec<_> = writers.drain(..).collect();
+        drop(writers);
+        for handle in &handles {
+            handle.abort();
+        }
+        let total = handles.len();
+        let mut unsettled = 0usize;
+        for handle in handles {
+            if tokio::time::timeout(ABANDON_STEP, handle).await.is_err() {
+                unsettled += 1;
+            }
+        }
+        if unsettled > 0 {
+            tracing::warn!(
+                unsettled,
+                total,
+                "backfill sink: writers did not settle after abort (blocked in a call that \
+                 cannot be cancelled); leaving them to the runtime shutdown"
+            );
+        }
+    }
 }
+
+/// How long `abandon` waits on any one step: the writers lock, then each
+/// aborted writer.
+const ABANDON_STEP: Duration = Duration::from_secs(1);
 
 /// Pull repos off the shared receiver until a batch is full (or the queue goes
 /// quiet), write it, and settle every repo in it.
@@ -285,6 +386,9 @@ async fn write_batch(
             .fetch_add(failures as u64, Ordering::Relaxed);
     }
     counters.batches.fetch_add(1, Ordering::Relaxed);
+    counters
+        .repos_in_flight
+        .fetch_sub(batch.len(), Ordering::Relaxed);
     let remaining = counters
         .records_in_flight
         .fetch_sub(n_jobs, Ordering::Relaxed)
