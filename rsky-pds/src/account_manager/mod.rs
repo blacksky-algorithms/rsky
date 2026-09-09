@@ -175,16 +175,25 @@ impl AccountManager {
         repo::update_root(did, cid, rev, &self.db).await
     }
 
-    pub async fn delete_account(&self, did: &str) -> Result<()> {
+    /// Deletes the account and revokes its OAuth sessions. Returns the
+    /// number of OAuth sessions (`token` table rows) revoked, for
+    /// [`crate::metrics::record_oauth_sessions_revoked`].
+    pub async fn delete_account(&self, did: &str) -> Result<u64> {
         account::delete_account(did, &self.db).await
     }
 
-    pub async fn takedown_account(&self, did: &str, takedown: StatusAttr) -> Result<()> {
-        (_, _) = try_join!(
+    /// Applies (or reverses) a takedown and revokes every refresh token and
+    /// OAuth session for the account, regardless of direction -- reversing a
+    /// takedown should still force a fresh login rather than silently
+    /// resurrecting old sessions. Returns the number of OAuth sessions
+    /// revoked, for [`crate::metrics::record_oauth_sessions_revoked`].
+    pub async fn takedown_account(&self, did: &str, takedown: StatusAttr) -> Result<u64> {
+        let (_, _, oauth_revoked) = try_join!(
             account::update_account_takedown_status(did, takedown, &self.db),
-            auth::revoke_refresh_tokens_by_did(did, &self.db)
+            auth::revoke_refresh_tokens_by_did(did, &self.db),
+            auth::revoke_oauth_tokens_by_did(did, &self.db)
         )?;
-        Ok(())
+        Ok(oauth_revoked)
     }
 
     // @NOTE should always be paired with a sequenceHandle().

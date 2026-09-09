@@ -1,6 +1,7 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{OAuthForbidden, Scoped};
 use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::mailer;
 use crate::mailer::TokenParam;
@@ -10,10 +11,10 @@ use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::RequestEmailUpdateOutput;
 
 async fn inner_request_email_update(
-    auth: AccessStandardIncludeChecks,
+    auth: Scoped<OAuthForbidden, AccessStandardIncludeChecks>,
     account_manager: AccountManager,
 ) -> Result<RequestEmailUpdateOutput> {
-    let did = auth.access.credentials.unwrap().did.unwrap();
+    let did = auth.did().await?;
     let account = account_manager
         .get_account(
             &did,
@@ -45,7 +46,7 @@ async fn inner_request_email_update(
 #[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.server.requestEmailUpdate")]
 pub async fn request_email_update(
-    auth: AccessStandardIncludeChecks,
+    auth: Scoped<OAuthForbidden, AccessStandardIncludeChecks>,
     account_manager: AccountManager,
 ) -> Result<Json<RequestEmailUpdateOutput>, ApiError> {
     match inner_request_email_update(auth, account_manager).await {

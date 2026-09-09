@@ -3,7 +3,9 @@ use crate::account_manager::AccountManager;
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{RepoTarget, RepoWrite, Scoped};
 use crate::auth_verifier::AccessStandardIncludeChecks;
+use crate::metrics::record_repo_write;
 use crate::repo::prepare::{prepare_create, prepare_delete, PrepareCreateOpts, PrepareDeleteOpts};
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
@@ -17,7 +19,7 @@ use std::str::FromStr;
 
 async fn inner_create_record(
     body: Json<CreateRecordInput>,
-    auth: AccessStandardIncludeChecks,
+    requester: String,
     sequencer: &State<SharedSequencer>,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
@@ -45,7 +47,7 @@ async fn inner_create_record(
             bail!("Account is deactivated")
         }
         let did = account.did;
-        if did != auth.access.credentials.unwrap().did.unwrap() {
+        if did != requester {
             bail!("AuthRequiredError")
         }
         let swap_commit_cid = match swap_commit {
@@ -100,6 +102,7 @@ async fn inner_create_record(
         account_manager
             .update_repo_root(did, commit.commit_data.cid, commit.commit_data.rev)
             .await?;
+        record_repo_write("create");
 
         Ok(CreateRecordOutput {
             uri: write.uri.clone(),
@@ -118,21 +121,22 @@ async fn inner_create_record(
 )]
 pub async fn create_record(
     body: Json<CreateRecordInput>,
-    auth: AccessStandardIncludeChecks,
+    auth: Scoped<RepoWrite, AccessStandardIncludeChecks>,
     sequencer: &State<SharedSequencer>,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<Json<CreateRecordOutput>, ApiError> {
     tracing::debug!("@LOG: debug create_record {body:#?}");
-    crate::apis::assert_repo_scope(
-        &auth.access.credentials,
-        &body.collection,
-        crate::oauth_scope::RepoAction::Create,
-    )?;
+    let requester = auth
+        .did_for(&vec![RepoTarget::new(
+            body.collection.clone(),
+            crate::oauth_scope::RepoAction::Create,
+        )])
+        .await?;
     match inner_create_record(
         body,
-        auth,
+        requester,
         sequencer,
         blobstore_factory,
         actor_store,

@@ -1,6 +1,7 @@
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{AccountRepo, Scoped};
 use crate::auth_verifier::AccessFullImport;
 use crate::repo::prepare::{
     prepare_create, prepare_delete, prepare_update, PrepareCreateOpts, PrepareDeleteOpts,
@@ -73,12 +74,12 @@ impl<'r> FromData<'r> for ImportRepoInput {
 #[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.repo.importRepo", data = "<import_repo_input>")]
 pub async fn import_repo(
-    auth: AccessFullImport,
+    auth: Scoped<AccountRepo, AccessFullImport>,
     import_repo_input: ImportRepoInput,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
 ) -> Result<(), ApiError> {
-    let requester = auth.access.credentials.unwrap().did.unwrap();
+    let requester = auth.did().await?;
     let mut actor_store = actor_store
         .transact(
             requester.clone(),

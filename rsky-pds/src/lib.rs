@@ -22,6 +22,7 @@ pub mod handle;
 pub mod image;
 pub mod lexicon;
 pub mod mailer;
+pub mod metrics;
 pub mod models;
 pub mod oauth;
 pub mod oauth_scope;
@@ -34,6 +35,7 @@ pub mod rotate_keys;
 pub mod sequencer;
 pub mod space_auth;
 pub mod space_scope;
+pub mod telemetry;
 pub mod well_known;
 pub mod xrpc_server;
 use crate::account_manager::AccountManager;
@@ -43,6 +45,7 @@ use crate::background::BackgroundQueue;
 use crate::config::{env_to_cfg, ServiceDbConfig};
 use crate::crawlers::Crawlers;
 use crate::did_cache::DidSqliteCache;
+use crate::metrics::{install_recorder, metrics_route, XrpcMetrics};
 use crate::models::{ErrorCode, ErrorMessageResponse, ServerVersion};
 use rocket::{catch, catchers, get, options, routes, Build, Rocket};
 use std::sync::Arc;
@@ -311,6 +314,8 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
 
     let shield = Shield::default().enable(NoSniff::Enable);
 
+    let metrics_handle = install_recorder();
+
     rocket::custom(figment)
         .mount(
             "/",
@@ -319,6 +324,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 robots,
                 health,
                 health_live,
+                metrics_route,
                 com::atproto::admin::delete_account::delete_account,
                 com::atproto::admin::disable_account_invites::disable_account_invites,
                 com::atproto::admin::disable_invite_codes::disable_invite_codes,
@@ -449,6 +455,8 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         .attach(CORS)
         .attach(oauth::OAuthHeaders)
         .attach(shield)
+        .attach(XrpcMetrics)
+        .manage(metrics_handle)
         .manage(sequencer)
         .manage(blobstore_factory)
         .manage(id_resolver)

@@ -41,7 +41,7 @@ pub fn verify_commit_sig(commit: Commit, did_key: &String) -> Result<bool> {
     };
     let encoded = serde_ipld_dagcbor::to_vec(&rest)?;
     let hash = Sha256::digest(&*encoded);
-    rsky_crypto::verify::verify_signature(did_key, hash.as_ref(), sig.as_slice(), None)
+    rsky_crypto::verify::verify_signature_digest(did_key, hash.as_ref(), sig.as_slice(), None)
 }
 
 pub fn format_data_key<T: FromStr + Display>(collection: T, rkey: T) -> String {
@@ -401,5 +401,94 @@ mod tests {
             }
             other => panic!("avatar should parse as Lex::Blob, got {other:?}"),
         }
+    }
+
+    fn unsigned_commit() -> UnsignedCommit {
+        UnsignedCommit {
+            did: "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            rev: "3lbqxyzabcd2z".to_string(),
+            data: "bafkreiey6e2xp4ncufvsyfmubucbsz5xujbc7lguospuziohtgfdik3pr4"
+                .parse()
+                .unwrap(),
+            prev: None,
+            version: 3,
+        }
+    }
+
+    fn commit_digest(unsigned: &UnsignedCommit) -> Vec<u8> {
+        Sha256::digest(&*serde_ipld_dagcbor::to_vec(unsigned).unwrap()).to_vec()
+    }
+
+    fn to_commit(unsigned: UnsignedCommit, sig: Vec<u8>) -> Commit {
+        Commit {
+            did: unsigned.did,
+            rev: unsigned.rev,
+            data: unsigned.data,
+            prev: unsigned.prev,
+            version: unsigned.version,
+            sig,
+        }
+    }
+
+    /// A P-256 signing key signs the commit digest; verification must hash the
+    /// commit exactly once, or every P-256-keyed repo fails to verify.
+    #[test]
+    fn verifies_p256_signed_commit() {
+        use p256::ecdsa::signature::hazmat::PrehashSigner;
+        use p256::ecdsa::{Signature, SigningKey};
+
+        let signing_key = SigningKey::from_slice(&[0x2au8; 32]).unwrap();
+        let did_key = rsky_crypto::did::format_did_key(
+            rsky_crypto::constants::P256_JWT_ALG.to_string(),
+            signing_key
+                .verifying_key()
+                .to_encoded_point(true)
+                .as_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+
+        let unsigned = unsigned_commit();
+        let digest = commit_digest(&unsigned);
+        let sig: Signature = signing_key.sign_prehash(&digest).unwrap();
+        let sig = sig.normalize_s().unwrap_or(sig);
+        let commit = to_commit(unsigned, sig.to_vec());
+
+        assert!(verify_commit_sig(commit.clone(), &did_key).unwrap());
+
+        let mut tampered = commit;
+        tampered.rev = "3lbqxyzabce2z".to_string();
+        assert!(!verify_commit_sig(tampered, &did_key).unwrap());
+    }
+
+    #[test]
+    fn verifies_secp256k1_signed_commit() {
+        use rsky_crypto::utils::encode_did_key;
+        use secp256k1::{PublicKey, Secp256k1, SecretKey};
+
+        let secret = SecretKey::from_slice(&[0x2au8; 32]).unwrap();
+        let did_key = encode_did_key(&PublicKey::from_secret_key(&Secp256k1::new(), &secret));
+
+        let unsigned = unsigned_commit();
+        let sig = sign_without_indexmap(&unsigned, &secret).unwrap();
+        let commit = to_commit(unsigned, sig.to_vec());
+
+        assert!(verify_commit_sig(commit.clone(), &did_key).unwrap());
+
+        let mut tampered = commit;
+        tampered.rev = "3lbqxyzabce2z".to_string();
+        assert!(!verify_commit_sig(tampered, &did_key).unwrap());
+    }
+
+    #[test]
+    fn sign_commit_round_trips() {
+        use rsky_crypto::utils::encode_did_key;
+        use secp256k1::{Keypair, Secp256k1};
+
+        let secp = Secp256k1::new();
+        let keypair = Keypair::from_seckey_slice(&secp, &[0x2au8; 32]).unwrap();
+        let did_key = encode_did_key(&keypair.public_key());
+        let commit = sign_commit(unsigned_commit(), &keypair).unwrap();
+        assert!(verify_commit_sig(commit, &did_key).unwrap());
     }
 }

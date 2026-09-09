@@ -218,15 +218,21 @@ pub async fn register_account(did: String, email: String, password: String, db: 
     }
 }
 
-pub async fn delete_account(did: &str, db: &Db) -> Result<()> {
+/// Deletes the account, including every OAuth session (`token` table row --
+/// unlike `authorized_client`/`account_device`, it carries no `ON DELETE
+/// CASCADE` from `account`, so it needs an explicit delete here). Returns
+/// the number of OAuth sessions revoked, for
+/// [`crate::metrics::record_oauth_sessions_revoked`].
+pub async fn delete_account(did: &str, db: &Db) -> Result<u64> {
     let did = did.to_owned();
     db.tx(move |tx| {
         tx.execute("DELETE FROM repo_root WHERE did = ?1", params![did])?;
         tx.execute("DELETE FROM email_token WHERE did = ?1", params![did])?;
         tx.execute("DELETE FROM refresh_token WHERE did = ?1", params![did])?;
+        let oauth_revoked = tx.execute("DELETE FROM token WHERE did = ?1", params![did])?;
         tx.execute("DELETE FROM account WHERE did = ?1", params![did])?;
         tx.execute("DELETE FROM actor WHERE did = ?1", params![did])?;
-        Ok(())
+        Ok(oauth_revoked as u64)
     })
     .await
 }

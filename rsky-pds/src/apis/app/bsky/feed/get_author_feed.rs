@@ -2,7 +2,7 @@ use crate::account_manager::AccountManager;
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessStandard;
+use crate::auth_verifier::scope::{RpcProxy, Scoped};
 use crate::config::ServerConfig;
 use crate::read_after_write::types::LocalRecords;
 use crate::read_after_write::util::{handle_read_after_write, ReadAfterWriteResponse};
@@ -22,17 +22,14 @@ pub async fn inner_get_author_feed(
     _limit: Option<u8>,
     _cursor: Option<String>,
     _filter: Option<String>,
-    auth: AccessStandard,
+    auth: Scoped<RpcProxy>,
     res: HandlerPipeThrough,
     blobstore_factory: &State<BlobstoreFactory>,
     state_local_viewer: &State<SharedLocalViewer>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<ReadAfterWriteResponse<AuthorFeed>> {
-    let requester: Option<String> = match auth.access.credentials {
-        None => None,
-        Some(credentials) => credentials.did,
-    };
+    let requester: Option<String> = auth.did_opt().await?;
     match requester {
         None => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Some(requester) => {
@@ -61,7 +58,7 @@ pub async fn get_author_feed(
     limit: Option<u8>,
     cursor: Option<String>,
     filter: Option<String>, // Combinations of post/repost types to include in response.
-    auth: AccessStandard,
+    auth: Scoped<RpcProxy>,
     res: HandlerPipeThrough,
     blobstore_factory: &State<BlobstoreFactory>,
     state_local_viewer: &State<SharedLocalViewer>,

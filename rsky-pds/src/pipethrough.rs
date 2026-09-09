@@ -1,6 +1,6 @@
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
-use crate::auth_verifier::{AccessOutput, AccessStandard};
+use crate::auth_verifier::scope::{RpcProxy, Scoped};
 use crate::config::{ServerConfig, ServiceConfig};
 use crate::xrpc_server::types::{HandlerPipeThrough, InvalidRequestError, XRPCError};
 use crate::{context, SharedIdResolver, APP_USER_AGENT};
@@ -53,12 +53,17 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
 
     #[tracing::instrument(skip_all)]
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        match AccessStandard::from_request(req).await {
-            Outcome::Success(output) => {
-                let AccessOutput { credentials, .. } = output.access;
-                let requester: Option<String> = match credentials {
-                    None => None,
-                    Some(credentials) => credentials.did,
+        match Scoped::<RpcProxy>::from_request(req).await {
+            Outcome::Success(auth) => {
+                let requester: Option<String> = match auth.did_opt().await {
+                    Ok(requester) => requester,
+                    Err(api_error) => {
+                        req.local_cache(|| Some(api_error));
+                        return Outcome::Error((
+                            Status::Forbidden,
+                            anyhow::anyhow!("InsufficientScope"),
+                        ));
+                    }
                 };
                 let headers = req.headers().clone().into_iter().fold(
                     BTreeMap::new(),
@@ -105,10 +110,7 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
             }
             Outcome::Error(err) => {
                 req.local_cache(|| Some(ApiError::RuntimeError));
-                Outcome::Error((
-                    Status::BadRequest,
-                    anyhow::Error::new(InvalidRequestError::AuthError(err.1)),
-                ))
+                Outcome::Error((Status::BadRequest, anyhow::Error::new(err.1)))
             }
             _ => panic!("Unexpected outcome during Pipethrough"),
         }
@@ -222,6 +224,34 @@ pub async fn pipethrough_procedure_post(
         .await
         .map_err(|error| pipethrough_error(&error))?;
     Ok(parse_proxy_res(res).await?)
+}
+
+/// Enforce an OAuth session's `rpc:` scope before a call is proxied to
+/// another service, at the seam every pipethrough request passes through
+/// (`bsky_api_get_forwarder` and friends all resolve to
+/// [`HandlerPipeThrough`]). Gating and `transition:generic` handling are
+/// [`crate::apis::scoped_session`]'s.
+pub async fn assert_rpc_scope(
+    granted_scopes: &Option<Vec<String>>,
+    req: &ProxyRequest<'_>,
+) -> Result<(), ApiError> {
+    let Some(scopes) = crate::apis::scoped_session(granted_scopes.as_ref(), true) else {
+        return Ok(());
+    };
+    let lxm = parse_req_nsid(req);
+    // An `rpc:` grant is bound to an audience, so a destination we cannot
+    // resolve is a destination we cannot show the call is scoped for.
+    let aud = match format_url_and_aud(req, None).await {
+        Ok(UrlAndAud { aud, .. }) => aud,
+        Err(error) => return Err(pipethrough_error(&error)),
+    };
+    if scopes.allows_rpc(&lxm, &aud) {
+        Ok(())
+    } else {
+        Err(ApiError::InsufficientScope(format!(
+            "Token scope does not permit calling {lxm} on {aud}"
+        )))
+    }
 }
 
 // Request setup/formatting

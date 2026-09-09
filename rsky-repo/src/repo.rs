@@ -253,11 +253,10 @@ impl Repo {
 
         let mut relevant_blocks = BlockMap::new();
         for op in writes {
-            data.add_blocks_for_path(
-                util::format_data_key(op.collection(), op.rkey()),
-                &mut relevant_blocks,
-            )
-            .await?;
+            let proof = data
+                .get_covering_proof(&util::format_data_key(op.collection(), op.rkey()))
+                .await?;
+            relevant_blocks.add_map(proof)?;
         }
 
         let added_leaves = leaves.get_many(diff.new_leaf_cids.to_list())?;
@@ -885,6 +884,13 @@ mod tests {
         }
 
         for rkey in keys {
+            let data_key = util::format_data_key(collection.to_string(), rkey.clone());
+            let prev_data = repo.data.get_pointer().await?;
+            let deleted_cid = repo
+                .data
+                .get(&data_key)
+                .await?
+                .expect("record to delete is present");
             let commit = repo
                 .format_commit(
                     RecordWriteEnum::Single(RecordWriteOp::Delete(RecordDeleteOp {
@@ -895,6 +901,7 @@ mod tests {
                     &keypair,
                 )
                 .await?;
+            let relevant_blocks = commit.relevant_blocks.clone();
             let car = blocks_to_car_file(Some(&commit.cid), commit.relevant_blocks.clone()).await?;
             let did_key = encode_did_key(&keypair.public_key());
             let proof_res = verify_proofs(
@@ -910,6 +917,15 @@ mod tests {
             .await?;
             assert_eq!(proof_res.unverified.len(), 0);
             repo = repo.apply_commit(commit).await?;
+
+            // The covering proof must let a consumer invert the delete holding no other blocks.
+            let new_data = repo.data.get_pointer().await?;
+            let proof_store = Arc::new(RwLock::new(
+                MemoryBlockstore::new(Some(relevant_blocks)).await?,
+            ));
+            let mut inverted = MST::load(proof_store, new_data, None)?;
+            inverted = inverted.add(&data_key, deleted_cid, None).await?;
+            assert_eq!(inverted.get_pointer().await?, prev_data);
         }
         Ok(())
     }

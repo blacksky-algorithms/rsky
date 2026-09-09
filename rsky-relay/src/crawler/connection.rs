@@ -16,9 +16,15 @@ pub enum ConnectionError {
     #[error("io error: {0}")]
     Io(#[from] io::Error),
     #[error("tungstenite error: {0}")]
-    Tungstenite(#[from] tungstenite::Error),
+    Tungstenite(#[from] Box<tungstenite::Error>),
     #[error("thingbuf error: {0}")]
     Thingbuf(#[from] mpsc::errors::Closed),
+}
+
+impl From<tungstenite::Error> for ConnectionError {
+    fn from(value: tungstenite::Error) -> Self {
+        Self::Tungstenite(Box::new(value))
+    }
 }
 
 pub struct Connection {

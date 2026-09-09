@@ -1,6 +1,7 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{NoScopeRequired, Scoped};
 use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::mailer;
 use crate::mailer::IdentifierAndTokenParams;
@@ -56,7 +57,7 @@ async fn inner_request_password_reset(
 )]
 pub async fn request_password_reset(
     body: Json<RequestPasswordResetInput>,
-    _auth: AccessStandardIncludeChecks,
+    _auth: Scoped<NoScopeRequired, AccessStandardIncludeChecks>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     match inner_request_password_reset(body, account_manager).await {

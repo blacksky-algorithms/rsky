@@ -2,6 +2,7 @@ use crate::actor_store::blob::ListMissingBlobsOpts;
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{NoScopeRequired, Scoped};
 use crate::auth_verifier::AccessFull;
 use anyhow::Result;
 use rocket::serde::json::Json;
@@ -13,11 +14,11 @@ use rsky_lexicon::com::atproto::repo::ListMissingBlobsOutput;
 pub async fn list_missing_blobs(
     limit: Option<u16>,
     cursor: Option<String>,
-    auth: AccessFull,
+    auth: Scoped<NoScopeRequired, AccessFull>,
     actor_store: &State<ActorStore>,
     blobstore_factory: &State<BlobstoreFactory>,
 ) -> Result<Json<ListMissingBlobsOutput>, ApiError> {
-    let did = auth.access.credentials.unwrap().did.unwrap();
+    let did = auth.did().await?;
     let limit: u16 = limit.unwrap_or(500);
 
     let actor_store = actor_store

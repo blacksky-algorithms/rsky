@@ -4,6 +4,7 @@ use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AdminToken;
+use crate::metrics::record_oauth_sessions_revoked;
 use crate::models::models::EmailTokenPurpose;
 use crate::SharedSequencer;
 use rocket::serde::json::Json;
@@ -46,7 +47,8 @@ async fn inner_delete_account(
         actor_store
             .destroy(&did, blobstore_factory.blobstore(did.clone()))
             .await?;
-        account_manager.delete_account(&did).await?;
+        let oauth_revoked = account_manager.delete_account(&did).await?;
+        record_oauth_sessions_revoked(oauth_revoked);
         let mut lock = sequencer.sequencer.write().await;
         let account_seq = lock
             .sequence_account_evt(did.clone(), AccountStatus::Deleted)

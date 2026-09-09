@@ -1,10 +1,10 @@
 use crate::actor_store::ActorStore;
 use crate::apis::app::bsky::notification::register_push::get_endpoint;
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessStandard;
+use crate::auth_verifier::scope::{RpcCall, RpcTarget, Scoped};
 use crate::config::ServerConfig;
 use crate::{context, SharedIdResolver, APP_USER_AGENT};
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Result};
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::app::bsky::notification::RegisterPushInput;
@@ -12,19 +12,20 @@ use rsky_repo::types::Ids;
 
 pub async fn inner_unregister_push(
     body: Json<RegisterPushInput>,
-    auth: AccessStandard,
+    auth: Scoped<RpcCall>,
     cfg: &State<ServerConfig>,
     app_view_url: String,
     id_resolver: &State<SharedIdResolver>,
     actor_store: &State<ActorStore>,
 ) -> Result<()> {
     let input = body.into_inner();
-    let did: String = auth
-        .access
-        .credentials
-        .and_then(|credentials| credentials.did)
-        .ok_or_else(|| anyhow!("Missing account did on authenticated request"))?;
     let nsid = Ids::AppBskyNotificationUnregisterPush.as_str().to_string();
+    let did: String = auth
+        .did_for(&RpcTarget {
+            lxm: nsid.clone(),
+            aud: input.service_did.clone(),
+        })
+        .await?;
     let auth_headers =
         context::service_auth_headers(actor_store, &did, &input.service_did, &nsid).await?;
 
@@ -64,7 +65,7 @@ pub async fn inner_unregister_push(
 )]
 pub async fn unregister_push(
     body: Json<RegisterPushInput>,
-    auth: AccessStandard,
+    auth: Scoped<RpcCall>,
     cfg: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
     actor_store: &State<ActorStore>,

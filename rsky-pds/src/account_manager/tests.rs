@@ -744,11 +744,16 @@ async fn manages_passwords() {
 
 #[tokio::test]
 async fn password_hash_helpers() {
+    // `gen_salt_and_hash` now always produces a scrypt hash (matching the
+    // reference TS pds's `scrypt.ts`), but `verify` still accepts legacy
+    // Argon2 PHC-string hashes so pre-migration accounts aren't locked out.
+    // See account_manager::helpers::password's own unit tests for
+    // dedicated coverage of the scrypt encoding, cross-implementation
+    // interop, and the Argon2 fallback path.
     let hash = password::gen_salt_and_hash("secret".to_owned()).unwrap();
     assert!(password::verify(&"secret".to_owned(), &hash).unwrap());
     assert!(!password::verify(&"other".to_owned(), &hash).unwrap());
-    assert!(password::verify(&"secret".to_owned(), "not-a-phc-hash").is_err());
-    assert!(password::hash_with_salt(&"secret".to_owned(), "!invalid salt!").is_err());
+    assert!(password::verify(&"secret".to_owned(), "not-a-recognized-hash-format").is_err());
 }
 
 #[tokio::test]
@@ -953,6 +958,78 @@ async fn email_token_row_mapping_rejects_unknown_purpose() {
         })
         .await;
     assert!(err.is_err());
+}
+
+/// Inserts a bare-minimum `token` (OAuth session) row for `did`, standing
+/// in for a real `PdsOAuthStore::create_token` call so revocation tests
+/// don't need to spin up a full `SharedOAuthProvider`.
+async fn seed_oauth_token(am: &AccountManager, did: &str, token_id: &str) {
+    let did = did.to_owned();
+    let token_id = token_id.to_owned();
+    am.db
+        .run(move |conn| {
+            conn.execute(
+                "INSERT INTO token (did, \"tokenId\", \"createdAt\", \"updatedAt\", \
+                 \"expiresAt\", \"clientId\", \"clientAuth\", parameters) \
+                 VALUES (?1, ?2, '2023-01-01T00:00:00.000Z', '2023-01-01T00:00:00.000Z', \
+                 '2023-01-01T00:00:00.000Z', 'https://example.com/client', '{}', '{}')",
+                params![did, token_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+async fn oauth_token_count(am: &AccountManager, did: &str) -> i64 {
+    let did = did.to_owned();
+    am.db
+        .run(move |conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM token WHERE did = ?1",
+                params![did],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn takedown_revokes_oauth_sessions() {
+    let (_dir, am) = test_manager().await;
+    create_test_account(&am, "did:plc:dana", "dana.test").await;
+    seed_oauth_token(&am, "did:plc:dana", "token-1").await;
+    seed_oauth_token(&am, "did:plc:dana", "token-2").await;
+    assert_eq!(oauth_token_count(&am, "did:plc:dana").await, 2);
+
+    let revoked = am
+        .takedown_account(
+            "did:plc:dana",
+            StatusAttr {
+                applied: true,
+                r#ref: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(revoked, 2);
+    assert_eq!(oauth_token_count(&am, "did:plc:dana").await, 0);
+}
+
+#[tokio::test]
+async fn delete_account_revokes_oauth_sessions() {
+    let (_dir, am) = test_manager().await;
+    create_test_account(&am, "did:plc:erin", "erin.test").await;
+    seed_oauth_token(&am, "did:plc:erin", "token-1").await;
+    assert_eq!(oauth_token_count(&am, "did:plc:erin").await, 1);
+
+    let revoked = am.delete_account("did:plc:erin").await.unwrap();
+
+    assert_eq!(revoked, 1);
+    assert_eq!(oauth_token_count(&am, "did:plc:erin").await, 0);
 }
 
 #[tokio::test]

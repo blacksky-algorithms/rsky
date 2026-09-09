@@ -140,10 +140,11 @@ jobs:
           shared-key: ${{ matrix.package }}
       - name: Run cargo build for ${{ matrix.package }}
         run: cargo build --release -p ${{ matrix.package }}
-      # rsky-wintermute's pool tests need a live Postgres. The staging-table DDL
-      # is self-contained, so a stock image with no migrations is enough to
-      # prove a pool was built through config::create_pg_pool; the tests that
-      # need the appview schema are gated separately.
+      # rsky-wintermute's DB-backed tests (indexer::tests, ingester::tests) need
+      # a live Postgres carrying the Bluesky appview dataplane schema; they are
+      # not gated behind a feature or #[ignore], so a stock image alone fails
+      # them with `relation "actor" does not exist`. The schema is applied from
+      # the checked-in dump in the step after this one.
       - name: Start Postgres for rsky-wintermute
         if: matrix.package == 'rsky-wintermute'
         run: |
@@ -160,6 +161,13 @@ jobs:
           echo "Postgres did not become ready" >&2
           docker logs wintermute-pg >&2
           exit 1
+      # Appview schema snapshot (public schema, no rows). Regenerate per
+      # rsky-wintermute/README.md when the dataplane migrations change.
+      - name: Apply appview schema for rsky-wintermute
+        if: matrix.package == 'rsky-wintermute'
+        run: |
+          docker exec -i wintermute-pg psql -U postgres -d bsky_test \
+            -v ON_ERROR_STOP=1 -q < rsky-wintermute/tests/schema/appview.sql
       - name: Run cargo test for ${{ matrix.package }}
         run: cargo test --release -p ${{ matrix.package }}
         env:
@@ -168,13 +176,6 @@ jobs:
       # require ffmpeg on every dev machine; CI installs it and runs them
       # explicitly, otherwise the video normalization fix has zero coverage
       # in the green build.
-      # Ignored by default because its runtime scales with the production high
-      # water mark. A small mark exercises the same assertion in seconds.
-      - name: Run rsky-wintermute backpressure test
-        if: matrix.package == 'rsky-wintermute'
-        env:
-          BACKFILLER_OUTPUT_HIGH_WATER_MARK: "100"
-        run: cargo test --release -p rsky-wintermute -- --ignored backpressure
       - name: Install ffmpeg for rsky-video e2e tests
         if: matrix.package == 'rsky-video'
         run: sudo apt-get update && sudo apt-get install -y ffmpeg

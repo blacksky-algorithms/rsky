@@ -1,8 +1,12 @@
 [package]
 name = "rsky-relay"
-version = "0.1.2"
+version = "0.1.3"
 default-run = "rsky-relay"
 edition = "2024"
+# Keep in sync with the toolchain pin in `rust-toolchain`. Clippy reads this as
+# its MSRV so it does not suggest syntax/APIs (let chains, `Duration::from_mins`)
+# that the pinned toolchain cannot compile.
+rust-version = "1.86"
 
 [dependencies]
 # external

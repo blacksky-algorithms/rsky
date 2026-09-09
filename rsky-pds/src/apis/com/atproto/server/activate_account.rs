@@ -4,6 +4,7 @@ use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::server::assert_valid_did_documents_for_service;
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{OAuthForbidden, Scoped};
 use crate::auth_verifier::AccessFull;
 use crate::SharedSequencer;
 use rocket::State;
@@ -11,13 +12,13 @@ use rsky_syntax::handle::INVALID_HANDLE;
 
 #[tracing::instrument(skip_all)]
 async fn inner_activate_account(
-    auth: AccessFull,
+    auth: Scoped<OAuthForbidden, AccessFull>,
     sequencer: &State<SharedSequencer>,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    let requester = auth.access.credentials.unwrap().did.unwrap();
+    let requester = auth.did().await?;
     assert_valid_did_documents_for_service(actor_store, requester.clone()).await?;
 
     let account = account_manager
@@ -60,7 +61,7 @@ async fn inner_activate_account(
 #[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.server.activateAccount")]
 pub async fn activate_account(
-    auth: AccessFull,
+    auth: Scoped<OAuthForbidden, AccessFull>,
     sequencer: &State<SharedSequencer>,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,

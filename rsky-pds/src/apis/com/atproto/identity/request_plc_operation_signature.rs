@@ -1,26 +1,10 @@
 use crate::account_manager::helpers::account::{ActorAccount, AvailabilityFlags};
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{IdentityFull, Scoped};
 use crate::auth_verifier::AccessFull;
 use crate::mailer::{send_plc_operation, TokenParam};
 use crate::models::models::EmailTokenPurpose;
-
-#[tracing::instrument(skip_all)]
-async fn get_requester_did(auth: &AccessFull) -> Result<String, ApiError> {
-    match &auth.access.credentials {
-        None => {
-            tracing::error!("Failed to find access credentials");
-            Err(ApiError::RuntimeError)
-        }
-        Some(res) => match &res.did {
-            None => {
-                tracing::error!("Failed to find did");
-                Err(ApiError::RuntimeError)
-            }
-            Some(did) => Ok(did.clone()),
-        },
-    }
-}
 
 #[tracing::instrument(skip_all)]
 async fn get_account(
@@ -89,10 +73,10 @@ async fn do_plc_operation(account: &ActorAccount, token: String) -> Result<(), A
 #[rocket::post("/xrpc/com.atproto.identity.requestPlcOperationSignature")]
 #[tracing::instrument(skip_all)]
 pub async fn request_plc_operation_signature(
-    auth: AccessFull,
+    auth: Scoped<IdentityFull, AccessFull>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    let requester = get_requester_did(&auth).await?;
+    let requester = auth.did().await?;
     let account = get_account(requester.as_str(), &account_manager).await?;
     let token = create_email_token(requester.as_str(), &account_manager).await?;
     do_plc_operation(&account, token).await?;

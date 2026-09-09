@@ -171,3 +171,98 @@ async fn the_did_document_is_validated_against_the_accounts_own_key() {
     assert!(!valid_did(token).await);
     set_published_signing_key(None);
 }
+
+/// A full-access session (ordinary password login, `AuthScope::Access`) is
+/// privileged and must be allowed to mint a service-auth token for a
+/// privileged `chat.bsky.*` method.
+///
+/// This is an end-to-end regression test for `Credentials.is_privileged`
+/// actually being populated from the session's real scope inside
+/// `validate_access_token` / `validate_dpop_access_token`
+/// (`auth_verifier.rs`), rather than being hardcoded to `None`. That bug sat
+/// upstream of `getServiceAuth`'s own privilege check: with `is_privileged`
+/// always `None` (-> `false`), a corrected `getServiceAuth` condition would
+/// deny *every* privileged-method request, including this one, regardless of
+/// session type. A unit test of the extracted `ensure_lxm_access` helper
+/// alone cannot catch this, because the bug is in how its `is_privileged`
+/// input gets constructed, not in the helper itself.
+#[tokio::test]
+async fn full_access_session_is_allowed_service_auth_for_a_privileged_chat_method() {
+    let (_dir, client) = common::get_client().await;
+    let token = account(&client, "did:plc:eeeeeeeeeeeeeeeeeeeeeeee", "erin").await;
+
+    let response = client
+        .get(
+            "/xrpc/com.atproto.server.getServiceAuth\
+             ?aud=did:web:appview.invalid&lxm=chat.bsky.convo.getMessages",
+        )
+        .header(Header::new("Authorization", format!("Bearer {token}")))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let body: serde_json::Value = response.into_json().await.unwrap();
+    assert!(body["token"].as_str().is_some());
+}
+
+/// A plain app-password session (`AuthScope::AppPass`, not privileged) must
+/// be denied a service-auth token for a privileged `chat.bsky.*` method,
+/// even though the same account's full-access session is allowed one above.
+#[tokio::test]
+async fn app_password_session_is_denied_service_auth_for_a_privileged_chat_method() {
+    let (_dir, client) = common::get_client().await;
+    let full_token = account(&client, "did:plc:ffffffffffffffffffffffff", "frank").await;
+
+    let response = client
+        .post("/xrpc/com.atproto.server.createAppPassword")
+        .header(ContentType::JSON)
+        .header(Header::new("Authorization", format!("Bearer {full_token}")))
+        .body(json!({ "name": "test app password" }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let body: serde_json::Value = response.into_json().await.unwrap();
+    let app_password = body["password"].as_str().unwrap().to_string();
+
+    let domain = client
+        .rocket()
+        .state::<ServerConfig>()
+        .unwrap()
+        .identity
+        .service_handle_domains
+        .first()
+        .unwrap()
+        .clone();
+    let response = client
+        .post("/xrpc/com.atproto.server.createSession")
+        .header(ContentType::JSON)
+        .body(
+            json!({
+                "identifier": format!("frank{domain}"),
+                "password": app_password,
+            })
+            .to_string(),
+        )
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let body: serde_json::Value = response.into_json().await.unwrap();
+    let app_password_token = body["accessJwt"].as_str().unwrap().to_string();
+
+    let response = client
+        .get(
+            "/xrpc/com.atproto.server.getServiceAuth\
+             ?aud=did:web:appview.invalid&lxm=chat.bsky.convo.getMessages",
+        )
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {app_password_token}"),
+        ))
+        .dispatch()
+        .await;
+    assert_ne!(
+        response.status(),
+        Status::Ok,
+        "a plain app-password session must not be able to mint a service-auth \
+         token for a privileged chat.bsky.* method"
+    );
+}
