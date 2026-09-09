@@ -8,7 +8,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tungstenite::Connector;
 use tungstenite::client::{IntoClientRequest, uri_mode};
 use tungstenite::client_tls_with_config;
-use tungstenite::error::{Error, Result, UrlError};
+use tungstenite::error::{Error, UrlError};
 use tungstenite::handshake::client::Request;
 use tungstenite::protocol::WebSocketConfig;
 use tungstenite::stream::{Mode, NoDelay};
@@ -32,7 +32,7 @@ pub fn connect<Req: IntoClientRequest>(request: Req) -> HandshakeResult {
 }
 
 // Ref: https://github.com/snapview/tungstenite-rs/blob/master/src/client.rs
-#[expect(clippy::expect_used, clippy::ignored_unit_patterns, clippy::redundant_clone)]
+#[expect(clippy::expect_used, clippy::ignored_unit_patterns)]
 pub fn connect_with_config<Req: IntoClientRequest>(
     request: Req, config: Option<WebSocketConfig>, max_redirects: u8,
 ) -> HandshakeResult {
@@ -47,7 +47,7 @@ pub fn connect_with_config<Req: IntoClientRequest>(
             Mode::Tls => 443,
         });
         let mut stream = connect_to_some((host, port), request.uri())?;
-        NoDelay::set_nodelay(&mut stream, true)?;
+        NoDelay::set_nodelay(&mut stream, true).map_err(Error::from)?;
 
         // Build an explicit rustls connector to avoid the tungstenite "Bug: TLS
         // handshake not blocked" panic that occurs when passing None for the
@@ -71,27 +71,39 @@ pub fn connect_with_config<Req: IntoClientRequest>(
     }
 
     let (parts, _) = request.into_client_request()?.into_parts();
+    // False positive on clippy <= 1.86 (fixed upstream): `uri` is reassigned on
+    // each redirect while `parts` stays borrowed by `create_request`.
+    #[allow(clippy::redundant_clone)]
     let mut uri = parts.uri.clone();
 
     for attempt in 0..=max_redirects {
         let request = create_request(&parts, &uri);
 
-        match try_client_handshake(request, config) {
-            Err(Error::Http(res)) if res.status().is_redirection() && attempt < max_redirects => {
-                if let Some(location) = res.headers().get("Location") {
-                    uri = location.to_str()?.parse::<Uri>()?;
-                } else {
-                    return Err(Error::Http(res));
+        let err = match try_client_handshake(request, config) {
+            Ok(res) => return Ok(res),
+            Err(err) => err,
+        };
+        match &*err {
+            Error::Http(res) if res.status().is_redirection() && attempt < max_redirects => {
+                match res.headers().get("Location") {
+                    Some(location) => {
+                        uri = location
+                            .to_str()
+                            .map_err(Error::from)?
+                            .parse::<Uri>()
+                            .map_err(Error::from)?;
+                    }
+                    None => return Err(err),
                 }
             }
-            other => return other,
+            _ => return Err(err),
         }
     }
 
     unreachable!("Bug in a redirect handling logic")
 }
 
-fn connect_to_some(addrs: impl ToSocketAddrs, uri: &Uri) -> Result<TcpStream> {
+fn connect_to_some(addrs: impl ToSocketAddrs, uri: &Uri) -> Result<TcpStream, Box<Error>> {
     fn is_blocking_error(error: &io::Error) -> bool {
         matches!(
             error.kind(),
@@ -99,16 +111,23 @@ fn connect_to_some(addrs: impl ToSocketAddrs, uri: &Uri) -> Result<TcpStream> {
         ) || matches!(error.raw_os_error(), Some(libc::EINPROGRESS))
     }
 
-    for addr in addrs.to_socket_addrs()? {
-        // debug!("Trying to contact {uri} at {addr}...");
-        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
-        socket.set_nonblocking(true)?;
-        match socket.connect(&addr.into()) {
-            Ok(()) => {}
-            Err(e) if is_blocking_error(&e) => {}
-            Err(_) => continue,
+    /// `Ok(None)`: every address was tried and none accepted the connection.
+    fn try_addrs(addrs: impl ToSocketAddrs) -> io::Result<Option<TcpStream>> {
+        for addr in addrs.to_socket_addrs()? {
+            // debug!("Trying to contact {uri} at {addr}...");
+            let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+            socket.set_nonblocking(true)?;
+            match socket.connect(&addr.into()) {
+                Ok(()) => {}
+                Err(e) if is_blocking_error(&e) => {}
+                Err(_) => continue,
+            }
+            return Ok(Some(socket.into()));
         }
-        return Ok(socket.into());
+        Ok(None)
     }
-    Err(Error::Url(UrlError::UnableToConnect(uri.to_string())))
+
+    try_addrs(addrs)
+        .map_err(Error::from)?
+        .ok_or_else(|| Box::new(Error::Url(UrlError::UnableToConnect(uri.to_string()))))
 }

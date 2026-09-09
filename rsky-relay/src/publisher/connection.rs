@@ -24,11 +24,28 @@ pub enum ConnectionError {
     #[error("io error: {0}")]
     Io(#[from] io::Error),
     #[error("handshake error: {0}")]
-    Handshake(#[from] HandshakeError<ServerHandshake<MaybeTlsStream<TcpStream>, NoCallback>>),
+    Handshake(#[from] Box<ServerHandshakeError>),
     #[error("tungstenite error: {0}")]
-    Tungstenite(#[from] tungstenite::Error),
+    Tungstenite(#[from] Box<tungstenite::Error>),
     #[error("fjall error: {0}")]
     Fjall(#[from] fjall::Error),
+}
+
+/// Carries the mid-handshake stream, so it is ~1.4 KiB; boxed to keep
+/// `ConnectionError` (and every `Result` wrapping it) small.
+pub type ServerHandshakeError =
+    HandshakeError<ServerHandshake<MaybeTlsStream<TcpStream>, NoCallback>>;
+
+impl From<ServerHandshakeError> for ConnectionError {
+    fn from(value: ServerHandshakeError) -> Self {
+        Self::Handshake(Box::new(value))
+    }
+}
+
+impl From<tungstenite::Error> for ConnectionError {
+    fn from(value: tungstenite::Error) -> Self {
+        Self::Tungstenite(Box::new(value))
+    }
 }
 
 pub struct Connection {
