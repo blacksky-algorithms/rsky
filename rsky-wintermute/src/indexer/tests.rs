@@ -405,7 +405,7 @@ mod indexer_tests {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 // Even suffixes "changed", odd ones did not, one failed.
                 let n: usize = did.trim_start_matches("did:plc:ok").parse().unwrap();
-                if n == 9 { None } else { Some(n % 2 == 0) }
+                if n == 9 { None } else { Some(n.is_multiple_of(2)) }
             },
             &shutdown,
         )
