@@ -39,6 +39,15 @@ pub enum ParseResult {
     FutureCursor,
 }
 
+/// What became of a live `#commit` offered to the fjall queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LiveCommit {
+    /// Its jobs are durable in fjall and the sync 1.1 tracker has been told.
+    Enqueued,
+    /// A stale replay: nothing was enqueued and the tracker was not told.
+    DroppedStale,
+}
+
 pub struct IngesterManager {
     workers: usize,
     relay_hosts: Vec<String>,
@@ -559,31 +568,9 @@ impl IngesterManager {
 
                 // Queue to Fjall so live intake never blocks on indexing speed; the
                 // firehose_live processor loop consumes and indexes from the queue.
-                let sync11_msg = Msg::from_event(&event, &sync11_host);
-                match Self::parse_event_to_jobs(&event).await {
-                    Ok(jobs) => {
-                        for job in jobs {
-                            if let Err(e) = storage.enqueue_firehose_live(&job) {
-                                tracing::error!("failed to enqueue firehose_live job: {e}");
-                                metrics::INGESTER_ERRORS_TOTAL
-                                    .with_label_values(&["enqueue_failed"])
-                                    .inc();
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("failed to parse event seq={} to jobs: {e}", event.seq);
-                        metrics::INGESTER_ERRORS_TOTAL
-                            .with_label_values(&["parse_failed"])
-                            .inc();
-                    }
-                }
-
-                // Only after the jobs are durable in fjall: the tracker's
-                // stored state must never run ahead of what will be indexed.
-                if let Some(msg) = sync11_msg {
-                    sync11.send(msg).await;
-                }
+                // A commit that replays a rev the tracker already holds is
+                // dropped whole instead.
+                Self::enqueue_live_commit(storage, &event, sync11, &sync11_host).await;
 
                 // Atomically update last_seq (cheap, lock-free operation)
                 // The cursor_saver_task will persist this to postgres on interval
@@ -785,6 +772,74 @@ impl IngesterManager {
         };
 
         Ok(ParseResult::Event(event))
+    }
+
+    /// Queue a live `#commit`'s jobs to fjall, then tell the sync 1.1 tracker.
+    ///
+    /// The stale-replay gate runs first, before the CAR is even parsed: when
+    /// the tracker already holds a rev for this repo that the commit does not
+    /// advance, the frame is a replay (in production, a second relay hours
+    /// behind the first re-delivering commits it already carried) and every
+    /// one of its ops is dropped. It has to happen *before* enqueue because
+    /// the indexer's own rev gate can only protect rows that exist: a record
+    /// deleted since the original commit has no row left, so a late create
+    /// would re-insert it. A dropped commit is not sent to the tracker either;
+    /// it would only be judged `stale` again.
+    ///
+    /// The gate is exactly as warm as the tracker's cache (see
+    /// [`sync11::KnownRevs`]): a repo not seen since the process started
+    /// passes, and the tracker then loads its row so the next replay is
+    /// caught. Non-commit frames never reach this function.
+    pub(crate) async fn enqueue_live_commit(
+        storage: &Storage,
+        event: &FirehoseEvent,
+        sync11: &Sync11Handle,
+        host: &Arc<str>,
+    ) -> LiveCommit {
+        if event.kind == "commit"
+            && let Some(commit) = &event.commit
+            && sync11.is_stale_replay(&event.did, &commit.rev)
+        {
+            crate::metrics::INGESTER_LIVE_COMMITS_DROPPED_TOTAL
+                .with_label_values(&["stale_replay"])
+                .inc();
+            tracing::debug!(
+                did = %event.did,
+                rev = %commit.rev,
+                seq = event.seq,
+                host = %host,
+                ops = commit.ops.len(),
+                "live: dropped stale replay of a commit"
+            );
+            return LiveCommit::DroppedStale;
+        }
+
+        let sync11_msg = Msg::from_event(event, host);
+        match Self::parse_event_to_jobs(event).await {
+            Ok(jobs) => {
+                for job in jobs {
+                    if let Err(e) = storage.enqueue_firehose_live(&job) {
+                        tracing::error!("failed to enqueue firehose_live job: {e}");
+                        crate::metrics::INGESTER_ERRORS_TOTAL
+                            .with_label_values(&["enqueue_failed"])
+                            .inc();
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("failed to parse event seq={} to jobs: {e}", event.seq);
+                crate::metrics::INGESTER_ERRORS_TOTAL
+                    .with_label_values(&["parse_failed"])
+                    .inc();
+            }
+        }
+
+        // Only after the jobs are durable in fjall: the tracker's stored
+        // state must never run ahead of what will be indexed.
+        if let Some(msg) = sync11_msg {
+            sync11.send(msg).await;
+        }
+        LiveCommit::Enqueued
     }
 
     /// Parse a `FirehoseEvent` into `IndexJob`s for inline processing (skipping Fjall queue)

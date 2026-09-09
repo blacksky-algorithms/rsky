@@ -1316,4 +1316,107 @@ mod ingester_tests {
             assert_eq!(parse_active_flag(""), None);
         }
     }
+
+    /// The production incident: a second relay, hours behind, re-delivers a
+    /// commit the first already carried. The replay must leave fjall
+    /// untouched (creates and deletes alike), not reach the tracker, and be
+    /// counted; a genuinely newer commit still goes through.
+    #[tokio::test]
+    async fn a_stale_replay_enqueues_nothing_and_is_counted() {
+        use crate::backfiller::state::RepoStateStore;
+        use crate::ingester::LiveCommit;
+        use crate::ingester::sync11::{Msg, Sync11Handle, SyncStore, Tracker, testing::MemStore};
+        use crate::metrics::INGESTER_LIVE_COMMITS_DROPPED_TOTAL;
+        use crate::types::RepoOp;
+
+        const R1: &str = "3lz7gd2xq5c2a";
+        const R2: &str = "3lz7gd2xq5c2b";
+        const R3: &str = "3lz7gd2xq5c2c";
+        const DID: &str = "did:plc:replay";
+        const CID: &str = "bafyreihzwnyumvubacqyflkxpsejegc6sxwkcaxv3iwm3lrn3x45gxkioa";
+
+        let (storage, _dir) = setup_test_storage();
+        let store: Arc<dyn SyncStore> = Arc::new(MemStore::default());
+        let rs = RepoStateStore::open_in_memory().unwrap();
+        // The tracker is driven by hand so the shared view is deterministic.
+        let mut tracker = Tracker::new(store, rs, false);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let handle = Sync11Handle::new(tx, tracker.revs());
+        let host: Arc<str> = Arc::from("relay.test");
+
+        let event = |seq: i64, rev: &str| FirehoseEvent {
+            seq,
+            did: DID.to_owned(),
+            time: "2024-01-01T00:00:00Z".to_owned(),
+            kind: "commit".to_owned(),
+            commit: Some(CommitData {
+                rev: rev.to_owned(),
+                ops: vec![
+                    RepoOp {
+                        action: "create".to_owned(),
+                        path: "app.bsky.feed.post/aaa".to_owned(),
+                        cid: Some(CID.to_owned()),
+                    },
+                    RepoOp {
+                        action: "delete".to_owned(),
+                        path: "app.bsky.feed.post/bbb".to_owned(),
+                        cid: None,
+                    },
+                ],
+                blocks: vec![],
+                since: None,
+                prev_data: None,
+                data: Some(CID.to_owned()),
+                too_big: false,
+            }),
+            identity: None,
+            account: None,
+        };
+        let dropped = || {
+            INGESTER_LIVE_COMMITS_DROPPED_TOTAL
+                .with_label_values(&["stale_replay"])
+                .get()
+        };
+        let before = dropped();
+
+        // Cold: nothing is known, so the commit goes through and the tracker
+        // is told only after its jobs are in fjall.
+        let out =
+            IngesterManager::enqueue_live_commit(&storage, &event(1, R2), &handle, &host).await;
+        assert_eq!(out, LiveCommit::Enqueued);
+        assert_eq!(storage.firehose_live_len().unwrap(), 2);
+        let msg = rx.try_recv().expect("the tracker was told");
+        assert!(matches!(msg, Msg::Commit { .. }));
+        tracker.handle(msg).await;
+        assert_eq!(handle.known_rev(DID).as_deref(), Some(R2));
+
+        // The same commit again, a day late from another relay.
+        let out =
+            IngesterManager::enqueue_live_commit(&storage, &event(2, R2), &handle, &host).await;
+        assert_eq!(out, LiveCommit::DroppedStale);
+        assert_eq!(
+            storage.firehose_live_len().unwrap(),
+            2,
+            "neither the create nor the delete was enqueued"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the tracker is not told about a drop"
+        );
+
+        // An even older one.
+        let out =
+            IngesterManager::enqueue_live_commit(&storage, &event(3, R1), &handle, &host).await;
+        assert_eq!(out, LiveCommit::DroppedStale);
+        assert_eq!(storage.firehose_live_len().unwrap(), 2);
+        assert_eq!(dropped() - before, 2);
+
+        // A newer commit for the repo is not a replay.
+        let out =
+            IngesterManager::enqueue_live_commit(&storage, &event(4, R3), &handle, &host).await;
+        assert_eq!(out, LiveCommit::Enqueued);
+        assert_eq!(storage.firehose_live_len().unwrap(), 4);
+        assert!(rx.try_recv().is_ok());
+        assert_eq!(dropped() - before, 2);
+    }
 }

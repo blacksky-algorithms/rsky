@@ -321,11 +321,7 @@ async fn main() -> Result<()> {
         // Log progress every 100 pages
         if page_count.is_multiple_of(100) {
             let elapsed = start.elapsed().as_secs();
-            let rate = if elapsed > 0 {
-                total_operations / elapsed
-            } else {
-                0
-            };
+            let rate = total_operations.checked_div(elapsed).unwrap_or(0);
             info!(
                 page_count,
                 total_operations,
