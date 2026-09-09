@@ -282,15 +282,38 @@ impl RecordSink for PgSink {
                 .unwrap_or_else(PoisonError::into_inner)
                 .take(),
         );
-        let handles: Vec<_> = self.writers.lock().await.drain(..).collect();
+        // `finish` holds this lock while it waits on a writer; the caller
+        // drops it first. Bounded anyway, so a stop can never park here.
+        let Ok(mut writers) = tokio::time::timeout(ABANDON_STEP, self.writers.lock()).await else {
+            tracing::warn!("backfill sink: writers still locked by the drain; not waiting");
+            return;
+        };
+        let handles: Vec<_> = writers.drain(..).collect();
+        drop(writers);
         for handle in &handles {
             handle.abort();
         }
+        let total = handles.len();
+        let mut unsettled = 0usize;
         for handle in handles {
-            drop(handle.await);
+            if tokio::time::timeout(ABANDON_STEP, handle).await.is_err() {
+                unsettled += 1;
+            }
+        }
+        if unsettled > 0 {
+            tracing::warn!(
+                unsettled,
+                total,
+                "backfill sink: writers did not settle after abort (blocked in a call that \
+                 cannot be cancelled); leaving them to the runtime shutdown"
+            );
         }
     }
 }
+
+/// How long `abandon` waits on any one step: the writers lock, then each
+/// aborted writer.
+const ABANDON_STEP: Duration = Duration::from_secs(1);
 
 /// Pull repos off the shared receiver until a batch is full (or the queue goes
 /// quiet), write it, and settle every repo in it.

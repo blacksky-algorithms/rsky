@@ -1071,7 +1071,10 @@ impl<K: RecordSink> Runner<K> {
                 "backfill progress"
             );
         }
-        super::sample_state_metrics(&self.state);
+        // The gauges are a COUNT ... GROUP BY over every row; not on a stop.
+        if !self.shutting_down() {
+            super::sample_state_metrics(&self.state);
+        }
         now
     }
 

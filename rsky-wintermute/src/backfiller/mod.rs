@@ -494,7 +494,7 @@ impl BackfillManager {
 
         let state = self.state.clone();
 
-        rt.block_on(async {
+        let result = rt.block_on(async {
             match self.cfg.sink {
                 SinkKind::Postgres => {
                     let pool = crate::config::create_pg_pool(
@@ -508,7 +508,7 @@ impl BackfillManager {
                         Arc::clone(&sink),
                         state,
                     )?);
-                    run_and_finish(&runner, sink.as_ref()).await
+                    run_bounded(&runner, sink.as_ref(), SHUTDOWN_SLACK).await
                 }
                 SinkKind::Null => {
                     let sink = Arc::new(NullSink::default());
@@ -517,7 +517,7 @@ impl BackfillManager {
                         Arc::clone(&sink),
                         state,
                     )?);
-                    let result = run_and_finish(&runner, sink.as_ref()).await;
+                    let result = run_bounded(&runner, sink.as_ref(), SHUTDOWN_SLACK).await;
                     tracing::info!(
                         repos = sink.repos.load(Ordering::Relaxed),
                         records = sink.records.load(Ordering::Relaxed),
@@ -526,8 +526,74 @@ impl BackfillManager {
                     result
                 }
             }
-        })
-        .map_err(|e| WintermuteError::Other(format!("backfill: {e}")))
+        });
+        // A blocking task (sqlite, a CAR parse) cannot be cancelled; do not
+        // let one hold this thread past the budget either.
+        rt.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
+        result.map_err(|e| WintermuteError::Other(format!("backfill: {e}")))
+    }
+}
+
+/// Added to the grace budget for the outer bound on the whole stop path, so
+/// the bound fires only after the runner and sink have had their full budget.
+pub const SHUTDOWN_SLACK: Duration = Duration::from_secs(5);
+
+/// How long the backfill runtime waits for blocking tasks once its future has
+/// returned.
+const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Where the stop path is, for the warning when the outer bound is hit.
+#[derive(Debug, Default)]
+pub struct StopPhase(std::sync::Mutex<&'static str>);
+
+impl StopPhase {
+    fn set(&self, phase: &'static str) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = phase;
+    }
+
+    #[must_use]
+    pub fn get(&self) -> &'static str {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// [`run_and_finish`] under an outer bound on the whole stop path.
+///
+/// Once `shutdown` is observed, everything that remains -- worker join, sink
+/// drain, sink abandon, every drop in between -- gets the grace budget plus
+/// `slack`, after which it is given up on with a warning saying where it was
+/// stuck. Nothing awaited after the runner returns can hold the thread past
+/// that.
+pub async fn run_bounded<K: RecordSink>(
+    runner: &Arc<Runner<K>>,
+    sink: &K,
+    slack: Duration,
+) -> Result<(), RunnerError> {
+    let shutdown = runner.config().shutdown;
+    let grace = runner.config().shutdown_grace;
+    let phase = StopPhase::default();
+    let bound = async {
+        wait_for_shutdown(shutdown).await;
+        tokio::time::sleep(grace.saturating_add(slack)).await;
+    };
+    tokio::select! {
+        result = run_and_finish_in(runner, sink, &phase) => result,
+        () = bound => {
+            tracing::warn!(
+                phase = phase.get(),
+                grace_secs = grace.as_secs(),
+                slack_secs = slack.as_secs(),
+                "backfill shutdown: still pending past the grace budget plus slack; \
+                 giving up on it -- claimed repos are recovered on restart"
+            );
+            Ok(())
+        }
     }
 }
 
@@ -538,13 +604,24 @@ pub async fn run_and_finish<K: RecordSink>(
     runner: &Arc<Runner<K>>,
     sink: &K,
 ) -> Result<(), RunnerError> {
+    run_and_finish_in(runner, sink, &StopPhase::default()).await
+}
+
+async fn run_and_finish_in<K: RecordSink>(
+    runner: &Arc<Runner<K>>,
+    sink: &K,
+    phase: &StopPhase,
+) -> Result<(), RunnerError> {
+    phase.set("runner");
     let result = Arc::clone(runner).run().await;
-    finish_sink(
+    finish_sink_in(
         sink,
         runner.config().shutdown,
         runner.shutdown_grace_remaining(),
+        phase,
     )
     .await;
+    phase.set("done");
     result
 }
 
@@ -557,15 +634,34 @@ pub async fn run_and_finish<K: RecordSink>(
 /// (or return to pending) so the next start re-fetches them. Returns whether
 /// everything committed.
 pub async fn finish_sink<K: RecordSink>(sink: &K, shutdown: &AtomicBool, grace: Duration) -> bool {
-    let finish = sink.finish();
-    tokio::pin!(finish);
-    tokio::select! {
-        () = &mut finish => return true,
-        () = wait_for_shutdown(shutdown) => {}
-    }
-    if tokio::time::timeout(grace, &mut finish).await.is_ok() {
+    finish_sink_in(sink, shutdown, grace, &StopPhase::default()).await
+}
+
+async fn finish_sink_in<K: RecordSink>(
+    sink: &K,
+    shutdown: &AtomicBool,
+    grace: Duration,
+    phase: &StopPhase,
+) -> bool {
+    phase.set("sink drain");
+    // The finish future lives in this block and is dropped with it. That is
+    // load-bearing: a timed-out `timeout(grace, &mut finish)` drops only the
+    // timeout, and a `PgSink::finish` parked on a mid-batch writer would
+    // otherwise keep holding the writers lock that `abandon` needs -- the
+    // deadlock that held the daemon past systemd's stop timeout.
+    let drained = {
+        let mut finish = std::pin::pin!(sink.finish());
+        tokio::select! {
+            () = &mut finish => true,
+            () = wait_for_shutdown(shutdown) => {
+                tokio::time::timeout(grace, &mut finish).await.is_ok()
+            }
+        }
+    };
+    if drained {
         return true;
     }
+    phase.set("sink abandon");
     let (repos, records) = sink.uncommitted();
     tracing::warn!(
         repos,
@@ -687,9 +783,14 @@ mod tests {
     }
 
     /// A sink whose drain never completes and remembers being abandoned.
+    /// With `hang_abandon`, abandoning never completes either. `finish`
+    /// holds `lock` while it hangs and `abandon` needs it, the shape of
+    /// `PgSink`'s writers mutex.
     #[derive(Default)]
     struct StuckSink {
         abandoned: AtomicBool,
+        hang_abandon: bool,
+        lock: tokio::sync::Mutex<()>,
     }
 
     impl RecordSink for StuckSink {
@@ -704,13 +805,18 @@ mod tests {
             std::future::ready(Err(WintermuteError::Other("unused".into())))
         }
         async fn finish(&self) {
+            let _held = self.lock.lock().await;
             std::future::pending::<()>().await;
         }
         fn uncommitted(&self) -> (usize, usize) {
             (3, 4200)
         }
         async fn abandon(&self) {
+            drop(self.lock.lock().await);
             self.abandoned.store(true, Ordering::Relaxed);
+            if self.hang_abandon {
+                std::future::pending::<()>().await;
+            }
         }
     }
 
@@ -785,6 +891,67 @@ mod tests {
             started.elapsed()
         );
         assert!(runner.shutting_down());
+    }
+
+    #[tokio::test]
+    async fn the_whole_stop_path_is_bounded_even_if_abandon_never_resolves() {
+        static FLAG: AtomicBool = AtomicBool::new(true);
+        static IDLE: AtomicBool = AtomicBool::new(false);
+        let sink = Arc::new(StuckSink {
+            hang_abandon: true,
+            ..StuckSink::default()
+        });
+        let cfg = RunnerConfig {
+            hubble: None,
+            direct: true,
+            shutdown: &FLAG,
+            shutdown_grace: Duration::from_millis(300),
+            ..RunnerConfig::default()
+        };
+        let runner = Arc::new(
+            Runner::new(
+                cfg,
+                Arc::clone(&sink),
+                RepoStateStore::open_in_memory().unwrap(),
+            )
+            .unwrap(),
+        );
+        let started = std::time::Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            run_bounded(&runner, sink.as_ref(), Duration::from_millis(200)),
+        )
+        .await
+        .expect("the outer bound fires")
+        .unwrap();
+        let took = started.elapsed();
+        assert!(
+            sink.abandoned.load(Ordering::Relaxed),
+            "abandon was reached"
+        );
+        assert!(
+            took >= Duration::from_millis(500) && took < Duration::from_secs(3),
+            "grace + slack, not forever: {took:?}"
+        );
+        // A run that is not stopped is not bounded at all.
+        let sink = Arc::new(NullSink::default());
+        let cfg = RunnerConfig {
+            hubble: None,
+            direct: true,
+            shutdown: &IDLE,
+            ..RunnerConfig::default()
+        };
+        let runner = Arc::new(
+            Runner::new(
+                cfg,
+                Arc::clone(&sink),
+                RepoStateStore::open_in_memory().unwrap(),
+            )
+            .unwrap(),
+        );
+        run_bounded(&runner, sink.as_ref(), Duration::ZERO)
+            .await
+            .unwrap();
     }
 
     #[test]
