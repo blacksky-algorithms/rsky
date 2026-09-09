@@ -1,6 +1,6 @@
 [package]
 name = "rsky-repo"
-version = "0.0.8"
+version = "0.1.0"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "Rust crate for atproto repositories, an in particular the Merkle Search Tree (MST) data structure."
 license = "Apache-2.0"
@@ -37,8 +37,13 @@ secp256k1 = {workspace = true}
 ipld-core = {workspace = true}
 iroh-car = "0.5.1"
 
-regex = "1.10.3"
-lazy_static = "1.4.0"
-
 [dev-dependencies]
 p256 = { version = "0.13.2", features = ["ecdsa", "arithmetic", "alloc"] }
+criterion = { version = "0.5", features = ["async_tokio"] }
+rusqlite = { workspace = true }
+tempfile = "3.10"
+
+[[bench]]
+name = "mst_perf"
+harness = false
+test = false

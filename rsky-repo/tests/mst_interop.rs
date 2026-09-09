@@ -47,7 +47,7 @@ fn mst_common_prefix_vectors() -> Result<()> {
 
     for case in &cases {
         assert_eq!(
-            count_prefix_len(case.left.clone(), case.right.clone())?,
+            count_prefix_len(&case.left, &case.right)?,
             case.len,
             "left={:?} right={:?}",
             case.left,

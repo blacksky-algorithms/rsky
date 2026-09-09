@@ -91,7 +91,11 @@ impl NodeIter {
                 let entries = match &mut mst_entry {
                     NodeEntry::MST(subtree) => {
                         // Asynchronously fetch child entries
-                        subtree.get_entries().await.unwrap_or_default()
+                        subtree
+                            .get_entries()
+                            .await
+                            .map(|e| e.to_vec())
+                            .unwrap_or_default()
                     }
                     _ => vec![],
                 };
@@ -435,7 +439,7 @@ pub struct UnstoredBlocks {
 /// MerkleSearchTree values are immutable. Methods return copies with changes.
 #[derive(Clone)]
 pub struct MST {
-    pub entries: Arc<RwLock<Option<Vec<NodeEntry>>>>,
+    pub entries: Arc<RwLock<Option<Arc<Vec<NodeEntry>>>>>,
     pub layer: Option<u32>,
     pub pointer: Arc<RwLock<Cid>>,
     pub outdated_pointer: Arc<RwLock<bool>>,
@@ -522,7 +526,7 @@ impl MST {
     ) -> Self {
         Self {
             storage,
-            entries: Arc::new(RwLock::new(entries)),
+            entries: Arc::new(RwLock::new(entries.map(Arc::new))),
             layer,
             pointer: Arc::new(RwLock::new(pointer)),
             outdated_pointer: Arc::new(RwLock::new(false)),
@@ -577,7 +581,10 @@ impl MST {
     // === "Getters (lazy load)" ===
 
     /// "We don't want to load entries of every subtree, just the ones we need"
-    pub async fn get_entries(&self) -> Result<Vec<NodeEntry>> {
+    ///
+    /// The cached vector is handed back behind an `Arc` so repeated reads are a
+    /// refcount bump rather than a deep copy of every leaf key and CID.
+    pub async fn get_entries(&self) -> Result<Arc<Vec<NodeEntry>>> {
         // If `self.entries` is not populated, hydrate it first\
         {
             let mut entries = self.entries.write().await;
@@ -603,11 +610,11 @@ impl MST {
                 };
 
                 // Deserialize into self.entries
-                *entries = Some(util::deserialize_node_data(
+                *entries = Some(Arc::new(util::deserialize_node_data(
                     self.storage.clone(),
                     &data,
                     layer,
-                )?);
+                )?));
             }
         }
 
@@ -638,7 +645,7 @@ impl MST {
     pub async fn serialize(&self) -> Result<CidAndBytes> {
         let mut entries = self.get_entries().await?;
         let mut outdated: Vec<Self> = Vec::new();
-        for entry in &entries {
+        for entry in entries.iter() {
             if let NodeEntry::MST(ref mst) = entry {
                 let is_outdated = *mst.outdated_pointer.read().await;
                 if is_outdated {
@@ -654,9 +661,10 @@ impl MST {
             entries = self.get_entries().await?
         }
         let data = util::serialize_node_data(entries.as_slice()).await?;
+        let bytes = rsky_common::struct_to_cbor(&data)?;
         Ok(CidAndBytes {
-            cid: ipld::cid_for_cbor(&data)?,
-            bytes: rsky_common::struct_to_cbor(&data)?,
+            cid: util::cid_for_dag_cbor_bytes(&bytes)?,
+            bytes,
         })
     }
 
@@ -677,12 +685,12 @@ impl MST {
         if self.layer.is_some() {
             return Ok(self.layer);
         };
-        let mut entries = self.get_entries().await?;
+        let entries = self.get_entries().await?;
         let mut layer = util::layer_for_entries(entries.as_slice())?;
         if layer.is_none() {
-            for entry in entries.iter_mut() {
-                if let NodeEntry::MST(ref mut tree) = entry {
-                    let child_layer = tree.attempt_get_layer().await?;
+            for entry in entries.iter() {
+                if let NodeEntry::MST(tree) = entry {
+                    let child_layer = tree.clone().attempt_get_layer().await?;
                     if let Some(c) = child_layer {
                         layer = Some(c + 1);
                         break;
@@ -966,7 +974,7 @@ impl MST {
     pub async fn at_index(&mut self, index: isize) -> Result<Option<NodeEntry>> {
         let entries = self.get_entries().await?;
         if index >= 0 {
-            Ok(entries.into_iter().nth(index as usize))
+            Ok(entries.get(index as usize).cloned())
         } else {
             Ok(None)
         }
@@ -1030,7 +1038,7 @@ impl MST {
                 };
                 Ok(entries[..end].to_vec())
             }
-            (None, None) => Ok(entries),
+            (None, None) => Ok(entries.to_vec()),
         }
     }
 
@@ -1075,7 +1083,7 @@ impl MST {
     pub async fn trim_top(self) -> Result<Self> {
         let entries = self.get_entries().await?;
         return if entries.len() == 1 {
-            match entries.into_iter().nth(0) {
+            match entries.first() {
                 Some(NodeEntry::MST(n)) => Ok(n.clone().trim_top().await?),
                 _ => Ok(self),
             }
@@ -1964,12 +1972,7 @@ mod tests {
         // Helper macro to handle assertions
         macro_rules! assert_prefix_len {
             ($a:expr, $b:expr, $expected:expr) => {
-                assert_eq!(
-                    count_prefix_len($a.to_string(), $b.to_string())?,
-                    $expected,
-                    "{}",
-                    msg
-                );
+                assert_eq!(count_prefix_len($a, $b)?, $expected, "{}", msg);
             };
         }
 
@@ -2002,12 +2005,7 @@ mod tests {
         // Helper macro to handle assertions for count_prefix_len
         macro_rules! assert_prefix_len {
             ($a:expr, $b:expr, $expected:expr) => {
-                assert_eq!(
-                    count_prefix_len($a.to_string(), $b.to_string())?,
-                    $expected,
-                    "{}",
-                    msg
-                );
+                assert_eq!(count_prefix_len($a, $b)?, $expected, "{}", msg);
             };
         }
 
@@ -2090,6 +2088,28 @@ mod tests {
             assert!(result.is_ok(), "Key '{}' should be valid", key);
         }
 
+        Ok(())
+    }
+
+    /// `serialize` derives the CID from the bytes it already encoded; pin that
+    /// against the encode-twice form it replaced.
+    #[tokio::test]
+    async fn serialize_cid_matches_cbor_of_node_data() -> Result<()> {
+        let cid1 = Cid::try_from("bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454")?;
+        let storage = MemoryBlockstore::default();
+        let mut mst = MST::create(Arc::new(RwLock::new(storage)), None, None).await?;
+        for i in 0..64 {
+            mst = mst
+                .add(&format!("com.example.record/{:0>13}", i), cid1, None)
+                .await?;
+        }
+
+        let serialized = mst.serialize().await?;
+        let entries = mst.get_entries().await?;
+        let data = serialize_node_data(entries.as_slice()).await?;
+
+        assert_eq!(serialized.cid, ipld::cid_for_cbor(&data)?);
+        assert_eq!(serialized.bytes, rsky_common::struct_to_cbor(&data)?);
         Ok(())
     }
 
