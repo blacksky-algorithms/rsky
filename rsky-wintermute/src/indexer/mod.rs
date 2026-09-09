@@ -370,7 +370,23 @@ impl IndexerManager {
 
         loop {
             if SHUTDOWN.load(Ordering::Relaxed) {
-                tracing::info!("shutdown requested for firehose_live processor");
+                // The prefetch already removed the next batch from Fjall. It is
+                // fully resolved here: `prefetched = prefetch.await` at the end
+                // of the previous iteration is the only writer, so no dequeue
+                // is still in flight. Put the jobs back or they are lost on
+                // restart. Re-enqueuing assigns fresh seq keys, so these jobs
+                // move behind anything the ingester appended meanwhile; that
+                // reordering is accepted over the alternative of a
+                // peek-then-delete dequeue.
+                let requeued = Self::requeue_live_jobs(
+                    &self.storage,
+                    &prefetched.take().unwrap_or_default(),
+                    "shutdown",
+                );
+                tracing::info!(
+                    requeued,
+                    "shutdown requested for firehose_live processor, prefetched batch returned to queue"
+                );
                 break;
             }
 
@@ -413,8 +429,13 @@ impl IndexerManager {
                         tracing::error!("dropping unprocessable firehose_live job: {msg}");
                     } else if let Some(job) = jobs_by_key.get(key.as_slice()) {
                         tracing::warn!("requeueing failed firehose_live job {}: {msg}", job.uri);
-                        if let Err(e2) = self.storage.enqueue_firehose_live(job) {
-                            tracing::error!("failed to requeue firehose_live job: {e2}");
+                        match self.storage.enqueue_firehose_live(job) {
+                            Ok(()) => crate::metrics::INDEXER_LIVE_JOBS_REQUEUED_TOTAL
+                                .with_label_values(&["failed"])
+                                .inc(),
+                            Err(e2) => {
+                                tracing::error!("failed to requeue firehose_live job: {e2}");
+                            }
                         }
                     }
                 }
@@ -435,6 +456,32 @@ impl IndexerManager {
                 last_log = std::time::Instant::now();
             }
         }
+    }
+
+    /// Return already-dequeued live jobs to the `firehose_live` queue so they
+    /// are indexed on a later pass instead of being dropped. Each job gets a
+    /// new seq key, so the batch lands at the back of the queue. Returns how
+    /// many jobs were re-enqueued; failures are logged and counted as lost.
+    fn requeue_live_jobs(storage: &Storage, jobs: &[(Vec<u8>, IndexJob)], reason: &str) -> usize {
+        let mut requeued = 0usize;
+        for (_key, job) in jobs {
+            match storage.enqueue_firehose_live(job) {
+                Ok(()) => requeued += 1,
+                Err(e) => {
+                    tracing::error!(
+                        reason,
+                        "failed to requeue firehose_live job {}: {e}",
+                        job.uri
+                    );
+                }
+            }
+        }
+        if requeued > 0 {
+            crate::metrics::INDEXER_LIVE_JOBS_REQUEUED_TOTAL
+                .with_label_values(&[reason])
+                .inc_by(requeued as u64);
+        }
+        requeued
     }
 
     /// Partition a live batch by repo DID so each shard owns every job for its

@@ -10,7 +10,7 @@ mod indexer_tests {
     use crate::backfiller::BackfillerManager;
     use crate::indexer::IndexerManager;
     use crate::storage::Storage;
-    use crate::types::{BackfillJob, LabelEvent, WriteAction};
+    use crate::types::{BackfillJob, IndexJob, LabelEvent, WriteAction};
     use deadpool_postgres::Pool;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -101,6 +101,51 @@ mod indexer_tests {
         let delete = WriteAction::Delete;
         let json = serde_json::to_string(&delete).unwrap();
         assert!(json.contains("Delete"));
+    }
+
+    /// A prefetched live batch is removed from Fjall before it is indexed; on
+    /// shutdown it must go back into the queue rather than be dropped.
+    #[test]
+    fn test_requeue_live_jobs_returns_dequeued_batch_to_queue() {
+        let (storage, _dir) = setup_test_storage();
+        let total = 7usize;
+        for i in 0..total {
+            let job = IndexJob {
+                uri: format!("at://did:plc:requeue{i}/app.bsky.feed.post/{i}"),
+                cid: format!("bafy{i}"),
+                action: WriteAction::Create,
+                record: None,
+                indexed_at: "2025-01-01T00:00:00Z".to_owned(),
+                rev: "rev".to_owned(),
+            };
+            storage.enqueue_firehose_live(&job).unwrap();
+        }
+        assert_eq!(storage.firehose_live_len().unwrap(), total);
+
+        // Mirror the live loop's prefetch: dequeue removes the entries.
+        let prefetched = storage.dequeue_firehose_live_batch(total).unwrap();
+        assert_eq!(prefetched.len(), total);
+        assert_eq!(storage.firehose_live_len().unwrap(), 0);
+
+        let mut expected: Vec<String> = prefetched.iter().map(|(_, j)| j.uri.clone()).collect();
+        let requeued = IndexerManager::requeue_live_jobs(&storage, &prefetched, "shutdown");
+        assert_eq!(requeued, total);
+        assert_eq!(storage.firehose_live_len().unwrap(), total);
+
+        // A later dequeue (the next process start) sees every job again.
+        let again = storage.dequeue_firehose_live_batch(total * 2).unwrap();
+        let mut got: Vec<String> = again.iter().map(|(_, j)| j.uri.clone()).collect();
+        expected.sort();
+        got.sort();
+        assert_eq!(got, expected);
+        assert_eq!(storage.firehose_live_len().unwrap(), 0);
+
+        // An empty prefetch is a no-op.
+        assert_eq!(
+            IndexerManager::requeue_live_jobs(&storage, &[], "shutdown"),
+            0
+        );
+        assert_eq!(storage.firehose_live_len().unwrap(), 0);
     }
 
     #[tokio::test]
