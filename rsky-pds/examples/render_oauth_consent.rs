@@ -25,7 +25,8 @@ fn main() {
         // A representative multi-scope grant covering every form this crate
         // can currently parse: the base scope, a legacy transition grant, a
         // collection- and action-narrowed repo grant, a wildcard repo grant,
-        // a blob grant, a delegated rpc call, an unresolved include: set,
+        // a multi-pattern blob grant, a delegated rpc call, an identity
+        // grant, an account-management grant, an unresolved include: set,
         // and a space: grant with mixed actions -- this is exactly the case
         // the raw-scope-string bug made illegible.
         scopes: scope_items(&[
@@ -33,8 +34,10 @@ fn main() {
             "transition:chat.bsky".to_string(),
             "repo:app.bsky.feed.post?action=create&action=update".to_string(),
             "repo:app.bsky.graph.follow".to_string(),
-            "blob:image/*".to_string(),
+            "blob:?accept=image/*&accept=video/*".to_string(),
             "rpc:app.bsky.notification.registerPush?aud=did:web:push.example.com".to_string(),
+            "identity:handle".to_string(),
+            "account:email?action=manage".to_string(),
             "include:app.bsky.authFull".to_string(),
             "space:app.bulleted.space?authority=*&action=read&action=create\
              &collection=app.bulleted.note&collection=app.bulleted.outline"

@@ -1,4 +1,7 @@
-use crate::oauth_scope::{parse_repo_scope, OAuthScope, RepoAction};
+use crate::oauth_scope::{
+    parse_account_scope, parse_blob_scope, parse_identity_scope, parse_repo_scope, parse_rpc_scope,
+    AccountAction, OAuthScope, RepoAction,
+};
 use crate::space_scope::{SpaceAction, SpaceScope};
 use askama::Template;
 use rsky_oauth::AuthorizePageData;
@@ -116,28 +119,83 @@ fn describe_scope(scope: &str) -> (String, Option<String>) {
                 )
             }
         }
-        OAuthScope::Blob(pattern) => {
-            let title = match pattern.as_str() {
-                "" | "*/*" => "Upload files of any type".to_string(),
-                "image/*" => "Upload images".to_string(),
-                "video/*" => "Upload videos".to_string(),
-                "audio/*" => "Upload audio files".to_string(),
-                other => format!("Upload files matching {other}"),
-            };
-            (title, None)
-        }
-        OAuthScope::Rpc(suffix) => {
-            let (nsid, aud) = match suffix.split_once('?') {
-                Some((nsid, query)) => (nsid, parse_aud_param(query)),
-                None => (suffix.as_str(), None),
-            };
-            let title = if nsid.is_empty() || nsid == "*" {
-                "Call any server API on your behalf".to_string()
+        OAuthScope::Blob(suffix) => {
+            let patterns = parse_blob_scope(&suffix);
+            if patterns.is_empty() {
+                // `blob:` with no pattern and no `accept=` params names no
+                // mime type at all, so (unlike `repo:`'s bare form) this
+                // grant permits no uploads whatsoever -- say so plainly
+                // rather than implying "any type".
+                (
+                    "Upload files".to_string(),
+                    Some(
+                        "No file type was named, so this grant doesn't actually permit \
+                         any uploads."
+                            .to_string(),
+                    ),
+                )
+            } else if patterns.iter().any(|p| p == "*/*") {
+                ("Upload files of any type".to_string(), None)
             } else {
-                format!("Call {nsid} on your behalf")
-            };
-            (title, aud.map(|aud| format!("Routed through {aud}")))
+                let phrases: Vec<String> =
+                    patterns.iter().map(|p| blob_pattern_phrase(p)).collect();
+                (format!("Upload {}", human_list(&phrases)), None)
+            }
         }
+        OAuthScope::Rpc(suffix) => match parse_rpc_scope(&suffix) {
+            Some((lxms, aud)) => {
+                let title = if lxms.iter().any(|l| l == "*") {
+                    "Call any server API on your behalf".to_string()
+                } else {
+                    format!("Call {} on your behalf", human_list(&lxms))
+                };
+                let detail = if aud == "*" {
+                    "Routed through any service".to_string()
+                } else {
+                    format!("Routed through {aud}")
+                };
+                (title, Some(detail))
+            }
+            // No audience named (or the wildcard/wildcard combination the
+            // parser rejects outright) -- this grant is well-formed enough
+            // to recognise but confers no actual `rpc:` access
+            // (`GrantedScopes::allows_rpc` never matches it), so say that
+            // plainly instead of guessing at a method.
+            None => (
+                "Call a server API on your behalf".to_string(),
+                Some(
+                    "This permission doesn't name a service to route the call through, \
+                     so it doesn't grant the app any access."
+                        .to_string(),
+                ),
+            ),
+        },
+        OAuthScope::Identity(suffix) => match parse_identity_scope(&suffix).as_deref() {
+            Some("handle") => ("Change your handle".to_string(), None),
+            Some(_) => ("Change your identity attributes".to_string(), None),
+            None => (
+                "Change an identity attribute".to_string(),
+                Some(
+                    "This server could not recognise the attribute requested, so this \
+                     grant doesn't actually permit any change."
+                        .to_string(),
+                ),
+            ),
+        },
+        OAuthScope::Account(suffix) => match parse_account_scope(&suffix) {
+            Some((attr, actions)) => {
+                let manage = actions.contains(&AccountAction::Manage);
+                (account_attr_phrase(&attr, manage), None)
+            }
+            None => (
+                "Access your account settings".to_string(),
+                Some(
+                    "This server could not recognise this account permission, so this \
+                     grant doesn't actually permit any access."
+                        .to_string(),
+                ),
+            ),
+        },
         // TODO(include-expansion): `include:<nsid>` names a permission set
         // published as a `com.atproto.lexicon.schema` record (see
         // `crate::permission_set`), and its real grants live in that record,
@@ -243,14 +301,34 @@ fn space_action_phrase(actions: Option<&[SpaceAction]>) -> &'static str {
     }
 }
 
-/// `aud=...` out of a `rpc:` scope's query string, the audience the call is
-/// delegated to.
-fn parse_aud_param(query: &str) -> Option<String> {
-    query
-        .split('&')
-        .find_map(|pair| pair.strip_prefix("aud="))
-        .filter(|aud| !aud.is_empty())
-        .map(ToString::to_string)
+/// Plain-language noun phrase for one accepted `blob:` mime pattern.
+fn blob_pattern_phrase(pattern: &str) -> String {
+    match pattern {
+        "image/*" => "images".to_string(),
+        "video/*" => "videos".to_string(),
+        "audio/*" => "audio files".to_string(),
+        other => format!("files matching {other}"),
+    }
+}
+
+/// Plain-language phrase for an `account:` grant's attribute and action.
+///
+/// Mirrors the surface `assert_account_scope`'s callers actually cover (see
+/// `crate::apis::mod`): `email` gates reading/changing the address,
+/// `status` gates activation/deactivation, and `repo` gates the
+/// account-migration surface (moving the repo to another PDS) -- not
+/// per-record repo writes, which are a separate `repo:` grant entirely.
+fn account_attr_phrase(attr: &str, manage: bool) -> String {
+    match (attr, manage) {
+        ("email", true) => "Change your email address".to_string(),
+        ("email", false) => "See your email address".to_string(),
+        ("status", true) => "Activate or deactivate your account".to_string(),
+        ("status", false) => "See your account status".to_string(),
+        ("repo", true) => "Migrate or delete your account".to_string(),
+        ("repo", false) => "See information about your account".to_string(),
+        (other, true) => format!("Manage your account's {other}"),
+        (other, false) => format!("See your account's {other}"),
+    }
 }
 
 /// Join collection/scope names into a natural-language list: "a", "a and b",
@@ -393,6 +471,77 @@ mod tests {
         // who wants it, just no longer the *only* thing shown.
         assert!(html.contains("repo:app.bsky.feed.post"));
         assert!(html.contains("include:app.bsky.authFull"));
+    }
+
+    /// `identity:` and `account:` (proposal 0011) landed on `main` after this
+    /// module did, adding two `OAuthScope` variants `describe_scope` didn't
+    /// know about yet -- this is the fix for the resulting non-exhaustive
+    /// match, covering both the recognised forms and the honest fallback for
+    /// ones this server can't parse (which, per `GrantedScopes::allows_*`,
+    /// grant no actual access either).
+    #[test]
+    fn renders_identity_and_account_scopes_as_plain_language() {
+        let page = ConsentPage {
+            client_display: "Example App".to_string(),
+            client_id: "https://app.example.com/client".to_string(),
+            client_trusted: true,
+            request_uri: "urn:x".to_string(),
+            csrf: "csrf".to_string(),
+            did: "did:plc:alice".to_string(),
+            account_label: "alice.example.com".to_string(),
+            scopes: scope_items(&[
+                "identity:handle".to_string(),
+                "identity:*".to_string(),
+                "identity:bogus".to_string(),
+                "account:email?action=manage".to_string(),
+                "account:status".to_string(),
+                "account:repo?action=manage".to_string(),
+                "account:bogus".to_string(),
+            ]),
+        };
+        let html = page.render().unwrap();
+
+        assert!(html.contains("Change your handle"));
+        assert!(html.contains("Change your identity attributes"));
+        assert!(html.contains("Change an identity attribute"));
+        assert!(html.contains("doesn&#x27;t actually permit any change"));
+
+        assert!(html.contains("Change your email address"));
+        assert!(html.contains("See your account status"));
+        assert!(html.contains("Migrate or delete your account"));
+        assert!(html.contains("Access your account settings"));
+        assert!(html.contains("doesn&#x27;t actually permit any access"));
+    }
+
+    /// `blob:`/`rpc:` gained a richer, multi-value grammar (`accept=`/`lxm=`
+    /// repeated params) alongside `identity:`/`account:`; this covers the
+    /// shapes the original single-pattern implementation couldn't render:
+    /// several accepted mime types, and a grant so malformed
+    /// (`GrantedScopes::allows_rpc`/`allows_blob`) it confers nothing at all.
+    #[test]
+    fn describes_multi_value_and_empty_blob_and_rpc_grants() {
+        let page = ConsentPage {
+            client_display: "Example App".to_string(),
+            client_id: "https://app.example.com/client".to_string(),
+            client_trusted: true,
+            request_uri: "urn:x".to_string(),
+            csrf: "csrf".to_string(),
+            did: "did:plc:alice".to_string(),
+            account_label: "alice.example.com".to_string(),
+            scopes: scope_items(&[
+                "blob:?accept=image/*&accept=video/*".to_string(),
+                "blob:".to_string(),
+                "rpc:com.example.method".to_string(),
+            ]),
+        };
+        let html = page.render().unwrap();
+
+        // Multiple accepted patterns are named, not collapsed to one.
+        assert!(html.contains("Upload images and videos"));
+        // A bare `blob:` accepts nothing -- say so rather than "any type".
+        assert!(html.contains("doesn&#x27;t actually permit any uploads"));
+        // No `aud` means no access at all (proposal 0011 has no default).
+        assert!(html.contains("doesn&#x27;t grant the app any access"));
     }
 
     #[test]

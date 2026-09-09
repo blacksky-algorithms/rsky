@@ -165,7 +165,10 @@ fn split_suffix(suffix: &str) -> (Option<&str>, Option<&str>) {
 /// default, so a malformed grant matches nothing rather than matching
 /// everything (see the module docs on why unrecognised input must narrow,
 /// never widen, access).
-fn parse_identity_scope(suffix: &str) -> Option<String> {
+///
+/// `pub(crate)`: the OAuth consent screen (see `crate::oauth::templates`)
+/// reuses this to describe an `identity:` grant in plain language.
+pub(crate) fn parse_identity_scope(suffix: &str) -> Option<String> {
     let (positional, params) = split_suffix(suffix);
     let attr = match (positional, params) {
         (Some(attr), None) => attr.to_string(),
@@ -194,7 +197,9 @@ fn parse_identity_scope(suffix: &str) -> Option<String> {
 /// applying proposal 0011's default (`action=read` when unspecified). An
 /// unrecognised attribute or action denies rather than defaulting wide, for
 /// the same reason as [`parse_identity_scope`].
-fn parse_account_scope(suffix: &str) -> Option<(String, Vec<AccountAction>)> {
+///
+/// `pub(crate)`: reused by `crate::oauth::templates` for consent-screen copy.
+pub(crate) fn parse_account_scope(suffix: &str) -> Option<(String, Vec<AccountAction>)> {
     let (positional, params) = split_suffix(suffix);
     let mut attr: Option<String> = positional.map(str::to_string);
     let mut actions: Vec<AccountAction> = Vec::new();
@@ -226,7 +231,9 @@ fn parse_account_scope(suffix: &str) -> Option<(String, Vec<AccountAction>)> {
 /// `blob:<pattern>` is shorthand for a single pattern; `blob?accept=...`
 /// (repeated) names several. An empty suffix accepts nothing -- unlike
 /// `repo:`'s bare form, there is no wildcard default here.
-fn parse_blob_scope(suffix: &str) -> Vec<String> {
+///
+/// `pub(crate)`: reused by `crate::oauth::templates` for consent-screen copy.
+pub(crate) fn parse_blob_scope(suffix: &str) -> Vec<String> {
     let (positional, params) = split_suffix(suffix);
     let mut accepts: Vec<String> = Vec::new();
     if let Some(pattern) = positional {
@@ -264,7 +271,9 @@ fn mime_matches(accepted: &[String], mime: &str) -> bool {
 /// grant naming no audience matches nothing. `rpc:*?aud=*` -- every method on
 /// every service -- is rejected outright, matching the reference
 /// implementation's constructor check.
-fn parse_rpc_scope(suffix: &str) -> Option<(Vec<String>, String)> {
+///
+/// `pub(crate)`: reused by `crate::oauth::templates` for consent-screen copy.
+pub(crate) fn parse_rpc_scope(suffix: &str) -> Option<(Vec<String>, String)> {
     let (positional, params) = split_suffix(suffix);
     let mut lxms: Vec<String> = Vec::new();
     if let Some(lxm) = positional {
