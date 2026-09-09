@@ -201,7 +201,7 @@ pub async fn subscribe_repos<'a>(
                                     prev: op.prev,
                                     action: op.action.to_string()
                                 }).collect::<Vec<SubscribeReposCommitOperation>>(),
-                                blobs: blobs.into_iter().map(|blob| blob.to_string()).collect::<Vec<String>>(),
+                                blobs,
                                 prev_data,
                             };
                             let message_frame = MessageFrame::new(subscribe_commit_evt, Some(MessageFrameOpts { r#type: Some(format!("#{0}",r#type)) }));
