@@ -5,8 +5,8 @@
 use async_trait::async_trait;
 use rsky_space::LtHash;
 use rusqlite::{params, Connection, OptionalExtension};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use crate::error::{DaemonError, Result};
 use crate::index::{IndexMutation, JournaledBatch, SpaceIndex};
@@ -55,6 +55,24 @@ CREATE TABLE IF NOT EXISTS projection_failure (
     parked        INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (projector, space_uri, did, rev)
 );
+CREATE TABLE IF NOT EXISTS supervised_space_source (
+    space_uri TEXT NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('direct', 'discovery')),
+    generation INTEGER NOT NULL CHECK (generation > 0),
+    lifecycle_state TEXT NOT NULL,
+    desired_state TEXT NOT NULL CHECK (desired_state IN ('track', 'untrack')),
+    event_id TEXT,
+    payload_hash TEXT,
+    observed_at INTEGER NOT NULL,
+    PRIMARY KEY (space_uri, source)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS supervised_space_event
+    ON supervised_space_source(event_id) WHERE event_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS deleted_space_tombstone (
+    space_uri TEXT PRIMARY KEY,
+    generation INTEGER NOT NULL,
+    deleted_at INTEGER NOT NULL
+);
 ";
 
 /// Columns added to `projection_failure` after its first release; an index
@@ -69,7 +87,67 @@ pub struct SqliteIndex {
     conn: Mutex<Connection>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupervisedTarget {
+    pub space_uri: String,
+    pub source: String,
+    pub generation: i64,
+    pub lifecycle_state: String,
+    pub desired_state: String,
+    pub event_id: Option<String>,
+    pub payload_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectIntakeOutcome {
+    Accepted,
+    Duplicate,
+    Stale { stored_generation: i64 },
+    Conflict,
+}
+
+pub struct DirectIntake {
+    pub space_uri: String,
+    pub generation: i64,
+    pub desired_state: String,
+    pub lifecycle_state: String,
+    pub event_id: String,
+    pub payload_hash: String,
+    pub observed_at: i64,
+}
+
+fn is_same_generation_progression(
+    stored_desired: &str,
+    stored_lifecycle: &str,
+    desired: &str,
+    lifecycle: &str,
+) -> bool {
+    (stored_desired == "track"
+        && desired == "track"
+        && stored_lifecycle == "host_registered"
+        && lifecycle == "active")
+        || (stored_desired == "track"
+            && desired == "untrack"
+            && stored_lifecycle == "deleting"
+            && lifecycle == "inactive")
+}
+
 impl SqliteIndex {
+    fn control_connection(&self) -> Result<MutexGuard<'_, Connection>> {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match self.conn.try_lock() {
+                Ok(connection) => return Ok(connection),
+                Err(_) if Instant::now() < deadline => std::thread::yield_now(),
+                Err(_) => {
+                    return Err(DaemonError::Index(
+                        "sqlite lock acquisition timed out".into(),
+                    ))
+                }
+            }
+        }
+    }
+
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path).map_err(db_err)?;
         conn.busy_timeout(Duration::from_secs(5)).map_err(db_err)?;
@@ -118,6 +196,252 @@ impl SqliteIndex {
             db: Arc::clone(self),
             space_uri: space_uri.into(),
         }
+    }
+
+    pub fn direct_targets(&self) -> Result<Vec<SupervisedTarget>> {
+        let conn = self.control_connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT space_uri, source, generation, lifecycle_state, desired_state, event_id, payload_hash
+             FROM supervised_space_source WHERE source = 'direct'",
+        ).map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(SupervisedTarget {
+                    space_uri: row.get(0)?,
+                    source: row.get(1)?,
+                    generation: row.get(2)?,
+                    lifecycle_state: row.get(3)?,
+                    desired_state: row.get(4)?,
+                    event_id: row.get(5)?,
+                    payload_hash: row.get(6)?,
+                })
+            })
+            .map_err(db_err)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_err)
+    }
+
+    pub fn effective_targets(&self) -> Result<Vec<SupervisedTarget>> {
+        let conn = self.control_connection()?;
+        let mut tombstones = std::collections::HashMap::new();
+        let mut tombstone_rows = conn
+            .prepare("SELECT space_uri, generation FROM deleted_space_tombstone")
+            .map_err(db_err)?;
+        for row in tombstone_rows
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(db_err)?
+        {
+            let (space, generation) = row.map_err(db_err)?;
+            tombstones.insert(space, generation);
+        }
+        let mut stmt = conn
+            .prepare(
+                "SELECT space_uri, source, generation, lifecycle_state, desired_state, event_id, payload_hash
+                 FROM supervised_space_source",
+            )
+            .map_err(db_err)?;
+        let mut targets = Vec::new();
+        for row in stmt
+            .query_map([], |row| {
+                Ok(SupervisedTarget {
+                    space_uri: row.get(0)?,
+                    source: row.get(1)?,
+                    generation: row.get(2)?,
+                    lifecycle_state: row.get(3)?,
+                    desired_state: row.get(4)?,
+                    event_id: row.get(5)?,
+                    payload_hash: row.get(6)?,
+                })
+            })
+            .map_err(db_err)?
+        {
+            let target = row.map_err(db_err)?;
+            if target.desired_state == "untrack"
+                || target.lifecycle_state == "inactive"
+                || tombstones
+                    .get(&target.space_uri)
+                    .is_some_and(|generation| *generation >= target.generation)
+            {
+                continue;
+            }
+            targets.push(target);
+        }
+        targets.sort_by(|a, b| a.space_uri.cmp(&b.space_uri));
+        Ok(targets)
+    }
+
+    pub fn apply_direct(&self, intake: DirectIntake) -> Result<DirectIntakeOutcome> {
+        let DirectIntake {
+            space_uri,
+            generation,
+            desired_state,
+            lifecycle_state,
+            event_id,
+            payload_hash,
+            observed_at,
+        } = intake;
+        if generation <= 0 {
+            return Err(DaemonError::Index("generation must be positive".into()));
+        }
+        let mut conn = self.control_connection()?;
+        let tx = conn.transaction().map_err(db_err)?;
+        let current: Option<(i64, String, String, String, Option<String>)> = tx
+            .query_row(
+                "SELECT generation, desired_state, lifecycle_state, event_id, payload_hash
+             FROM supervised_space_source WHERE space_uri = ?1 AND source = 'direct'",
+                params![space_uri],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(db_err)?;
+        if let Some((
+            stored_generation,
+            stored_desired,
+            stored_lifecycle,
+            stored_event,
+            stored_hash,
+        )) = current
+        {
+            if stored_generation > generation {
+                return Ok(DirectIntakeOutcome::Stale { stored_generation });
+            }
+            if stored_generation == generation {
+                if stored_event == event_id
+                    && stored_hash.as_deref() == Some(payload_hash.as_str())
+                    && stored_desired == desired_state
+                    && stored_lifecycle == lifecycle_state
+                {
+                    tx.commit().map_err(db_err)?;
+                    return Ok(DirectIntakeOutcome::Duplicate);
+                }
+                if !is_same_generation_progression(
+                    &stored_desired,
+                    &stored_lifecycle,
+                    &desired_state,
+                    &lifecycle_state,
+                ) {
+                    return Ok(DirectIntakeOutcome::Conflict);
+                }
+            }
+        }
+        let tombstone_generation: Option<i64> = tx
+            .query_row(
+                "SELECT generation FROM deleted_space_tombstone WHERE space_uri = ?1",
+                params![space_uri],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_err)?;
+        if desired_state == "track"
+            && tombstone_generation.is_some_and(|tombstone| tombstone >= generation)
+        {
+            return Ok(DirectIntakeOutcome::Stale {
+                stored_generation: tombstone_generation.unwrap(),
+            });
+        }
+        tx.execute(
+            "INSERT INTO supervised_space_source
+             (space_uri, source, generation, lifecycle_state, desired_state, event_id, payload_hash, observed_at)
+             VALUES (?1, 'direct', ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(space_uri, source) DO UPDATE SET generation=excluded.generation,
+             lifecycle_state=excluded.lifecycle_state, desired_state=excluded.desired_state,
+             event_id=excluded.event_id, payload_hash=excluded.payload_hash, observed_at=excluded.observed_at",
+            params![space_uri, generation, lifecycle_state, desired_state, event_id, payload_hash, observed_at],
+        ).map_err(db_err)?;
+        if desired_state == "untrack" {
+            tx.execute(
+                "INSERT INTO deleted_space_tombstone(space_uri, generation, deleted_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(space_uri) DO UPDATE SET generation=excluded.generation, deleted_at=excluded.deleted_at
+                 WHERE excluded.generation >= deleted_space_tombstone.generation",
+                params![space_uri, generation, observed_at],
+            ).map_err(db_err)?;
+        } else if tombstone_generation.is_some_and(|tombstone| generation > tombstone) {
+            tx.execute(
+                "DELETE FROM deleted_space_tombstone WHERE space_uri = ?1 AND generation < ?2",
+                params![space_uri, generation],
+            )
+            .map_err(db_err)?;
+        }
+        tx.commit().map_err(db_err)?;
+        Ok(DirectIntakeOutcome::Accepted)
+    }
+
+    pub fn replace_discovery(
+        &self,
+        targets: &[(String, i64, String)],
+        observed_at: i64,
+    ) -> Result<()> {
+        let mut conn = self.control_connection()?;
+        let tx = conn.transaction().map_err(db_err)?;
+        tx.execute(
+            "DELETE FROM supervised_space_source WHERE source = 'discovery'",
+            [],
+        )
+        .map_err(db_err)?;
+        for (space, generation, state) in targets {
+            if *generation > 0 {
+                tx.execute(
+                    "INSERT INTO supervised_space_source
+                     (space_uri, source, generation, lifecycle_state, desired_state, observed_at)
+                     VALUES (?1, 'discovery', ?2, ?3, 'track', ?4)",
+                    params![space, generation, state, observed_at],
+                )
+                .map_err(db_err)?;
+            }
+        }
+        tx.commit().map_err(db_err)
+    }
+
+    pub async fn purge_space_with_tombstone(
+        self: Arc<Self>,
+        space_uri: String,
+        generation: i64,
+        deleted_at: i64,
+    ) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let db = self;
+        tokio::task::spawn_blocking(move || {
+            let mut conn = loop {
+                match db.conn.try_lock() {
+                    Ok(conn) => break conn,
+                    Err(_) if tokio::time::Instant::now() < deadline => std::thread::yield_now(),
+                    Err(_) => return Err(DaemonError::Index("sqlite lock acquisition timed out".into())),
+                }
+            };
+            let tx = conn.transaction().map_err(db_err)?;
+            let stored_generation: Option<i64> = tx
+                .query_row(
+                    "SELECT MAX(generation) FROM supervised_space_source WHERE space_uri = ?1",
+                    params![space_uri],
+                    |row| row.get(0),
+                )
+                .map_err(db_err)?;
+            let generation = generation.max(stored_generation.unwrap_or(0));
+            for table in ["record", "sync_state", "projection_journal", "projector_cursor", "projection_failure"] {
+                tx.execute(&format!("DELETE FROM {table} WHERE space_uri = ?1"), params![space_uri])
+                    .map_err(db_err)?;
+            }
+            tx.execute(
+                "DELETE FROM supervised_space_source WHERE space_uri = ?1",
+                params![space_uri],
+            )
+            .map_err(db_err)?;
+            tx.execute(
+                "INSERT INTO deleted_space_tombstone(space_uri, generation, deleted_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(space_uri) DO UPDATE SET generation=MAX(generation, excluded.generation), deleted_at=excluded.deleted_at",
+                params![space_uri, generation, deleted_at],
+            ).map_err(db_err)?;
+            tx.commit().map_err(db_err)
+        }).await.map_err(|e| DaemonError::Index(e.to_string()))?
     }
 }
 
@@ -438,6 +762,107 @@ mod tests {
     fn open_at(dir: &tempfile::TempDir) -> Arc<SqliteIndex> {
         let path = dir.path().join("index.sqlite");
         Arc::new(SqliteIndex::open(path.to_str().unwrap()).unwrap())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply(
+        db: &SqliteIndex,
+        space: &str,
+        generation: i64,
+        desired: &str,
+        lifecycle: &str,
+        event: &str,
+        hash: &str,
+        observed_at: i64,
+    ) -> Result<DirectIntakeOutcome> {
+        db.apply_direct(DirectIntake {
+            space_uri: space.to_string(),
+            generation,
+            desired_state: desired.to_string(),
+            lifecycle_state: lifecycle.to_string(),
+            event_id: event.to_string(),
+            payload_hash: hash.to_string(),
+            observed_at,
+        })
+    }
+
+    #[test]
+    fn direct_intake_is_idempotent_and_generation_fenced() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_at(&dir);
+        let space = "at://did:plc:authority/space/community.blacksky.feed/main";
+        assert_eq!(
+            apply(&db, space, 1, "track", "host_registered", "a", "h", 1).unwrap(),
+            DirectIntakeOutcome::Accepted
+        );
+        assert_eq!(
+            apply(&db, space, 1, "track", "host_registered", "a", "h", 2).unwrap(),
+            DirectIntakeOutcome::Duplicate
+        );
+        assert_eq!(
+            apply(&db, space, 0, "track", "host_registered", "z", "h", 2)
+                .unwrap_err()
+                .to_string(),
+            "index error: generation must be positive"
+        );
+        assert_eq!(
+            apply(&db, space, 0, "track", "host_registered", "z", "h", 2)
+                .unwrap_err()
+                .to_string(),
+            "index error: generation must be positive"
+        );
+        assert_eq!(
+            apply(&db, space, 2, "track", "active", "b", "h2", 3).unwrap(),
+            DirectIntakeOutcome::Accepted
+        );
+        assert_eq!(
+            apply(&db, space, 1, "track", "host_registered", "a", "h", 4).unwrap(),
+            DirectIntakeOutcome::Stale {
+                stored_generation: 2
+            }
+        );
+    }
+
+    #[test]
+    fn same_generation_progression_is_accepted_but_conflicts_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_at(&dir);
+        let space = "at://did:plc:authority/space/community.blacksky.feed/main";
+
+        assert_eq!(
+            apply(&db, space, 1, "track", "host_registered", "a", "h1", 1).unwrap(),
+            DirectIntakeOutcome::Accepted
+        );
+        assert_eq!(
+            apply(&db, space, 1, "track", "active", "b", "h2", 2).unwrap(),
+            DirectIntakeOutcome::Accepted
+        );
+        assert_eq!(
+            apply(&db, space, 1, "track", "host_registered", "c", "h3", 3).unwrap(),
+            DirectIntakeOutcome::Conflict
+        );
+        assert_eq!(
+            apply(&db, space, 1, "track", "active", "b", "h2", 4).unwrap(),
+            DirectIntakeOutcome::Duplicate
+        );
+    }
+
+    #[test]
+    fn tombstone_suppresses_discovery_until_a_higher_generation_resurrects() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_at(&dir);
+        let space = "at://did:plc:authority/space/community.blacksky.feed/main";
+
+        apply(&db, space, 4, "track", "deleting", "a", "h1", 1).unwrap();
+        apply(&db, space, 4, "untrack", "inactive", "b", "h2", 2).unwrap();
+        db.replace_discovery(&[(space.to_string(), 4, "deleting".into())], 3)
+            .unwrap();
+        assert!(db.effective_targets().unwrap().is_empty());
+
+        db.replace_discovery(&[(space.to_string(), 5, "active".into())], 4)
+            .unwrap();
+        assert_eq!(db.effective_targets().unwrap().len(), 1);
+        assert_eq!(db.effective_targets().unwrap()[0].generation, 5);
     }
 
     #[tokio::test]

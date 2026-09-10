@@ -26,6 +26,7 @@ pub mod engine;
 pub mod error;
 pub mod feeds;
 pub mod index;
+pub mod intake;
 pub mod journal;
 pub mod notify;
 pub mod projection;
@@ -50,6 +51,7 @@ pub use feeds::{
     ProjectionOperation, SpaceLifecycleAcker,
 };
 pub use index::{InMemoryIndex, IndexMutation, JournaledBatch, SpaceIndex};
+pub use intake::{router as intake_router, IntakeState};
 pub use journal::{drain_all, drain_all_sweep, JournalConsumer, SharedJournalConsumer};
 pub use notify::{router as notify_router, NotifyState, WriteNotice};
 pub use projection::Projector;
@@ -58,10 +60,11 @@ pub use repohost::{HttpRepoHost, OplogPage, RepoHostClient};
 pub use router::{Router, SyncEvent};
 pub use runner::{
     run, run_multi, sync_repo_healing, sync_space_once, MultiRunnerOptions, RunnerOptions,
-    SweepReport,
+    SupervisorCommand, SweepReport,
 };
 pub use spaces::{
-    CombinedSource, HttpSpaceSource, SpaceRegistry, SpaceSource, SpaceTarget, StaticSpaces,
+    CombinedSource, HttpSpaceSource, PersistedSpaces, SpaceRegistry, SpaceSource, SpaceTarget,
+    StaticSpaces,
 };
 pub use sqlite_index::{SpaceScopedIndex, SqliteIndex};
 pub use xrpc::{HttpSpaceHost, SpaceHostClient};

@@ -6,6 +6,7 @@ use rsky_lexicon::com::atproto::space::RepoRef;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::oneshot;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
@@ -38,12 +39,31 @@ pub type SpaceWorkerParts = (
 );
 pub type MultiSpaceFactory = Arc<dyn Fn(&str) -> Result<SpaceWorkerParts> + Send + Sync>;
 
+pub enum SupervisorCommand {
+    Track {
+        space: String,
+        generation: i64,
+        state: String,
+    },
+    Untrack {
+        space: String,
+        generation: i64,
+    },
+    Write(WriteNotice),
+    ProtocolSpaceDeleted {
+        space: String,
+        generation: i64,
+        completion: oneshot::Sender<Result<()>>,
+    },
+}
+
 pub struct MultiRunnerOptions {
     pub refresh_interval_secs: u64,
     pub sweep_interval_secs: u64,
     pub notify_endpoint: String,
     pub service_identity: String,
     pub now_fn: fn() -> u64,
+    pub db: Option<Arc<crate::sqlite_index::SqliteIndex>>,
 }
 
 /// Supervises one existing `run` worker per discovered space. Source errors
@@ -57,7 +77,7 @@ pub async fn run_multi(
     factory: MultiSpaceFactory,
     host: Arc<dyn SpaceHostClient>,
     keys: Arc<dyn CommitKeyResolver>,
-    mut notices: mpsc::Receiver<WriteNotice>,
+    mut commands: mpsc::Receiver<SupervisorCommand>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     struct Worker {
@@ -73,9 +93,17 @@ pub async fn run_multi(
             _ = shutdown.changed() => break,
             _ = refresh.tick() => {
                 let desired = match source.spaces().await { Ok(value) => value, Err(error) => { tracing::warn!(error = %error, "space source unavailable; keeping current workers"); continue; } };
-                let stale: Vec<_> = workers.iter().filter(|(space, worker)| desired.get(*space).is_none_or(|target| target.generation != worker.generation)).map(|(space, _)| space.clone()).collect();
+                let exited: Vec<_> = workers.iter().filter(|(_, worker)| worker.handle.is_finished()).map(|(space, _)| space.clone()).collect();
+                for space in exited { workers.remove(&space); tracing::warn!(%space, "space worker exited; scheduling restart"); }
+                let stale: Vec<_> = workers.iter().filter(|(space, worker)| desired.get(*space).is_none_or(|target| target.state == "inactive" || target.generation != worker.generation)).map(|(space, _)| space.clone()).collect();
                 for space in stale { if let Some(worker) = workers.remove(&space) { let _ = worker.stop.send(true); let _ = worker.handle.await; } }
-                for (space, target) in &desired { if workers.contains_key(space) { continue; }
+                for (space, target) in &desired {
+                    if target.state == "inactive" {
+                        continue;
+                    }
+                    if workers.contains_key(space) {
+                        continue;
+                    }
                     let (creds, repo, index, projectors, acker) = match factory(space) { Ok(parts) => parts, Err(error) => { tracing::warn!(%space, error = %error, "cannot prepare space worker"); continue; } };
                     let (tx, rx) = mpsc::channel(256); let (stop, stop_rx) = watch::channel(false);
                     let worker_opts = RunnerOptions { space_uri: space.clone(), sweep_interval_secs: opts.sweep_interval_secs, notify_endpoint: opts.notify_endpoint.clone(), service_identity: opts.service_identity.clone(), generation: target.generation, now_fn: opts.now_fn };
@@ -84,7 +112,30 @@ pub async fn run_multi(
                 }
                 registry.replace(workers.keys().cloned().collect());
             }
-            Some(notice) = notices.recv() => { if let Some(worker) = workers.get(&notice.0) { let _ = worker.notices.send(notice).await; } else { tracing::warn!(space = %notice.0, "notice for a space we do not sync"); } }
+            Some(command) = commands.recv() => {
+                match command {
+                    SupervisorCommand::Write(notice) => {
+                        if let Some(worker) = workers.get(&notice.0) { let _ = worker.notices.send(notice).await; }
+                        else { tracing::warn!(space = %notice.0, "notice for a space we do not sync"); }
+                    }
+                    SupervisorCommand::Track { .. } => { refresh.reset_immediately(); }
+                    SupervisorCommand::Untrack { space, .. } => {
+                        if let Some(worker) = workers.remove(&space) { let _ = worker.stop.send(true); let _ = worker.handle.await; }
+                        registry.remove(&space);
+                    }
+                    SupervisorCommand::ProtocolSpaceDeleted { space, generation, completion } => {
+                        let result = match &opts.db {
+                            Some(db) => db.clone().purge_space_with_tombstone(space.clone(), generation, (opts.now_fn)() as i64).await,
+                            None => Err(DaemonError::Index("sqlite store is unavailable".into())),
+                        };
+                        if result.is_ok() {
+                            if let Some(worker) = workers.remove(&space) { let _ = worker.stop.send(true); let _ = worker.handle.await; }
+                            registry.remove(&space);
+                        }
+                        let _ = completion.send(result);
+                    }
+                }
+            }
         }
     }
     for (space, worker) in workers {
@@ -375,6 +426,20 @@ mod tests {
                 .with_max_level(tracing::Level::TRACE)
                 .finish(),
         )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn track_refresh_wakes_immediately_without_postponing_periodic_reconciliation() {
+        let mut refresh = tokio::time::interval(Duration::from_secs(300));
+        refresh.tick().await;
+        refresh.reset_immediately();
+        tokio::time::timeout(Duration::from_millis(1), refresh.tick())
+            .await
+            .expect("track must wake reconciliation immediately");
+        tokio::time::advance(Duration::from_secs(300)).await;
+        tokio::time::timeout(Duration::from_millis(1), refresh.tick())
+            .await
+            .expect("periodic reconciliation must remain scheduled");
     }
 
     /// A commit bound to an arbitrary author did (the recovery fixture pins
