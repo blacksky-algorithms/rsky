@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 
 use crate::error::{DaemonError, Result};
+use crate::sqlite_index::SqliteIndex;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpaceTarget {
@@ -16,6 +17,42 @@ pub struct SpaceTarget {
 #[async_trait]
 pub trait SpaceSource: Send + Sync {
     async fn spaces(&self) -> Result<BTreeMap<String, SpaceTarget>>;
+}
+
+pub struct PersistedSpaces {
+    db: Arc<SqliteIndex>,
+}
+
+impl PersistedSpaces {
+    pub fn new(db: Arc<SqliteIndex>) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait]
+impl SpaceSource for PersistedSpaces {
+    async fn spaces(&self) -> Result<BTreeMap<String, SpaceTarget>> {
+        let db = Arc::clone(&self.db);
+        let targets = tokio::task::spawn_blocking(move || db.effective_targets())
+            .await
+            .map_err(|error| DaemonError::Index(error.to_string()))??;
+        Ok(targets
+            .into_iter()
+            .map(|target| {
+                (
+                    target.space_uri,
+                    SpaceTarget {
+                        generation: target.generation,
+                        state: if target.desired_state == "untrack" {
+                            "inactive".into()
+                        } else {
+                            target.lifecycle_state
+                        },
+                    },
+                )
+            })
+            .collect())
+    }
 }
 
 pub struct StaticSpaces(pub BTreeSet<String>);
@@ -52,6 +89,7 @@ pub struct HttpSpaceSource {
     authority_did: Option<String>,
     space_type: String,
     http: reqwest::Client,
+    persistence: Option<Arc<SqliteIndex>>,
 }
 
 impl HttpSpaceSource {
@@ -67,7 +105,13 @@ impl HttpSpaceSource {
             authority_did,
             space_type: space_type.into(),
             http: reqwest::Client::new(),
+            persistence: None,
         }
+    }
+
+    pub fn with_persistence(mut self, db: Arc<SqliteIndex>) -> Self {
+        self.persistence = Some(db);
+        self
     }
 }
 
@@ -106,7 +150,7 @@ impl SpaceSource for HttpSpaceSource {
             .json()
             .await
             .map_err(|e| DaemonError::Xrpc(e.to_string()))?;
-        Ok(body
+        let spaces: BTreeMap<String, SpaceTarget> = body
             .spaces
             .into_iter()
             .filter_map(|entry| {
@@ -129,7 +173,20 @@ impl SpaceSource for HttpSpaceSource {
                         },
                     ))
             })
-            .collect())
+            .collect();
+        if let Some(db) = &self.persistence {
+            let targets = spaces
+                .iter()
+                .map(|(space, target)| (space.clone(), target.generation, target.state.clone()))
+                .collect::<Vec<_>>();
+            let db = Arc::clone(db);
+            tokio::task::spawn_blocking(move || {
+                db.replace_discovery(&targets, chrono::Utc::now().timestamp())
+            })
+            .await
+            .map_err(|error| DaemonError::Index(error.to_string()))??;
+        }
+        Ok(spaces)
     }
 }
 

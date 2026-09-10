@@ -121,6 +121,15 @@ pub struct Config {
     #[arg(long, env = "DAEMON_SWEEP_INTERVAL_SECS", default_value_t = 300)]
     pub sweep_interval_secs: u64,
 
+    #[arg(long, env = "DAEMON_DISCOVERY_INTERVAL_SECS", default_value_t = 300)]
+    pub discovery_interval_secs: u64,
+
+    #[arg(long, env = "DAEMON_INTAKE_ACCEPT_ENABLED", default_value_t = false)]
+    pub intake_accept_enabled: bool,
+
+    #[arg(long, env = "DAEMON_INTAKE_ISSUER_DID", default_value = "")]
+    pub intake_issuer_did: String,
+
     /// Sweeps a batch refused with "author is not admitted" is re-attempted
     /// for before it is parked. Admission can arrive late; it can also never
     /// arrive, so the retry is slow but finite.
@@ -150,6 +159,14 @@ impl Config {
         }
         if !self.appview_url.is_empty() && self.appview_service_did.is_empty() {
             return Err("DAEMON_APPVIEW_SERVICE_DID is required with DAEMON_APPVIEW_URL".into());
+        }
+        if self.intake_accept_enabled {
+            if self.index_db_path.is_empty() {
+                return Err("DAEMON_INDEX_DB_PATH is required when intake is enabled".into());
+            }
+            if self.intake_issuer_did.is_empty() {
+                return Err("DAEMON_INTAKE_ISSUER_DID is required when intake is enabled".into());
+            }
         }
         Ok(())
     }
