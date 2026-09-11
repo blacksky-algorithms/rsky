@@ -166,6 +166,7 @@ pub fn get_admin_token() -> String {
     Start a client for the rsky-pds rocket instance backed by sqlite
     databases under a fresh temporary directory
 */
+#[allow(dead_code)] // the compatibility binary boots over the fixture instead
 pub async fn get_client() -> (TempDir, Client) {
     init_env();
     let dir = tempfile::tempdir().expect("Valid temporary directory");
@@ -231,4 +232,204 @@ pub async fn create_account(client: &Client) -> (String, String) {
         .await;
 
     ("foo@example.com".to_string(), "password".to_string())
+}
+
+/// A private copy of the reference-PDS fixture under `tests/fixtures`,
+/// together with its manifest. `PDS_COMPAT_DATA_DIR` points at a freshly
+/// built fixture instead of the checked-in one.
+#[allow(dead_code)] // only the compatibility test binary drives this
+pub struct Fixture {
+    pub dir: std::path::PathBuf,
+    pub source: std::path::PathBuf,
+    pub manifest: serde_json::Value,
+}
+
+#[allow(dead_code)]
+impl Fixture {
+    pub fn account(&self, name: &str) -> &serde_json::Value {
+        &self.manifest["accounts"][name]
+    }
+
+    pub fn did(&self, name: &str) -> String {
+        self.account(name)["did"].as_str().unwrap().to_owned()
+    }
+
+    pub fn expected(&self, name: &str) -> Vec<u8> {
+        std::fs::read(self.source.join("expected").join(name)).expect("expected fixture output")
+    }
+
+    pub fn expected_json(&self, name: &str) -> serde_json::Value {
+        serde_json::from_slice(&self.expected(name)).expect("expected fixture json")
+    }
+
+    pub fn expected_status(&self, name: &str) -> u16 {
+        self.manifest["expected_status"][name]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    pub fn did_key(&self, name: &str) -> String {
+        let doc: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                self.source
+                    .join("plc")
+                    .join(format!("{}.json", self.did(name))),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        format!(
+            "did:key:{}",
+            doc["verificationMethod"][0]["publicKeyMultibase"]
+                .as_str()
+                .unwrap()
+        )
+    }
+
+    pub fn data(&self, relative: &str) -> std::path::PathBuf {
+        self.dir.join("data").join(relative)
+    }
+
+    pub fn actor_store(&self, name: &str) -> std::path::PathBuf {
+        let did = self.did(name);
+        let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(did.as_bytes()));
+        self.data("actors")
+            .join(&hash[..2])
+            .join(did)
+            .join("store.sqlite")
+    }
+}
+
+#[allow(dead_code)]
+static FIXTURE: std::sync::OnceLock<(TempDir, Fixture)> = std::sync::OnceLock::new();
+
+#[allow(dead_code)]
+fn fixture_source() -> std::path::PathBuf {
+    match std::env::var("PDS_COMPAT_DATA_DIR") {
+        Ok(dir) => std::path::PathBuf::from(dir),
+        Err(_) => std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("ts-pds-0.5.27"),
+    }
+}
+
+#[allow(dead_code)]
+fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let target = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+/// Serves the DID documents the fixture was built against, so identity
+/// lookups resolve to exactly what the reference PDS saw.
+#[allow(dead_code)]
+fn start_fixture_plc_directory(plc_dir: std::path::PathBuf) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture plc directory");
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let path = req
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("/")
+                .replace("%3A", ":")
+                .replace("%3a", ":");
+            let mut parts = path.trim_start_matches('/').splitn(2, '/');
+            let did = parts.next().unwrap_or_default().to_owned();
+            let file = match parts.next() {
+                None => format!("{did}.json"),
+                Some("data") => format!("{did}.data.json"),
+                Some("log/audit") => format!("{did}.audit.json"),
+                Some(_) => String::new(),
+            };
+            let (status, body) = match std::fs::read(plc_dir.join(&file)) {
+                Ok(body) if !file.is_empty() => ("200 OK", body),
+                _ => (
+                    "404 Not Found",
+                    b"{\"message\":\"DID not registered\"}".to_vec(),
+                ),
+            };
+            let header = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    });
+    port
+}
+
+#[allow(dead_code)]
+fn fixture() -> &'static Fixture {
+    &FIXTURE
+        .get_or_init(|| {
+            let source = fixture_source();
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(source.join("manifest.json")).unwrap())
+                    .unwrap();
+            let tmp = tempfile::tempdir().expect("Valid temporary directory");
+            copy_dir(&source.join("data"), &tmp.path().join("data"));
+            let secrets = manifest["secrets"].as_object().unwrap();
+            for (key, value) in secrets {
+                std::env::set_var(key, value.as_str().unwrap());
+            }
+            std::env::set_var(
+                "PDS_ADMIN_PASS",
+                secrets["PDS_ADMIN_PASSWORD"].as_str().unwrap(),
+            );
+            std::env::set_var("PDS_INVITE_REQUIRED", "false");
+            std::env::set_var(
+                "PDS_BLOBSTORE_DISK_LOCATION",
+                tmp.path().join("data").join("blocks"),
+            );
+            let port = start_fixture_plc_directory(source.join("plc"));
+            std::env::set_var("PDS_DID_PLC_URL", format!("http://127.0.0.1:{port}"));
+            let dir = tmp.path().to_path_buf();
+            (
+                tmp,
+                Fixture {
+                    dir,
+                    source,
+                    manifest,
+                },
+            )
+        })
+        .1
+}
+
+/// Start a client over a private copy of the reference-PDS fixture. The
+/// copy is shared by every test in the process, so tests must not mutate
+/// the accounts the fixture ships with.
+#[allow(dead_code)]
+pub async fn get_client_with_fixture() -> (&'static Fixture, Client) {
+    let fixture = fixture();
+    init_env();
+    let path = |name: &str| fixture.data(name).to_str().unwrap().to_owned();
+    let rocket_cfg = RocketConfig {
+        service_db: Some(ServiceDbConfig {
+            account_db_location: path("account.sqlite"),
+            sequencer_db_location: path("sequencer.sqlite"),
+            did_cache_db_location: path("did_cache.sqlite"),
+        }),
+        actor_store_directory: Some(path("actors")),
+    };
+    let client = Client::untracked(build_rocket(Some(rocket_cfg)).await)
+        .await
+        .expect("Valid Rocket instance");
+    (fixture, client)
 }

@@ -38,6 +38,14 @@ unused `recoveryKey`, `createdAt`, and `inviteNote` columns are dropped).
   `com.atproto.repo.listRecords` answers `InvalidRequest` for a repository it
   does not serve, instead of internal errors.
 - `com.atproto.server.describeServer` includes `blobUploadLimit`.
+
+### Added — reference-PDS compatibility fixture
+
+`tests/fixtures/ts-pds-0.5.27` is a data directory produced by the pinned
+reference PDS image (built by `pds-image/verify/build-ts-fixture.sh`), and
+`tests/ts_compat_tests.rs` boots rsky-pds over a copy of it and compares
+responses with the ones the reference PDS gave. `PDS_COMPAT_DATA_DIR` points
+the tests at a freshly built fixture.
 ## [1.1.0]
 
 ### Changed — password hashing switched from Argon2 to scrypt
