@@ -2,6 +2,29 @@
 
 All notable changes to `rsky-pds` are documented here.
 
+## [1.2.0]
+
+### Changed — reference-compatible schema ledgers and account schema
+
+rsky-pds now records the migrations it shares with the reference TypeScript
+PDS in Kysely's `kysely_migration` ledger under the reference migration names,
+and its own additions in a separate `migrations` ledger. `account.sqlite`
+follows the reference schema migration for migration (`passwordScrypt`
+columns, no rsky-only columns). A database created by either implementation
+can therefore be opened by the other: rsky-pds opens a reference-created
+`account.sqlite`, `sequencer.sqlite`, `did_cache.sqlite`, or actor store as-is,
+and reads never modify a store's schema. rsky-only actor tables are added on the
+first write to a store, not on read.
+
+Databases created by rsky-pds 1.1.x are converted in place on first open: the
+misfiled ledger rows move to `kysely_migration`, and `account.sqlite` is
+brought to the reference column set (`password` becomes `passwordScrypt`; the
+unused `recoveryKey`, `createdAt`, and `inviteNote` columns are dropped).
+
+**This conversion is one-way.** A pre-1.2.0 binary does not know the
+`kysely_migration` ledger and will fail to open a converted database. Back up
+`account.sqlite` before upgrading if a rollback to 1.1.x must remain possible.
+
 ## [1.1.0]
 
 ### Changed — password hashing switched from Argon2 to scrypt

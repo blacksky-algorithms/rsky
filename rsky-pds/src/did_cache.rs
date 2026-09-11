@@ -1,13 +1,19 @@
 // based on https://github.com/bluesky-social/atproto/blob/main/packages/pds/src/did-cache
 
 use crate::background::BackgroundQueue;
-use crate::db::migrator::{migrate_to_latest, Migration};
+use crate::db::migrator::{migrate_to_latest, Migration, MigrationSet};
 use crate::db::sqlite::Db;
 use anyhow::Result;
 use rsky_identity::types::{CacheResult, DidCache, DidDocument, GetDocFn};
 use rusqlite::{params, OptionalExtension};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
+
+pub const DID_CACHE_DB_MIGRATIONS_SET: MigrationSet = MigrationSet {
+    shared: DID_CACHE_DB_MIGRATIONS,
+    local: &[],
+    legacy: None,
+};
 
 pub const DID_CACHE_DB_MIGRATIONS: &[Migration] = &[Migration {
     name: "001",
@@ -21,7 +27,7 @@ pub const DID_CACHE_DB_MIGRATIONS: &[Migration] = &[Migration {
 
 pub async fn get_migrated_db(location: impl AsRef<Path>) -> Result<Db> {
     let db = Db::open(location)?;
-    migrate_to_latest(&db, DID_CACHE_DB_MIGRATIONS).await?;
+    migrate_to_latest(&db, DID_CACHE_DB_MIGRATIONS_SET).await?;
     Ok(db)
 }
 

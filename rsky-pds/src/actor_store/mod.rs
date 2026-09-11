@@ -3,7 +3,7 @@
 
 use crate::actor_store::blob::BlobReader;
 use crate::actor_store::blobstore::BlobStore;
-use crate::actor_store::db::{get_migrated_db, ActorDb};
+use crate::actor_store::db::{get_db, get_migrated_db, ActorDb};
 use crate::actor_store::preference::PreferenceReader;
 use crate::actor_store::record::RecordReader;
 use crate::actor_store::repo::sql_repo::SqlRepoReader;
@@ -153,8 +153,23 @@ pub struct ActorStore {
     pub directory: PathBuf,
     pub reserved_key_dir: PathBuf,
     pub background_queue: BackgroundQueue,
-    cache: Mutex<LruCache<String, ActorDb>>,
+    cache: Mutex<LruCache<String, CachedDb>>,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+/// How an actor store is being opened. Reads never modify the store's
+/// schema, so a store shared with another PDS implementation stays exactly
+/// as that implementation left it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenMode {
+    Read,
+    Write,
+}
+
+#[derive(Debug, Clone)]
+struct CachedDb {
+    db: ActorDb,
+    migrated: bool,
 }
 
 impl ActorStore {
@@ -205,22 +220,27 @@ impl ActorStore {
             .clone()
     }
 
-    async fn open_db(&self, did: &str) -> Result<ActorDb> {
+    async fn open_db(&self, did: &str, mode: OpenMode) -> Result<ActorDb> {
         {
             let mut cache = self.cache.lock().expect("actor store cache poisoned");
-            if let Some(db) = cache.get(did) {
-                return Ok(db.clone());
+            if let Some(entry) = cache.get_mut(did) {
+                if mode == OpenMode::Read || entry.migrated {
+                    return Ok(entry.db.clone());
+                }
             }
         }
         let location = self.get_location(did)?;
         if !tokio::fs::try_exists(&location.db_location).await? {
             bail!("Repo not found: {did}")
         }
-        // Migrate on open, not only on create: an account created before a
-        // migration existed would otherwise never receive it, and the first
-        // query against the missing table turns into a runtime 500. Idempotent
-        // and cheap once applied (a single lookup in the migrations table).
-        let db = get_migrated_db(&location.db_location).await?;
+        // A store may be shared with another PDS implementation, so reads
+        // never touch its schema. Writes migrate on open rather than only on
+        // create, so an account created before a local migration existed
+        // still receives it before its first write needs the new table.
+        let db = match mode {
+            OpenMode::Read => get_db(&location.db_location)?,
+            OpenMode::Write => get_migrated_db(&location.db_location).await?,
+        };
         // ensure the db is ready (not in wal recovery mode)
         db.run(|conn| {
             let _: Option<String> = conn
@@ -230,7 +250,13 @@ impl ActorStore {
         })
         .await?;
         let mut cache = self.cache.lock().expect("actor store cache poisoned");
-        cache.put(did.to_string(), db.clone());
+        cache.put(
+            did.to_string(),
+            CachedDb {
+                db: db.clone(),
+                migrated: mode == OpenMode::Write,
+            },
+        );
         Ok(db)
     }
 
@@ -239,7 +265,7 @@ impl ActorStore {
         did: String,
         blobstore: Arc<dyn BlobStore>,
     ) -> Result<ActorStoreReader> {
-        let db = self.open_db(&did).await?;
+        let db = self.open_db(&did, OpenMode::Read).await?;
         let key_location = self.get_location(&did)?.key_location;
         Ok(ActorStoreReader::new(
             did,
@@ -256,7 +282,7 @@ impl ActorStore {
         blobstore: Arc<dyn BlobStore>,
     ) -> Result<ActorStoreTransactor> {
         let guard = self.did_lock(&did).lock_owned().await;
-        let db = self.open_db(&did).await?;
+        let db = self.open_db(&did, OpenMode::Write).await?;
         let key_location = self.get_location(&did)?.key_location;
         let reader = ActorStoreReader::new(
             did,
@@ -282,7 +308,7 @@ impl ActorStore {
         tokio::fs::write(&location.key_location, keypair.secret_bytes()).await?;
         let db = get_migrated_db(&location.db_location).await?;
         let mut cache = self.cache.lock().expect("actor store cache poisoned");
-        cache.put(did.to_string(), db);
+        cache.put(did.to_string(), CachedDb { db, migrated: true });
         Ok(())
     }
 

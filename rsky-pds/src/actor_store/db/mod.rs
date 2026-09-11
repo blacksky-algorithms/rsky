@@ -1,6 +1,6 @@
 // based on https://github.com/bluesky-social/atproto/blob/main/packages/pds/src/actor-store/db
 
-use crate::db::migrator::{migrate_to_latest, Migration};
+use crate::db::migrator::{migrate_to_latest, Migration, MigrationSet};
 use crate::db::sqlite::Db;
 use anyhow::Result;
 use std::path::Path;
@@ -173,13 +173,21 @@ pub const ACTOR_DB_MIGRATIONS: &[Migration] = &[
     },
 ];
 
+/// The first migration is the reference actor-store schema; the rest are
+/// rsky-only tables that the reference PDS never reads.
+pub const ACTOR_DB_MIGRATION_SET: MigrationSet = MigrationSet {
+    shared: ACTOR_DB_MIGRATIONS.split_at(1).0,
+    local: ACTOR_DB_MIGRATIONS.split_at(1).1,
+    legacy: None,
+};
+
 pub fn get_db(location: impl AsRef<Path>) -> Result<ActorDb> {
     Db::open(location)
 }
 
 pub async fn get_migrated_db(location: impl AsRef<Path>) -> Result<ActorDb> {
     let db = get_db(location)?;
-    migrate_to_latest(&db, ACTOR_DB_MIGRATIONS).await?;
+    migrate_to_latest(&db, ACTOR_DB_MIGRATION_SET).await?;
     Ok(db)
 }
 
@@ -253,7 +261,9 @@ mod tests {
             .await
             .unwrap();
         // migrating again is a no-op
-        migrate_to_latest(&db, ACTOR_DB_MIGRATIONS).await.unwrap();
+        migrate_to_latest(&db, ACTOR_DB_MIGRATION_SET)
+            .await
+            .unwrap();
         let tables: Vec<String> = db
             .run(|conn| {
                 let mut stmt = conn.prepare(
@@ -273,6 +283,8 @@ mod tests {
                 "account_pref",
                 "backlink",
                 "blob",
+                "kysely_migration",
+                "kysely_migration_lock",
                 "migrations",
                 "record",
                 "record_blob",

@@ -43,7 +43,7 @@ pub async fn verify_account_password(did: &str, password: &String, db: &Db) -> R
         .run(move |conn| {
             Ok(conn
                 .query_row(
-                    "SELECT password FROM account WHERE did = ?1",
+                    "SELECT \"passwordScrypt\" FROM account WHERE did = ?1",
                     params![did],
                     |row| row.get(0),
                 )
@@ -64,7 +64,7 @@ pub async fn verify_app_password(did: &str, password: &str, db: &Db) -> Result<O
     db.run(move |conn| {
         Ok(conn
             .query_row(
-                "SELECT name FROM app_password WHERE did = ?1 AND password = ?2",
+                "SELECT name FROM app_password WHERE did = ?1 AND \"passwordScrypt\" = ?2",
                 params![did, password_encrypted],
                 |row| row.get(0),
             )
@@ -174,7 +174,7 @@ pub async fn create_app_password(
     db.run(move |conn| {
         let got: Option<String> = conn
             .query_row(
-                "INSERT INTO app_password (did, name, password, \"createdAt\") \
+                "INSERT INTO app_password (did, name, \"passwordScrypt\", \"createdAt\") \
                  VALUES (?1, ?2, ?3, ?4) \
                  ON CONFLICT (did, name) DO NOTHING \
                  RETURNING name",
@@ -211,7 +211,7 @@ pub async fn list_app_passwords(did: &str, db: &Db) -> Result<Vec<(String, Strin
 pub async fn update_user_password(opts: UpdateUserPasswordOpts, db: &Db) -> Result<()> {
     db.run(move |conn| {
         conn.execute(
-            "UPDATE account SET password = ?1 WHERE did = ?2",
+            "UPDATE account SET \"passwordScrypt\" = ?1 WHERE did = ?2",
             params![opts.password_encrypted, opts.did],
         )?;
         Ok(())
@@ -263,11 +263,7 @@ mod tests {
         let stored_hash = "aabbccddeeff00112233445566778899:\
 3d2a91e248809343123c0186c87868141ad7be0efcdd1939b28a85c3a9a6f84\
 501a21efec04cedc29e2d7dad96021bf0109d0ffb2c7be13faf3f9eac5adfed25";
-        assert!(verify(
-            &"correct horse battery staple".to_owned(),
-            stored_hash
-        )
-        .unwrap());
+        assert!(verify(&"correct horse battery staple".to_owned(), stored_hash).unwrap());
         assert!(!verify(&"wrong password".to_owned(), stored_hash).unwrap());
     }
 
@@ -278,8 +274,7 @@ mod tests {
     fn legacy_argon2_hash_still_verifies() {
         // A real Argon2id PHC string for the password "secret", generated
         // with the old argon2-based `gen_salt_and_hash`.
-        let stored_hash =
-            "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHRzb21lc2FsdA$\
+        let stored_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHRzb21lc2FsdA$\
 14ukWqiThj4Xz77NYv01V28GbBZHY9AaZwsFswQFO0U";
         assert!(verify(&"secret".to_owned(), stored_hash).unwrap());
         assert!(!verify(&"other".to_owned(), stored_hash).unwrap());

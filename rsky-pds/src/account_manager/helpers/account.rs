@@ -193,18 +193,15 @@ pub async fn register_actor(
 }
 
 pub async fn register_account(did: String, email: String, password: String, db: &Db) -> Result<()> {
-    let created_at = rsky_common::now();
-
-    // @TODO record recovery key for bring your own recovery key
     let registered = db
         .run(move |conn| {
             Ok(conn
                 .query_row(
-                    "INSERT INTO account (did, email, password, \"createdAt\") \
-                     VALUES (?1, ?2, ?3, ?4) \
+                    "INSERT INTO account (did, email, \"passwordScrypt\") \
+                     VALUES (?1, ?2, ?3) \
                      ON CONFLICT (did) DO NOTHING \
                      RETURNING did",
-                    params![did, email, password, created_at],
+                    params![did, email, password],
                     |row| row.get::<_, String>(0),
                 )
                 .optional()?)

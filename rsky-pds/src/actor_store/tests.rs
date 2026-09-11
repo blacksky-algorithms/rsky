@@ -828,3 +828,110 @@ async fn set_keypair_rejects_an_unsafe_did() {
 async fn atomic_write_key_rejects_a_pathless_location() {
     assert!(atomic_write_key(Path::new("/"), b"bytes").await.is_err());
 }
+
+async fn store_tables(store: &ActorStore, did: &str) -> Vec<String> {
+    let db = store.open_db(did, OpenMode::Read).await.unwrap();
+    db.run(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' \
+             AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        )?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<String>, rusqlite::Error>>()?;
+        Ok(names)
+    })
+    .await
+    .unwrap()
+}
+
+/// Lays down a store the way the reference PDS creates one: only the shared
+/// schema, tracked in Kysely's ledger, no rsky-local tables.
+async fn reference_store(store: &ActorStore, did: &str) {
+    let location = store.get_location(did).unwrap();
+    tokio::fs::create_dir_all(&location.directory)
+        .await
+        .unwrap();
+    tokio::fs::write(&location.key_location, test_keypair().secret_bytes())
+        .await
+        .unwrap();
+    let db = crate::actor_store::db::get_db(&location.db_location).unwrap();
+    db.run(|conn| {
+        conn.execute_batch(crate::actor_store::db::ACTOR_DB_MIGRATIONS[0].sql)?;
+        conn.execute_batch(
+            "CREATE TABLE kysely_migration (name varchar(255) NOT NULL PRIMARY KEY, \
+                timestamp varchar(255) NOT NULL);\
+             CREATE TABLE kysely_migration_lock (id varchar(255) NOT NULL PRIMARY KEY, \
+                is_locked integer NOT NULL DEFAULT 0);\
+             INSERT INTO kysely_migration_lock VALUES ('migration_lock', 0);\
+             INSERT INTO kysely_migration VALUES ('001', '2026-01-01T00:00:00.000Z');",
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn reading_a_reference_store_never_changes_its_schema() {
+    let (_dir, store) = test_store(4);
+    reference_store(&store, TEST_DID).await;
+    let before = store_tables(&store, TEST_DID).await;
+    assert!(!before.contains(&"migrations".to_string()));
+    assert!(!before.contains(&"space_repo".to_string()));
+    let reader = store.read(TEST_DID.to_string(), blobstore()).await.unwrap();
+    assert!(reader.get_repo_root().await.is_none());
+    assert_eq!(store_tables(&store, TEST_DID).await, before);
+}
+
+#[tokio::test]
+async fn writing_a_reference_store_applies_only_local_migrations() {
+    let (_dir, store) = test_store(4);
+    reference_store(&store, TEST_DID).await;
+    let _tx = store
+        .transact(TEST_DID.to_string(), blobstore())
+        .await
+        .unwrap();
+    let tables = store_tables(&store, TEST_DID).await;
+    assert!(tables.contains(&"migrations".to_string()));
+    assert!(tables.contains(&"space_repo".to_string()));
+    let (shared, local): (Vec<String>, Vec<String>) = store
+        .open_db(TEST_DID, OpenMode::Read)
+        .await
+        .unwrap()
+        .run(|conn| {
+            fn names(
+                conn: &rusqlite::Connection,
+                sql: &str,
+            ) -> Result<Vec<String>, rusqlite::Error> {
+                let mut stmt = conn.prepare(sql)?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                rows.collect()
+            }
+            Ok((
+                names(conn, "SELECT name FROM kysely_migration ORDER BY name")?,
+                names(conn, "SELECT name FROM migrations ORDER BY name")?,
+            ))
+        })
+        .await
+        .unwrap();
+    assert_eq!(shared, ["001"]);
+    assert_eq!(local, ["002", "003", "004"]);
+}
+
+#[tokio::test]
+async fn a_cached_read_handle_is_migrated_before_the_first_write() {
+    let (_dir, store) = test_store(4);
+    reference_store(&store, TEST_DID).await;
+    store.read(TEST_DID.to_string(), blobstore()).await.unwrap();
+    assert!(!store_tables(&store, TEST_DID)
+        .await
+        .contains(&"space_repo".to_string()));
+    store
+        .transact(TEST_DID.to_string(), blobstore())
+        .await
+        .unwrap();
+    assert!(store_tables(&store, TEST_DID)
+        .await
+        .contains(&"space_repo".to_string()));
+}
