@@ -78,7 +78,10 @@ async fn main() -> Result<()> {
         Crawlers::new(cfg.service.hostname.clone(), cfg.crawlers.clone()),
         None,
     ));
-    let actor_store = ActorStore::new(&cfg.actor_store, BackgroundQueue::default());
+    let lifecycle =
+        rsky_pds::lifecycle::LifecycleStore::open(&cfg.service_db.lifecycle_db_location).await?;
+    let actor_store = ActorStore::new(&cfg.actor_store, BackgroundQueue::default(), lifecycle)
+        .with_coexistence(cfg.service.coexistence);
     let aws_sdk_config = aws_config::from_env()
         .endpoint_url(env::var("AWS_ENDPOINT").unwrap_or("localhost".to_owned()))
         .load()

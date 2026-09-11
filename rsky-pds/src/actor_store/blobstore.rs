@@ -36,6 +36,50 @@ pub trait BlobStore: Send + Sync {
     }
 }
 
+/// A blob store for code paths that only read a store's journal and never
+/// touch an object; every operation fails.
+pub fn unavailable() -> Arc<dyn BlobStore> {
+    Arc::new(UnavailableBlobStore)
+}
+
+struct UnavailableBlobStore;
+
+impl BlobStore for UnavailableBlobStore {
+    fn put_temp(&self, _bytes: Vec<u8>) -> BoxFuture<'_, Result<String>> {
+        Box::pin(async { bail!("blob store unavailable") })
+    }
+    fn make_permanent(&self, _key: String, _cid: Cid) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { bail!("blob store unavailable") })
+    }
+    fn put_permanent(&self, _cid: Cid, _bytes: Vec<u8>) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { bail!("blob store unavailable") })
+    }
+    fn quarantine(&self, _cid: Cid) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { bail!("blob store unavailable") })
+    }
+    fn unquarantine(&self, _cid: Cid) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { bail!("blob store unavailable") })
+    }
+    fn get_bytes(&self, _cid: Cid) -> BoxFuture<'_, Result<Vec<u8>>> {
+        Box::pin(async { bail!("blob store unavailable") })
+    }
+    fn get_stream(&self, _cid: Cid) -> BoxFuture<'_, Result<ByteStream>> {
+        Box::pin(async { bail!("blob store unavailable") })
+    }
+    fn has_temp(&self, _key: String) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async { bail!("blob store unavailable") })
+    }
+    fn has_stored(&self, _cid: Cid) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async { bail!("blob store unavailable") })
+    }
+    fn delete(&self, _cid: Cid) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { bail!("blob store unavailable") })
+    }
+    fn delete_many(&self, _cids: Vec<Cid>) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { bail!("blob store unavailable") })
+    }
+}
+
 /// Builds the configured blobstore implementation for a given actor.
 pub struct BlobstoreFactory {
     cfg: BlobstoreConfig,
@@ -256,6 +300,24 @@ mod tests {
         assert_eq!(store.stored_cids(), [cid_two.to_string()]);
         store.delete_many(vec![cid_one, cid_two]).await.unwrap();
         assert!(store.stored_cids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unavailable_store_fails_every_call() {
+        let store = unavailable();
+        let cid = cid_for(b"nothing");
+        assert!(store.put_temp(vec![]).await.is_err());
+        assert!(store.make_permanent("k".to_owned(), cid).await.is_err());
+        assert!(store.put_permanent(cid, vec![]).await.is_err());
+        assert!(store.quarantine(cid).await.is_err());
+        assert!(store.unquarantine(cid).await.is_err());
+        assert!(store.get_bytes(cid).await.is_err());
+        assert!(store.get_stream(cid).await.is_err());
+        assert!(store.has_temp("k".to_owned()).await.is_err());
+        assert!(store.has_stored(cid).await.is_err());
+        assert!(store.delete(cid).await.is_err());
+        assert!(store.delete_many(vec![cid]).await.is_err());
+        assert!(store.delete_all().is_none());
     }
 
     #[tokio::test]

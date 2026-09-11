@@ -79,6 +79,33 @@ sessions). Session outputs carry `didDoc` when
 `PDS_ENABLE_DID_DOC_WITH_SESSION` is set, and a blob that has been uploaded
 but not yet referenced by a record is not served.
 
+### Changed — durable writes and publication
+
+A record write is now one SQLite transaction: the repository root is
+replaced only if it still equals the root the commit was formatted against,
+and the blocks, the record index, the blob bookkeeping, and the write's
+publication intent land together or not at all. Blob promotion out of
+temporary storage happens before the transaction, and the temporary key is
+cleared inside it, so an uploaded blob stays unreadable until the record that
+references it is committed. Store write connections, the sequencer, and the
+lifecycle journal run with `synchronous=FULL`, so a write acknowledged to a
+client survives a power loss.
+
+Publication intents (`publish_intent`, actor migration `005`) are delivered
+to the sequencer after the transaction commits and acknowledged in the store
+afterwards. The publisher records the sequencer head on the intent before
+inserting, so after a crash it recognises a row it already inserted instead
+of inserting it again; every write publishes exactly one event. Actors with
+undelivered intents are marked in the lifecycle journal (`pending_work`) and
+finished at startup.
+
+Object deletions are journaled (`blob_work`) instead of queued in memory.
+Under `PDS_COEXISTENCE=true` a dereferenced object is recorded `gc-deferred`
+and never deleted; otherwise it is deleted by a worker after the transaction.
+Writes are subject to the reference limits of 200 operations and a 2 MB
+event per commit, answered with `InvalidRequest`. Repository exports read
+from a single snapshot on a dedicated connection, bounded to ten minutes.
+
 ### Fixed — responses that differed from the reference PDS
 
 - `com.atproto.sync.*` reads of a missing, taken-down, or deactivated

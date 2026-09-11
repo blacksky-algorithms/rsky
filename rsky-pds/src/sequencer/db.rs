@@ -1,7 +1,7 @@
 // based on https://github.com/bluesky-social/atproto/blob/main/packages/pds/src/sequencer/db
 
 use crate::db::migrator::{migrate_to_latest, Migration, MigrationSet};
-use crate::db::sqlite::Db;
+use crate::db::sqlite::{Db, Synchronous};
 use anyhow::Result;
 use std::path::Path;
 
@@ -33,8 +33,10 @@ pub fn get_db(location: impl AsRef<Path>) -> Result<SequencerDb> {
     Db::open(location)
 }
 
+/// The sequencer is the publication record; an event it has returned a
+/// sequence number for must survive a power loss.
 pub async fn get_migrated_db(location: impl AsRef<Path>) -> Result<SequencerDb> {
-    let db = get_db(location)?;
+    let db = Db::open_with(location, Synchronous::Full)?;
     migrate_to_latest(&db, SEQUENCER_DB_MIGRATIONS_SET).await?;
     Ok(db)
 }

@@ -29,6 +29,7 @@ pub mod oauth_scope;
 pub mod permission_set;
 pub mod pipethrough;
 pub mod plc;
+pub mod publication;
 pub mod read_after_write;
 pub mod repo;
 pub mod rotate_keys;
@@ -312,8 +313,8 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
             },
         })),
     };
-    let actor_store =
-        ActorStore::new(&cfg.actor_store, background_queue).with_tombstones(lifecycle.tombstones());
+    let actor_store = ActorStore::new(&cfg.actor_store, background_queue, lifecycle.clone())
+        .with_coexistence(cfg.service.coexistence);
     let resumed = lifecycle::resume_deletions(&lifecycle::DeletionContext {
         lifecycle: &lifecycle,
         account_manager: &account_manager,
@@ -328,6 +329,14 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
             count = resumed.len(),
             "resumed incomplete account deletions"
         );
+    }
+    let republished = publication::resume_pending_work(&actor_store, &sequencer, |did| {
+        blobstore_factory.blobstore(did.to_owned())
+    })
+    .await
+    .expect("Failed to resume publication");
+    if !republished.is_empty() {
+        tracing::warn!(count = republished.len(), "resumed publication");
     }
 
     let shield = Shield::default().enable(NoSniff::Enable);

@@ -565,6 +565,9 @@ impl From<Error> for ApiError {
         if value.downcast_ref::<AccountDeleting>().is_some() {
             return ApiError::InvalidRequest(value.to_string());
         }
+        if let Some(limit) = value.downcast_ref::<crate::actor_store::WriteLimitError>() {
+            return ApiError::InvalidRequest(limit.to_string());
+        }
         if let Some(AccountHelperError::UserAlreadyExistsError) = value.downcast_ref() {
             return ApiError::InvalidRequest(
                 "This email address is already in use, please use a different email.".to_string(),

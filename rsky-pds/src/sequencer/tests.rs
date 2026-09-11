@@ -487,3 +487,43 @@ async fn sync_evt_data_from_commit_requires_commit_block() {
     let err = sync_evt_data_from_commit(missing).await.unwrap_err();
     assert!(err.to_string().contains("commit block was not found"));
 }
+
+#[tokio::test]
+async fn rows_for_did_after_returns_stored_rows_in_order() {
+    let (_dir, mut sequencer) = test_sequencer().await;
+    let cid = Cid::from_str(TEST_CID).unwrap();
+    sequencer
+        .sequence_commit("did:plc:one".to_owned(), commit_data(cid))
+        .await
+        .unwrap();
+    sequencer
+        .sequence_account_evt("did:plc:two".to_owned(), AccountStatus::Active)
+        .await
+        .unwrap();
+    sequencer
+        .sequence_account_evt("did:plc:one".to_owned(), AccountStatus::Deactivated)
+        .await
+        .unwrap();
+    let rows = sequencer
+        .rows_for_did_after("did:plc:one", 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.event_type.as_str())
+            .collect::<Vec<_>>(),
+        ["append", "account"]
+    );
+    assert_eq!(rows[0].seq, Some(1));
+    let later = sequencer
+        .rows_for_did_after("did:plc:one", 1)
+        .await
+        .unwrap();
+    assert_eq!(later.len(), 1);
+    assert_eq!(later[0].seq, Some(3));
+    assert!(sequencer
+        .rows_for_did_after("did:plc:one", 3)
+        .await
+        .unwrap()
+        .is_empty());
+}

@@ -46,7 +46,11 @@ async fn test_viewer() -> (tempfile::TempDir, LocalViewer) {
         directory: dir.path().join("actors").to_string_lossy().to_string(),
         cache_size: 4,
     };
-    let store = ActorStore::new(&cfg, BackgroundQueue::default());
+    let lifecycle =
+        crate::lifecycle::LifecycleStore::open(dir.path().join("rsky/lifecycle.sqlite"))
+            .await
+            .unwrap();
+    let store = ActorStore::new(&cfg, BackgroundQueue::default(), lifecycle);
     let secp = secp256k1::Secp256k1::new();
     let secret = secp256k1::SecretKey::from_slice(&hex::decode(TEST_SECRET_HEX).unwrap()).unwrap();
     let keypair = secp256k1::Keypair::from_secret_key(&secp, &secret);

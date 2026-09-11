@@ -10,7 +10,6 @@ use crate::config::ServerConfig;
 use crate::handle::{normalize_and_validate_handle, HandleValidationContext, HandleValidationOpts};
 use crate::plc::operations::{create_op, CreateAtprotoOpInput};
 use crate::plc::types::{OpOrTombstone, Operation};
-use crate::sequencer::events::sync_evt_data_from_commit;
 use crate::SharedSequencer;
 use crate::{plc, SharedIdResolver};
 use email_address::*;
@@ -96,7 +95,7 @@ pub async fn server_create_account(
                 return Err(ApiError::RuntimeError);
             }
         };
-        match actor_txn.create_repo(Vec::new()).await {
+        match actor_txn.create_repo(Vec::new(), !deactivated).await {
             Ok(commit) => commit,
             Err(error) => {
                 tracing::error!("Failed to create repo\n{:?}", error);
@@ -188,29 +187,14 @@ pub async fn server_create_account(
                 return Err(ApiError::RuntimeError);
             }
         }
-        match lock.sequence_commit(did.clone(), commit.clone()).await {
-            Ok(_) => {
-                tracing::debug!("Sequence commit succeeded");
-            }
-            Err(error) => {
-                tracing::error!("Sequence Commit failed\n{error}");
-                return Err(ApiError::RuntimeError);
-            }
-        }
-        match lock
-            .sequence_sync_evt(
-                did.clone(),
-                sync_evt_data_from_commit(commit.clone()).await?,
-            )
-            .await
+        drop(lock);
+        // the repository's first commit and its sync event were committed
+        // as intents with the store; deliver them after the account events
+        if let Err(error) =
+            crate::publication::publish_pending(actor_store, sequencer, &did, None).await
         {
-            Ok(_) => {
-                tracing::debug!("Sequence sync event data from commit succeeded");
-            }
-            Err(error) => {
-                tracing::error!("Sequence sync event data from commit failed\n{error}");
-                return Err(ApiError::RuntimeError);
-            }
+            tracing::error!("Sequence commit failed\n{error}");
+            return Err(ApiError::RuntimeError);
         }
     }
     match account_manager

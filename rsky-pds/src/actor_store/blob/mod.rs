@@ -31,6 +31,241 @@ pub struct BlobReader {
     pub blobstore: Arc<dyn BlobStore>,
     pub db: ActorDb,
     pub background_queue: BackgroundQueue,
+    /// Another implementation may still serve this store's objects, so
+    /// nothing is deleted from object storage; dereferenced objects are
+    /// journaled for a collector that runs once that is no longer true.
+    pub coexistence: bool,
+}
+
+/// The state of one journaled unit of object-storage work. Every variant
+/// is classified as terminal or not, and the drain and convergence
+/// predicates use the classification rather than a list, so a variant added
+/// later cannot escape them unnoticed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlobWorkState {
+    /// The object is dereferenced and will be deleted by the worker.
+    DeletePending,
+    /// The object is dereferenced but stays until a collector runs after
+    /// every other implementation sharing the store is gone.
+    GcDeferred,
+    Done,
+}
+
+impl BlobWorkState {
+    pub const ALL: [BlobWorkState; 3] = [
+        BlobWorkState::DeletePending,
+        BlobWorkState::GcDeferred,
+        BlobWorkState::Done,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BlobWorkState::DeletePending => "delete-pending",
+            BlobWorkState::GcDeferred => "gc-deferred",
+            BlobWorkState::Done => "done",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|state| state.as_str() == value)
+            .ok_or_else(|| anyhow::anyhow!("unknown blob work state: {value}"))
+    }
+
+    /// Whether the row needs no further action from any worker. A drain,
+    /// hand-back, or convergence check waits only on non-terminal rows.
+    pub fn is_terminal(self) -> bool {
+        match self {
+            BlobWorkState::DeletePending => false,
+            BlobWorkState::GcDeferred | BlobWorkState::Done => true,
+        }
+    }
+}
+
+/// Which object a `blob_work` row names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlobWorkKind {
+    Permanent,
+    Temp,
+}
+
+impl BlobWorkKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BlobWorkKind::Permanent => "permanent",
+            BlobWorkKind::Temp => "temp",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "permanent" => Ok(BlobWorkKind::Permanent),
+            "temp" => Ok(BlobWorkKind::Temp),
+            other => bail!("unknown blob work kind: {other}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlobWork {
+    pub id: i64,
+    pub kind: BlobWorkKind,
+    /// The CID of a permanent object or the temporary key of a temp object.
+    pub key: String,
+    pub state: BlobWorkState,
+}
+
+/// A blob promoted out of temporary storage before a write's transaction;
+/// the transaction records the promotion by clearing its temporary key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromotedBlob {
+    pub cid: Cid,
+    pub temp_key: String,
+}
+
+fn blob_work_from_row(row: &rusqlite::Row) -> Result<BlobWork> {
+    Ok(BlobWork {
+        id: row.get(0)?,
+        kind: BlobWorkKind::parse(&row.get::<_, String>(1)?)?,
+        key: row.get(2)?,
+        state: BlobWorkState::parse(&row.get::<_, String>(3)?)?,
+    })
+}
+
+fn insert_blob_work_in(
+    conn: &rusqlite::Connection,
+    kind: BlobWorkKind,
+    key: &str,
+    cid: Option<&str>,
+    state: BlobWorkState,
+    now: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO blob_work (kind, key, cid, state, \"createdAt\", \"updatedAt\") \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+        rusqlite::params![kind.as_str(), key, cid, state.as_str(), now],
+    )?;
+    Ok(())
+}
+
+fn query_strings<P: rusqlite::ToSql>(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    params: &[P],
+) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<Result<Vec<String>, rusqlite::Error>>()?;
+    Ok(rows)
+}
+
+fn written_blobs(writes: &[PreparedWrite]) -> Vec<(&PreparedBlobRef, &str)> {
+    writes
+        .iter()
+        .flat_map(|write| match write {
+            PreparedWrite::Create(w) | PreparedWrite::Update(w) => {
+                w.blobs.iter().map(|blob| (blob, w.uri.as_str())).collect()
+            }
+            PreparedWrite::Delete(_) => Vec::new(),
+        })
+        .collect()
+}
+
+/// Removes the blob registrations a set of writes dereferences, on a
+/// connection inside a transaction, and journals the objects for deletion
+/// or deferred collection.
+pub fn dereference_blobs_in(
+    conn: &rusqlite::Connection,
+    writes: &[PreparedWrite],
+    coexistence: bool,
+    now: &str,
+) -> Result<Vec<String>> {
+    let uris: Vec<&str> = writes
+        .iter()
+        .filter_map(|w| match w {
+            PreparedWrite::Delete(w) => Some(w.uri.as_str()),
+            PreparedWrite::Update(w) => Some(w.uri.as_str()),
+            PreparedWrite::Create(_) => None,
+        })
+        .collect();
+    if uris.is_empty() {
+        return Ok(vec![]);
+    }
+    let deleted_repo_blob_cids = query_strings(
+        conn,
+        &format!(
+            "DELETE FROM record_blob WHERE \"recordUri\" IN ({}) RETURNING \"blobCid\"",
+            placeholders(uris.len())
+        ),
+        &uris,
+    )?;
+    if deleted_repo_blob_cids.is_empty() {
+        return Ok(vec![]);
+    }
+    let still_referenced = query_strings(
+        conn,
+        &format!(
+            "SELECT \"blobCid\" FROM record_blob WHERE \"blobCid\" IN ({})",
+            placeholders(deleted_repo_blob_cids.len())
+        ),
+        &deleted_repo_blob_cids,
+    )?;
+    let newly_written: Vec<String> = written_blobs(writes)
+        .into_iter()
+        .map(|(blob, _)| blob.cid.to_string())
+        .collect();
+    let cids_to_delete: Vec<String> = deleted_repo_blob_cids
+        .into_iter()
+        .filter(|cid| !still_referenced.contains(cid) && !newly_written.contains(cid))
+        .collect();
+    if cids_to_delete.is_empty() {
+        return Ok(vec![]);
+    }
+    let sql = format!(
+        "DELETE FROM blob WHERE cid IN ({})",
+        placeholders(cids_to_delete.len())
+    );
+    conn.execute(&sql, rusqlite::params_from_iter(cids_to_delete.iter()))?;
+    let state = if coexistence {
+        BlobWorkState::GcDeferred
+    } else {
+        BlobWorkState::DeletePending
+    };
+    for cid in &cids_to_delete {
+        insert_blob_work_in(conn, BlobWorkKind::Permanent, cid, Some(cid), state, now)?;
+    }
+    Ok(cids_to_delete)
+}
+
+/// Records a write's blob effects on a connection inside a transaction:
+/// dereferenced registrations go, promoted blobs lose their temporary key,
+/// and the written records are associated with their blobs.
+pub fn apply_write_blobs_in(
+    conn: &rusqlite::Connection,
+    writes: &[PreparedWrite],
+    promoted: &[PromotedBlob],
+    coexistence: bool,
+    now: &str,
+) -> Result<()> {
+    dereference_blobs_in(conn, writes, coexistence, now)?;
+    for blob in promoted {
+        conn.execute(
+            "UPDATE blob SET \"tempKey\" = NULL WHERE cid = ?1 AND \"tempKey\" = ?2",
+            rusqlite::params![blob.cid.to_string(), blob.temp_key],
+        )?;
+    }
+    let mut associate = conn.prepare_cached(
+        "INSERT INTO record_blob (\"blobCid\", \"recordUri\") VALUES (?1, ?2) \
+         ON CONFLICT DO NOTHING",
+    )?;
+    for (blob, uri) in written_blobs(writes) {
+        associate.execute(rusqlite::params![blob.cid.to_string(), uri])?;
+    }
+    Ok(())
 }
 
 pub struct ListMissingBlobsOpts {
@@ -74,11 +309,13 @@ impl BlobReader {
         blobstore: Arc<dyn BlobStore>,
         db: ActorDb,
         background_queue: BackgroundQueue,
+        coexistence: bool,
     ) -> Self {
         BlobReader {
             blobstore,
             db,
             background_queue,
+            coexistence,
         }
     }
 
@@ -225,152 +462,139 @@ impl BlobReader {
         Ok(BlobRef::new(cid, mime_type, size, None))
     }
 
-    /// Blob processing for CAR imports: the referenced blobs typically
-    /// arrive by uploadBlob *after* the import, so a missing blob records
-    /// the association and moves on instead of failing the import; the
-    /// upload promotes it (see `track_untethered_blob`).
-    pub async fn process_import_blobs(&self, writes: Vec<PreparedWrite>) -> Result<()> {
-        self.delete_dereferenced_blobs(writes.clone()).await?;
-        for write in writes {
-            let (blobs, uri) = match write {
-                PreparedWrite::Create(w) => (w.blobs, w.uri),
-                PreparedWrite::Update(w) => (w.blobs, w.uri),
-                _ => continue,
+    /// Verifies every blob the writes reference and moves it out of
+    /// temporary storage, before the write's transaction. A blob a CAR
+    /// import references typically arrives by uploadBlob afterwards, so an
+    /// import tolerates a missing blob and the upload promotes it later
+    /// (see `track_untethered_blob`); an ordinary write does not.
+    pub async fn promote_write_blobs(
+        &self,
+        writes: &[PreparedWrite],
+        tolerate_missing: bool,
+    ) -> Result<Vec<PromotedBlob>> {
+        let mut promoted = Vec::new();
+        for (blob, _) in written_blobs(writes) {
+            let cid = blob.cid;
+            let found: Option<BlobRow> = self
+                .db
+                .run(move |conn| {
+                    Ok(conn
+                        .query_row(
+                            "SELECT * FROM blob WHERE cid = ?1 AND \"takedownRef\" IS NULL",
+                            [cid.to_string()],
+                            blob_from_row,
+                        )
+                        .optional()?)
+                })
+                .await?;
+            let Some(found) = found else {
+                if tolerate_missing {
+                    tracing::debug!(cid = %cid, "written record references a blob not yet uploaded");
+                    continue;
+                }
+                bail!("Could not find blob: {:?}", cid.to_string())
             };
-            for blob in blobs {
-                self.associate_blob(blob.clone(), uri.clone()).await?;
-                // Only a blob that has not been uploaded yet is tolerated
-                // (it arrives after the import); a present-but-invalid blob
-                // still fails the import.
-                if let Err(error) = self.verify_blob_and_make_permanent(blob.clone()).await {
-                    if error.to_string().starts_with("Could not find blob") {
-                        tracing::debug!(cid = %blob.cid,
-                            "imported record references a blob not yet uploaded");
-                    } else {
-                        return Err(error);
-                    }
-                }
+            verify_blob(blob, &found).await?;
+            if let Some(temp_key) = found.temp_key {
+                self.blobstore.make_permanent(temp_key.clone(), cid).await?;
+                promoted.push(PromotedBlob { cid, temp_key });
             }
         }
-        Ok(())
+        Ok(promoted)
     }
 
+    /// The write path as one unit, for callers outside a store transaction:
+    /// promote, record the effects, then run any deletion the write left.
     pub async fn process_write_blobs(&self, writes: Vec<PreparedWrite>) -> Result<()> {
-        self.delete_dereferenced_blobs(writes.clone()).await?;
-        for write in writes {
-            match write {
-                PreparedWrite::Create(w) => {
-                    for blob in w.blobs {
-                        self.verify_blob_and_make_permanent(blob.clone()).await?;
-                        self.associate_blob(blob, w.uri.clone()).await?;
-                    }
-                }
-                PreparedWrite::Update(w) => {
-                    for blob in w.blobs {
-                        self.verify_blob_and_make_permanent(blob.clone()).await?;
-                        self.associate_blob(blob, w.uri.clone()).await?;
-                    }
-                }
-                _ => (),
-            }
-        }
+        let promoted = self.promote_write_blobs(&writes, false).await?;
+        let coexistence = self.coexistence;
+        let now = now();
+        self.db
+            .tx(move |tx| apply_write_blobs_in(tx, &writes, &promoted, coexistence, &now))
+            .await?;
+        self.queue_blob_work();
         Ok(())
     }
 
-    pub async fn delete_dereferenced_blobs(&self, writes: Vec<PreparedWrite>) -> Result<()> {
-        let uris: Vec<String> = writes
-            .clone()
+    /// Runs the journaled object deletions in the background.
+    pub fn queue_blob_work(&self) {
+        let worker = BlobReader {
+            blobstore: self.blobstore.clone(),
+            db: self.db.clone(),
+            background_queue: self.background_queue.clone(),
+            coexistence: self.coexistence,
+        };
+        self.background_queue
+            .add(async move { worker.run_blob_work().await });
+    }
+
+    /// Deletes every object journaled `delete-pending` and marks the row
+    /// done; a row whose deletion fails stays pending for the next run.
+    pub async fn run_blob_work(&self) -> Result<()> {
+        let pending: Vec<BlobWork> = self
+            .blob_work()
+            .await?
             .into_iter()
-            .filter_map(|w| match w {
-                PreparedWrite::Delete(w) => Some(w.uri),
-                PreparedWrite::Update(w) => Some(w.uri),
-                _ => None,
-            })
+            .filter(|work| work.state == BlobWorkState::DeletePending)
             .collect();
-        if uris.is_empty() {
+        if pending.is_empty() {
             return Ok(());
         }
-
-        let deleted_repo_blob_cids: Vec<String> = self
-            .db
-            .run(move |conn| {
-                let sql = format!(
-                    "DELETE FROM record_blob WHERE \"recordUri\" IN ({}) RETURNING \"blobCid\"",
-                    placeholders(uris.len())
-                );
-                let mut stmt = conn.prepare(&sql)?;
-                let rows = stmt
-                    .query_map(rusqlite::params_from_iter(uris.iter()), |row| {
-                        row.get::<_, String>(0)
-                    })?
-                    .collect::<Result<Vec<String>, rusqlite::Error>>()?;
-                Ok(rows)
-            })
-            .await?;
-        if deleted_repo_blob_cids.is_empty() {
-            return Ok(());
+        let cids = pending
+            .iter()
+            .filter(|work| work.kind == BlobWorkKind::Permanent)
+            .map(|work| Cid::from_str(&work.key).map_err(anyhow::Error::new))
+            .collect::<Result<Vec<Cid>>>()?;
+        if !cids.is_empty() {
+            self.blobstore.delete_many(cids).await?;
         }
-
-        let cids_for_lookup = deleted_repo_blob_cids.clone();
-        let mut duplicated_cids: Vec<String> = self
-            .db
-            .run(move |conn| {
-                let sql = format!(
-                    "SELECT \"blobCid\" FROM record_blob WHERE \"blobCid\" IN ({})",
-                    placeholders(cids_for_lookup.len())
-                );
-                let mut stmt = conn.prepare(&sql)?;
-                let rows = stmt
-                    .query_map(rusqlite::params_from_iter(cids_for_lookup.iter()), |row| {
-                        row.get::<_, String>(0)
-                    })?
-                    .collect::<Result<Vec<String>, rusqlite::Error>>()?;
-                Ok(rows)
-            })
-            .await?;
-
-        let mut new_blob_cids: Vec<String> = writes
-            .into_iter()
-            .flat_map(|w| match w {
-                PreparedWrite::Create(w) => w.blobs,
-                PreparedWrite::Update(w) => w.blobs,
-                PreparedWrite::Delete(_) => Vec::new(),
-            })
-            .map(|b| b.cid.to_string())
-            .collect();
-        let mut cids_to_keep = Vec::new();
-        cids_to_keep.append(&mut new_blob_cids);
-        cids_to_keep.append(&mut duplicated_cids);
-
-        let cids_to_delete = deleted_repo_blob_cids
-            .into_iter()
-            .filter(|cid| !cids_to_keep.contains(cid))
-            .collect::<Vec<String>>();
-        if cids_to_delete.is_empty() {
-            return Ok(());
-        }
-
-        let cids_for_delete = cids_to_delete.clone();
+        let ids: Vec<i64> = pending.iter().map(|work| work.id).collect();
+        let done_at = now();
         self.db
             .run(move |conn| {
                 let sql = format!(
-                    "DELETE FROM blob WHERE cid IN ({})",
-                    placeholders(cids_for_delete.len())
+                    "UPDATE blob_work SET state = ?1, \"updatedAt\" = ?2 WHERE id IN ({})",
+                    placeholders(ids.len())
                 );
-                conn.execute(&sql, rusqlite::params_from_iter(cids_for_delete.iter()))?;
+                let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+                    Box::new(BlobWorkState::Done.as_str()),
+                    Box::new(done_at.clone()),
+                ];
+                params.extend(
+                    ids.iter()
+                        .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>),
+                );
+                conn.execute(
+                    &sql,
+                    rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+                )?;
                 Ok(())
             })
-            .await?;
+            .await
+    }
 
-        let blobstore = self.blobstore.clone();
-        self.background_queue.add(async move {
-            let cids = cids_to_delete
-                .into_iter()
-                .map(|cid| Cid::from_str(&cid).map_err(anyhow::Error::new))
-                .collect::<Result<Vec<Cid>>>()?;
-            blobstore.delete_many(cids).await
-        });
-        Ok(())
+    pub async fn blob_work(&self) -> Result<Vec<BlobWork>> {
+        self.db
+            .run(|conn| {
+                let mut stmt =
+                    conn.prepare("SELECT id, kind, key, state FROM blob_work ORDER BY id")?;
+                let rows = stmt
+                    .query_and_then([], blob_work_from_row)?
+                    .collect::<Result<Vec<BlobWork>>>()?;
+                Ok(rows)
+            })
+            .await
+    }
+
+    /// Rows still owed to a worker; the drain and convergence predicates
+    /// wait on this count.
+    pub async fn nonterminal_blob_work(&self) -> Result<usize> {
+        Ok(self
+            .blob_work()
+            .await?
+            .into_iter()
+            .filter(|work| !work.state.is_terminal())
+            .count())
     }
 
     pub async fn verify_blob_and_make_permanent(&self, blob: PreparedBlobRef) -> Result<()> {
@@ -653,7 +877,7 @@ mod tests {
             .await
             .unwrap();
         let store = Arc::new(MemoryBlobStore::default());
-        let reader = BlobReader::new(store.clone(), db, BackgroundQueue::default());
+        let reader = BlobReader::new(store.clone(), db, BackgroundQueue::default(), false);
         TestBlobReader {
             reader,
             store,
@@ -1015,6 +1239,157 @@ mod tests {
             })
             .await
             .is_err());
+    }
+
+    #[test]
+    fn blob_work_states_are_all_classified_and_round_trip() {
+        for state in BlobWorkState::ALL {
+            assert_eq!(BlobWorkState::parse(state.as_str()).unwrap(), state);
+            // every variant answers the terminal question without panicking
+            let _ = state.is_terminal();
+        }
+        assert!(!BlobWorkState::DeletePending.is_terminal());
+        assert!(BlobWorkState::GcDeferred.is_terminal());
+        assert!(BlobWorkState::Done.is_terminal());
+        assert!(BlobWorkState::parse("promote-someday").is_err());
+        for kind in [BlobWorkKind::Permanent, BlobWorkKind::Temp] {
+            assert_eq!(BlobWorkKind::parse(kind.as_str()).unwrap(), kind);
+        }
+        assert!(BlobWorkKind::parse("quarantine").is_err());
+    }
+
+    /// While another implementation may still serve the store's objects,
+    /// dereferencing a blob journals it instead of deleting it.
+    #[tokio::test]
+    async fn coexistence_defers_dereferenced_blobs_instead_of_deleting() {
+        let mut t = test_reader().await;
+        t.reader.coexistence = true;
+        let blob = upload(&t, b"keep me around").await;
+        let cid = blob.get_cid().unwrap();
+        let record_uri = "at://did:example:alice/app.bsky.feed.post/3jt5vlkoraa2a".to_owned();
+        let create = PreparedWrite::Create(PreparedCreateOrUpdate {
+            action: WriteOpAction::Create,
+            uri: record_uri.clone(),
+            cid,
+            swap_cid: None,
+            record: serde_json::from_value(serde_json::json!({
+                "$type": "app.bsky.feed.post",
+                "text": "with blob",
+                "createdAt": "2023-01-01T00:00:00.000Z",
+            }))
+            .unwrap(),
+            blobs: vec![prepared_ref(&blob)],
+        });
+        t.reader.process_write_blobs(vec![create]).await.unwrap();
+        let delete = PreparedWrite::Delete(PreparedDelete {
+            action: WriteOpAction::Delete,
+            uri: record_uri,
+            swap_cid: None,
+        });
+        t.reader.process_write_blobs(vec![delete]).await.unwrap();
+        t.reader.background_queue.process_all().await;
+        assert_eq!(t.reader.blob_count().await.unwrap(), 0);
+        assert!(t.store.has_stored(cid).await.unwrap());
+        let work = t.reader.blob_work().await.unwrap();
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].kind, BlobWorkKind::Permanent);
+        assert_eq!(work[0].key, cid.to_string());
+        assert_eq!(work[0].state, BlobWorkState::GcDeferred);
+        assert_eq!(t.reader.nonterminal_blob_work().await.unwrap(), 0);
+    }
+
+    /// Outside coexistence the deletion is journaled first and runs after
+    /// the write's transaction; a failing store leaves the row pending.
+    #[tokio::test]
+    async fn dereferenced_blob_deletion_is_journaled() {
+        let t = test_reader().await;
+        let blob = upload(&t, b"journal me").await;
+        let cid = blob.get_cid().unwrap();
+        let record_uri = "at://did:example:alice/app.bsky.feed.post/3jt5vlkoraa2a".to_owned();
+        let create = PreparedWrite::Create(PreparedCreateOrUpdate {
+            action: WriteOpAction::Create,
+            uri: record_uri.clone(),
+            cid,
+            swap_cid: None,
+            record: serde_json::from_value(serde_json::json!({
+                "$type": "app.bsky.feed.post",
+                "text": "with blob",
+                "createdAt": "2023-01-01T00:00:00.000Z",
+            }))
+            .unwrap(),
+            blobs: vec![prepared_ref(&blob)],
+        });
+        t.reader.process_write_blobs(vec![create]).await.unwrap();
+        t.reader.background_queue.process_all().await;
+        let delete = PreparedWrite::Delete(PreparedDelete {
+            action: WriteOpAction::Delete,
+            uri: record_uri,
+            swap_cid: None,
+        });
+        let promoted = t
+            .reader
+            .promote_write_blobs(&[delete.clone()], false)
+            .await
+            .unwrap();
+        assert!(promoted.is_empty());
+        let writes = vec![delete];
+        t.reader
+            .db
+            .tx(move |tx| apply_write_blobs_in(tx, &writes, &[], false, "2024-01-01T00:00:00.000Z"))
+            .await
+            .unwrap();
+        let work = t.reader.blob_work().await.unwrap();
+        assert_eq!(work[0].state, BlobWorkState::DeletePending);
+        assert_eq!(t.reader.nonterminal_blob_work().await.unwrap(), 1);
+        assert!(t.store.has_stored(cid).await.unwrap());
+
+        t.reader.run_blob_work().await.unwrap();
+        assert!(!t.store.has_stored(cid).await.unwrap());
+        assert_eq!(
+            t.reader.blob_work().await.unwrap()[0].state,
+            BlobWorkState::Done
+        );
+        assert_eq!(t.reader.nonterminal_blob_work().await.unwrap(), 0);
+        // nothing pending is a no-op
+        t.reader.run_blob_work().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn promotion_requires_the_blob_unless_tolerated() {
+        let t = test_reader().await;
+        let missing = PreparedBlobRef {
+            cid: sha256_to_cid(Sha256::digest(b"never uploaded").to_vec()),
+            mime_type: "text/plain".to_owned(),
+            constraints: BlobConstraint {
+                max_size: None,
+                accept: None,
+            },
+        };
+        let write = PreparedWrite::Create(PreparedCreateOrUpdate {
+            action: WriteOpAction::Create,
+            uri: "at://did:example:alice/app.bsky.feed.post/3jt5vlkoraa2a".to_owned(),
+            cid: missing.cid,
+            swap_cid: None,
+            record: serde_json::from_value(serde_json::json!({
+                "$type": "app.bsky.feed.post",
+                "text": "with missing blob",
+                "createdAt": "2023-01-01T00:00:00.000Z",
+            }))
+            .unwrap(),
+            blobs: vec![missing],
+        });
+        let err = t
+            .reader
+            .promote_write_blobs(std::slice::from_ref(&write), false)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().starts_with("Could not find blob"));
+        assert!(t
+            .reader
+            .promote_write_blobs(&[write], true)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

@@ -743,12 +743,17 @@ mod tests {
     async fn service_token_roundtrip_and_rejections() {
         // A local-account issuer resolves through the actor store.
         let dir = tempfile::tempdir().unwrap();
+        let lifecycle =
+            crate::lifecycle::LifecycleStore::open(dir.path().join("rsky/lifecycle.sqlite"))
+                .await
+                .unwrap();
         let actor_store = ActorStore::new(
             &crate::config::ActorStoreConfig {
-                directory: dir.path().to_str().unwrap().to_string(),
+                directory: dir.path().join("actors").to_str().unwrap().to_string(),
                 cache_size: 10,
             },
             crate::background::BackgroundQueue::default(),
+            lifecycle,
         );
         let keypair = keypair();
         actor_store

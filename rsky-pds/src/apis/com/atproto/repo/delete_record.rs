@@ -4,6 +4,7 @@ use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardIncludeChecks;
+use crate::publication;
 use crate::repo::prepare::{prepare_delete, PrepareDeleteOpts};
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
@@ -63,25 +64,24 @@ async fn inner_delete_record(
                 rkey,
                 swap_cid: swap_record_cid,
             })?;
-            let mut actor_store = actor_store
+            let mut actor_txn = actor_store
                 .transact(did.clone(), blobstore_factory.blobstore(did.clone()))
                 .await?;
             let write_at_uri: AtUri = write.uri.clone().try_into()?;
-            let record = actor_store
+            let record = actor_txn
                 .record
                 .get_record(&write_at_uri, None, Some(true))
                 .await?;
             let commit = match record {
                 None => return Ok(()), // No-op if record already doesn't exist
                 Some(_) => {
-                    actor_store
+                    actor_txn
                         .process_writes(vec![PreparedWrite::Delete(write.clone())], swap_commit_cid)
                         .await?
                 }
             };
 
-            let mut lock = sequencer.sequencer.write().await;
-            lock.sequence_commit(did.clone(), commit.clone()).await?;
+            publication::publish_pending(actor_store, sequencer, &did, None).await?;
             account_manager
                 .update_repo_root(did, commit.commit_data.cid, commit.commit_data.rev)
                 .await?;
@@ -123,7 +123,7 @@ pub async fn delete_record(
         Ok(()) => Ok(()),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");
-            Err(ApiError::RuntimeError)
+            Err(ApiError::from(error))
         }
     }
 }

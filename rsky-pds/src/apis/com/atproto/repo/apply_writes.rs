@@ -4,6 +4,7 @@ use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardIncludeChecks;
+use crate::publication;
 use crate::repo::prepare::{
     prepare_create, prepare_delete, prepare_update, PrepareCreateOpts, PrepareDeleteOpts,
     PrepareUpdateOpts,
@@ -55,9 +56,6 @@ async fn inner_apply_writes(
             bail!("AuthRequiredError")
         }
         let did: &String = &did;
-        if tx.writes.len() > 200 {
-            bail!("Too many writes. Max: 200")
-        }
 
         let writes: Vec<PreparedWrite> = stream::iter(tx.writes)
             .then(|write| async move {
@@ -104,18 +102,17 @@ async fn inner_apply_writes(
             None => None,
         };
 
-        let mut actor_store = actor_store
+        let mut actor_txn = actor_store
             .transact(did.clone(), blobstore_factory.blobstore(did.clone()))
             .await?;
 
-        let commit = actor_store
+        let commit = actor_txn
             .process_writes(writes.clone(), swap_commit_cid)
             .await?;
 
         let commit_cid = commit.commit_data.cid.to_string();
         let commit_rev = commit.commit_data.rev.clone();
-        let mut lock = sequencer.sequencer.write().await;
-        lock.sequence_commit(did.clone(), commit.clone()).await?;
+        publication::publish_pending(actor_store, sequencer, did, None).await?;
         account_manager
             .update_repo_root(
                 did.to_string(),
@@ -198,7 +195,7 @@ pub async fn apply_writes(
         Ok(output) => Ok(Json(output)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");
-            Err(ApiError::RuntimeError)
+            Err(ApiError::from(error))
         }
     }
 }

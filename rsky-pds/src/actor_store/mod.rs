@@ -1,24 +1,27 @@
 // based on https://github.com/bluesky-social/atproto/blob/main/packages/pds/src/actor-store/actor-store.ts
 // per-actor sqlite storage with a reader/transactor split
 
-use crate::actor_store::blob::BlobReader;
+use crate::actor_store::blob::{apply_write_blobs_in, BlobReader, PromotedBlob};
 use crate::actor_store::blobstore::BlobStore;
 use crate::actor_store::db::{get_db, get_migrated_db, ActorDb};
 use crate::actor_store::preference::PreferenceReader;
-use crate::actor_store::record::RecordReader;
-use crate::actor_store::repo::sql_repo::SqlRepoReader;
+use crate::actor_store::record::{delete_record_in, index_record_in, RecordReader};
+use crate::actor_store::repo::sql_repo::{apply_commit_in, SqlRepoReader};
 use crate::actor_store::repo::types::SyncEvtData;
 use crate::actor_store::space::SpaceStore;
 use crate::background::BackgroundQueue;
 use crate::config::ActorStoreConfig;
+use crate::lifecycle::LifecycleStore;
+use crate::publication::settle_pending_work;
+use crate::sequencer::events::{format_seq_commit, format_seq_sync_evt, sync_evt_data_from_commit};
 use anyhow::{anyhow, bail, Result};
 use lexicon_cid::Cid;
 use lru::LruCache;
-use rsky_common;
 use rsky_crypto::utils::encode_did_key;
 use rsky_repo::repo::Repo;
 use rsky_repo::storage::readable_blockstore::ReadableBlockstore;
 use rsky_repo::storage::types::RepoStorage;
+use rsky_repo::storage::CidAndRev;
 use rsky_repo::types::{
     write_to_op, CommitAction, CommitData, CommitDataWithOps, CommitOp, PreparedCreateOrUpdate,
     PreparedWrite, RecordCreateOrUpdateOp, RecordWriteEnum, RecordWriteOp, WriteOpAction,
@@ -70,6 +73,110 @@ impl fmt::Display for FormatCommitError {
 }
 
 impl std::error::Error for FormatCommitError {}
+
+/// The reference PDS's pre-publication size gates, applied before a commit
+/// is formatted or persisted.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum WriteLimitError {
+    #[error("Too many writes. Max: 200")]
+    TooManyWrites,
+    #[error("Too many writes. Max event size: 2MB")]
+    EventTooLarge,
+}
+
+const MAX_WRITES_PER_COMMIT: usize = 200;
+const MAX_COMMIT_EVENT_BYTES: usize = 2_000_000;
+
+/// A publication intent, committed with the write it publishes and
+/// delivered to the sequencer afterwards.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishIntent {
+    pub rev: String,
+    pub cid: String,
+    pub event_type: String,
+    pub event: Vec<u8>,
+}
+
+/// A publication intent as stored, with its delivery progress.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredIntent {
+    pub id: i64,
+    pub rev: String,
+    pub cid: String,
+    pub event_type: String,
+    pub event: Vec<u8>,
+    pub state: String,
+    pub seq_floor: Option<i64>,
+    pub seq: Option<i64>,
+}
+
+/// The events a commit publishes: the commit itself and, for a repository's
+/// first commit, the sync event the reference PDS sequences with it.
+async fn intents_for(
+    did: &str,
+    commit: &CommitDataWithOps,
+    with_sync: bool,
+) -> Result<Vec<PublishIntent>> {
+    let cid = commit.commit_data.cid.to_string();
+    let rev = commit.commit_data.rev.clone();
+    let mut intents = Vec::new();
+    let append = format_seq_commit(did.to_owned(), commit.clone()).await?;
+    intents.push(PublishIntent {
+        rev: rev.clone(),
+        cid: cid.clone(),
+        event_type: append.event_type,
+        event: append.event,
+    });
+    if with_sync {
+        let sync = format_seq_sync_evt(
+            did.to_owned(),
+            sync_evt_data_from_commit(commit.clone()).await?,
+        )
+        .await?;
+        intents.push(PublishIntent {
+            rev,
+            cid,
+            event_type: sync.event_type,
+            event: sync.event,
+        });
+    }
+    Ok(intents)
+}
+
+fn stored_intent_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredIntent> {
+    Ok(StoredIntent {
+        id: row.get(0)?,
+        rev: row.get(1)?,
+        cid: row.get(2)?,
+        event_type: row.get(3)?,
+        event: row.get(4)?,
+        state: row.get(5)?,
+        seq_floor: row.get(6)?,
+        seq: row.get(7)?,
+    })
+}
+
+const SELECT_INTENT: &str = "SELECT id, rev, cid, \"eventType\", event, state, \"seqFloor\", seq \
+                             FROM publish_intent";
+
+/// The undelivered intents of a store, oldest first.
+pub fn pending_intents_in(conn: &rusqlite::Connection) -> Result<Vec<StoredIntent>> {
+    let mut stmt = conn.prepare(&format!(
+        "{SELECT_INTENT} WHERE state = 'pending' ORDER BY id"
+    ))?;
+    let rows = stmt
+        .query_map([], stored_intent_from_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn all_intents_in(conn: &rusqlite::Connection) -> Result<Vec<StoredIntent>> {
+    let mut stmt = conn.prepare(&format!("{SELECT_INTENT} ORDER BY id"))?;
+    let rows = stmt
+        .query_map([], stored_intent_from_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
 
 fn check_record_swap(
     action: &WriteOpAction,
@@ -153,8 +260,13 @@ pub struct ActorStore {
     pub directory: PathBuf,
     pub reserved_key_dir: PathBuf,
     pub background_queue: BackgroundQueue,
+    pub lifecycle: LifecycleStore,
+    /// Another implementation shares the stores and may still serve their
+    /// objects, so nothing is deleted from object storage.
+    pub coexistence: bool,
     cache: Mutex<LruCache<String, CachedDb>>,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    publish_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// DIDs whose deletion is in progress; no write is admitted for them.
     tombstones: crate::lifecycle::Tombstones,
 }
@@ -175,7 +287,11 @@ struct CachedDb {
 }
 
 impl ActorStore {
-    pub fn new(cfg: &ActorStoreConfig, background_queue: BackgroundQueue) -> Self {
+    pub fn new(
+        cfg: &ActorStoreConfig,
+        background_queue: BackgroundQueue,
+        lifecycle: LifecycleStore,
+    ) -> Self {
         let directory = PathBuf::from(&cfg.directory);
         let reserved_key_dir = directory.join("reserved_keys");
         let cache_size = NonZeroUsize::new(cfg.cache_size.max(1)).expect("non-zero cache size");
@@ -183,15 +299,17 @@ impl ActorStore {
             directory,
             reserved_key_dir,
             background_queue,
+            tombstones: lifecycle.tombstones(),
+            lifecycle,
+            coexistence: false,
             cache: Mutex::new(LruCache::new(cache_size)),
             locks: Mutex::new(HashMap::new()),
-            tombstones: Default::default(),
+            publish_locks: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Shares the deletion journal's set of in-progress deletions.
-    pub fn with_tombstones(mut self, tombstones: crate::lifecycle::Tombstones) -> Self {
-        self.tombstones = tombstones;
+    pub fn with_coexistence(mut self, coexistence: bool) -> Self {
+        self.coexistence = coexistence;
         self
     }
 
@@ -240,6 +358,48 @@ impl ActorStore {
             .entry(did.to_string())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
+    }
+
+    /// Serializes publication for one actor. Distinct from the write lock,
+    /// which a handler still holds while it publishes the write it made.
+    pub(crate) fn publish_lock(&self, did: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self
+            .publish_locks
+            .lock()
+            .expect("actor store publish locks poisoned");
+        locks
+            .entry(did.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    /// The store's write connection, for the publisher and workers.
+    pub(crate) async fn write_db(&self, did: &str) -> Result<ActorDb> {
+        self.open_db(did, OpenMode::Write).await
+    }
+
+    /// Runs the store's journaled blob work in the background and clears
+    /// the actor's pending mark once nothing is outstanding.
+    pub fn queue_blob_work(&self, did: &str, blobstore: Arc<dyn BlobStore>) {
+        let did = did.to_owned();
+        let db = self.write_db_cached(&did);
+        let lifecycle = self.lifecycle.clone();
+        let background_queue = self.background_queue.clone();
+        let coexistence = self.coexistence;
+        self.background_queue.add(async move {
+            let Some(db) = db else { return Ok(()) };
+            let blob = BlobReader::new(blobstore, db.clone(), background_queue, coexistence);
+            blob.run_blob_work().await?;
+            settle_pending_work(&lifecycle, &db, &blob, &did).await
+        });
+    }
+
+    fn write_db_cached(&self, did: &str) -> Option<ActorDb> {
+        let mut cache = self.cache.lock().expect("actor store cache poisoned");
+        cache
+            .get(did)
+            .filter(|entry| entry.migrated)
+            .map(|entry| entry.db.clone())
     }
 
     async fn open_db(&self, did: &str, mode: OpenMode) -> Result<ActorDb> {
@@ -295,6 +455,7 @@ impl ActorStore {
             blobstore,
             self.background_queue.clone(),
             key_location,
+            self.coexistence,
         ))
     }
 
@@ -313,11 +474,13 @@ impl ActorStore {
             blobstore,
             self.background_queue.clone(),
             key_location,
+            self.coexistence,
         );
         let keypair = reader.keypair().await?;
         Ok(ActorStoreTransactor {
             reader,
             keypair,
+            lifecycle: self.lifecycle.clone(),
             _guard: guard,
         })
     }
@@ -378,6 +541,13 @@ impl ActorStore {
         }
         {
             let mut locks = self.locks.lock().expect("actor store locks poisoned");
+            locks.remove(did);
+        }
+        {
+            let mut locks = self
+                .publish_locks
+                .lock()
+                .expect("actor store publish locks poisoned");
             locks.remove(did);
         }
         let location = self.get_location(did)?;
@@ -446,6 +616,7 @@ impl ActorStoreReader {
         blobstore: Arc<dyn BlobStore>,
         background_queue: BackgroundQueue,
         key_location: PathBuf,
+        coexistence: bool,
     ) -> Self {
         ActorStoreReader {
             storage: Arc::new(RwLock::new(SqlRepoReader::new(
@@ -456,10 +627,19 @@ impl ActorStoreReader {
             record: RecordReader::new(did.clone(), db.clone()),
             pref: PreferenceReader::new(did.clone(), db.clone()),
             space: SpaceStore::new(did.clone(), db.clone()),
-            blob: BlobReader::new(blobstore, db, background_queue),
+            blob: BlobReader::new(blobstore, db, background_queue, coexistence),
             did,
             key_location,
         }
+    }
+
+    /// The store's undelivered publication intents, oldest first.
+    pub async fn pending_intents(&self) -> Result<Vec<StoredIntent>> {
+        self.record.db.run(|conn| pending_intents_in(conn)).await
+    }
+
+    pub async fn all_intents(&self) -> Result<Vec<StoredIntent>> {
+        self.record.db.run(|conn| all_intents_in(conn)).await
     }
 
     pub async fn keypair(&self) -> Result<Keypair> {
@@ -491,6 +671,7 @@ impl ActorStoreReader {
 pub struct ActorStoreTransactor {
     reader: ActorStoreReader,
     pub keypair: Keypair,
+    lifecycle: LifecycleStore,
     _guard: OwnedMutexGuard<()>,
 }
 
@@ -509,9 +690,13 @@ impl DerefMut for ActorStoreTransactor {
 }
 
 impl ActorStoreTransactor {
+    /// Creates the repository. The reference PDS sequences a creation batch
+    /// only for an active account, so `publish` is false for an account
+    /// created deactivated, whose repository is announced by its activation.
     pub async fn create_repo(
         &self,
         writes: Vec<PreparedCreateOrUpdate>,
+        publish: bool,
     ) -> Result<CommitDataWithOps> {
         let write_ops = writes
             .clone()
@@ -533,21 +718,6 @@ impl ActorStoreTransactor {
             Some(write_ops),
         )
         .await?;
-        {
-            let storage_guard = self.storage.read().await;
-            storage_guard
-                .apply_commit(commit.clone(), Some(true))
-                .await?;
-        }
-        self.index_writes(
-            writes
-                .clone()
-                .into_iter()
-                .map(PreparedWrite::Create)
-                .collect(),
-            &commit.rev,
-        )
-        .await?;
         let write_commit_ops = writes.iter().try_fold(
             Vec::with_capacity(writes.len()),
             |mut acc, w| -> Result<Vec<CommitOp>> {
@@ -565,29 +735,44 @@ impl ActorStoreTransactor {
             .into_iter()
             .map(PreparedWrite::Create)
             .collect::<Vec<PreparedWrite>>();
-        self.blob.process_write_blobs(writes).await?;
-        Ok(CommitDataWithOps {
+        let commit = CommitDataWithOps {
             commit_data: commit,
             ops: write_commit_ops,
             prev_data: None,
-        })
+        };
+        let intents = match publish {
+            true => intents_for(&self.did, &commit, true).await?,
+            false => vec![],
+        };
+        let promoted = self.blob.promote_write_blobs(&writes, false).await?;
+        self.commit_write(
+            &commit.commit_data,
+            None,
+            &writes,
+            &promoted,
+            &intents,
+            false,
+        )
+        .await?;
+        Ok(commit)
     }
 
+    /// An import replaces the repository without publishing it, as the
+    /// reference PDS does; a blob it references may arrive afterwards.
     pub async fn process_import_repo(
         &mut self,
         commit: CommitData,
         writes: Vec<PreparedWrite>,
     ) -> Result<()> {
-        // & send to indexing
-        self.index_writes(writes.clone(), &commit.rev).await?;
-        // persist the commit to repo storage
-        {
+        let current_root = {
             let storage_guard = self.storage.read().await;
-            storage_guard.apply_commit(commit.clone(), None).await?;
-        }
-        // process blobs
-        self.blob.process_import_blobs(writes).await?;
-        Ok(())
+            storage_guard.get_root().await
+        };
+        let promoted = self.blob.promote_write_blobs(&writes, true).await?;
+        // an intent from before the import names a root the import
+        // replaced; publishing it now would be a commit behind the head
+        self.commit_write(&commit, current_root, &writes, &promoted, &[], true)
+            .await
     }
 
     pub async fn process_writes(
@@ -595,27 +780,110 @@ impl ActorStoreTransactor {
         writes: Vec<PreparedWrite>,
         swap_commit_cid: Option<Cid>,
     ) -> Result<CommitDataWithOps> {
-        let commit = self.format_commit(writes.clone(), swap_commit_cid).await?;
-        // & send to indexing
-        self.index_writes(writes.clone(), &commit.commit_data.rev)
-            .await?;
-        // persist the commit to repo storage
-        {
-            let storage_guard = self.storage.read().await;
-            storage_guard
-                .apply_commit(commit.commit_data.clone(), None)
-                .await?;
+        if writes.len() > MAX_WRITES_PER_COMMIT {
+            return Err(WriteLimitError::TooManyWrites.into());
         }
-        // process blobs
-        self.blob.process_write_blobs(writes).await?;
+        let (commit, current_root) = self.format_commit(writes.clone(), swap_commit_cid).await?;
+        if commit.commit_data.relevant_blocks.byte_size()? > MAX_COMMIT_EVENT_BYTES {
+            return Err(WriteLimitError::EventTooLarge.into());
+        }
+        let intents = intents_for(&self.did, &commit, false).await?;
+        let promoted = self.blob.promote_write_blobs(&writes, false).await?;
+        self.commit_write(
+            &commit.commit_data,
+            Some(current_root.cid),
+            &writes,
+            &promoted,
+            &intents,
+            false,
+        )
+        .await?;
         Ok(commit)
     }
 
+    /// Persists a prepared commit as one transaction: the root is swapped
+    /// only if it still equals `expected_root`, and the blocks, record
+    /// index, blob bookkeeping, and publication intents land with it or not
+    /// at all. The actor is marked in the lifecycle journal first, so a
+    /// restart knows to look here for undelivered intents.
+    async fn commit_write(
+        &self,
+        commit: &CommitData,
+        expected_root: Option<Cid>,
+        writes: &[PreparedWrite],
+        promoted: &[PromotedBlob],
+        intents: &[PublishIntent],
+        supersede_pending: bool,
+    ) -> Result<()> {
+        self.lifecycle.mark_pending_work(&self.did).await?;
+        let did = self.did.clone();
+        let now = self.storage.read().await.now.clone();
+        let commit = commit.clone();
+        let writes = writes.to_vec();
+        let promoted = promoted.to_vec();
+        let intents = intents.to_vec();
+        let coexistence = self.blob.coexistence;
+        let new_blocks = commit.new_blocks.clone();
+        self.record
+            .db
+            .tx(move |tx| {
+                apply_commit_in(tx, &did, &now, &commit, expected_root.as_ref())?;
+                for write in &writes {
+                    match write {
+                        PreparedWrite::Create(w) | PreparedWrite::Update(w) => {
+                            let uri: AtUri = w.uri.clone().try_into()?;
+                            index_record_in(
+                                tx,
+                                &uri,
+                                &w.cid,
+                                Some(&w.record),
+                                w.action.clone(),
+                                &commit.rev,
+                                &now,
+                            )?;
+                        }
+                        PreparedWrite::Delete(w) => {
+                            let uri: AtUri = w.uri.clone().try_into()?;
+                            delete_record_in(tx, &uri)?;
+                        }
+                    }
+                }
+                apply_write_blobs_in(tx, &writes, &promoted, coexistence, &now)?;
+                if supersede_pending {
+                    tx.execute(
+                        "UPDATE publish_intent SET state = 'superseded' WHERE state = 'pending'",
+                        [],
+                    )?;
+                }
+                let mut insert = tx.prepare_cached(
+                    "INSERT INTO publish_intent (rev, cid, \"eventType\", event, \"createdAt\") \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                )?;
+                for intent in &intents {
+                    insert.execute(rusqlite::params![
+                        intent.rev,
+                        intent.cid,
+                        intent.event_type,
+                        intent.event,
+                        now
+                    ])?;
+                }
+                Ok(())
+            })
+            .await?;
+        let storage_guard = self.storage.read().await;
+        let mut cache_guard = storage_guard.cache.write().await;
+        cache_guard.add_map(new_blocks)?;
+        Ok(())
+    }
+
+    /// Formats a commit and returns the root it was formatted against, which
+    /// is the root the commit may replace.
     pub async fn format_commit(
         &mut self,
         writes: Vec<PreparedWrite>,
         swap_commit: Option<Cid>,
-    ) -> Result<CommitDataWithOps> {
+    ) -> Result<(CommitDataWithOps, CidAndRev)> {
         let current_root = {
             let storage_guard = self.storage.read().await;
             storage_guard.get_root_detailed().await
@@ -630,7 +898,7 @@ impl ActorStoreTransactor {
         }
         {
             let mut storage_guard = self.storage.write().await;
-            storage_guard.cache_rev(current_root.rev).await?;
+            storage_guard.cache_rev(current_root.rev.clone()).await?;
         }
         let mut new_record_cids: Vec<Cid> = vec![];
         let mut delete_and_update_uris = vec![];
@@ -675,6 +943,10 @@ impl ActorStoreTransactor {
         }
         let mut repo = Repo::load(self.storage.clone(), Some(current_root.cid)).await?;
         let previous_data = repo.commit.data;
+        let formatted_against = CidAndRev {
+            cid: current_root.cid,
+            rev: current_root.rev.clone(),
+        };
         let write_ops: Vec<RecordWriteOp> = writes
             .into_iter()
             .map(write_to_op)
@@ -702,50 +974,14 @@ impl ActorStoreTransactor {
             };
             commit.relevant_blocks.add_map(missing_blocks.blocks)?;
         }
-        Ok(CommitDataWithOps {
-            ops: commit_ops,
-            commit_data: commit,
-            prev_data: Some(previous_data),
-        })
-    }
-
-    pub async fn index_writes(&self, writes: Vec<PreparedWrite>, rev: &str) -> Result<()> {
-        let now: &str = &rsky_common::now();
-        for write in writes {
-            match write {
-                PreparedWrite::Create(write) => {
-                    let write_at_uri: AtUri = write.uri.try_into()?;
-                    self.record
-                        .index_record(
-                            write_at_uri.clone(),
-                            write.cid,
-                            Some(write.record),
-                            Some(write.action),
-                            rev.to_owned(),
-                            Some(now.to_string()),
-                        )
-                        .await?
-                }
-                PreparedWrite::Update(write) => {
-                    let write_at_uri: AtUri = write.uri.try_into()?;
-                    self.record
-                        .index_record(
-                            write_at_uri.clone(),
-                            write.cid,
-                            Some(write.record),
-                            Some(write.action),
-                            rev.to_owned(),
-                            Some(now.to_string()),
-                        )
-                        .await?
-                }
-                PreparedWrite::Delete(write) => {
-                    let write_at_uri: AtUri = write.uri.try_into()?;
-                    self.record.delete_record(&write_at_uri).await?
-                }
-            }
-        }
-        Ok(())
+        Ok((
+            CommitDataWithOps {
+                ops: commit_ops,
+                commit_data: commit,
+                prev_data: Some(previous_data),
+            },
+            formatted_against,
+        ))
     }
 
     pub async fn get_duplicate_record_cids(

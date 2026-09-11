@@ -252,6 +252,28 @@ impl Sequencer {
         Ok(seq_evts)
     }
 
+    /// The rows sequenced for `did` after `after_seq`, oldest first, as
+    /// stored; a publisher recovering from a crash uses them to recognise an
+    /// event it already inserted.
+    pub async fn rows_for_did_after(
+        &self,
+        did: &str,
+        after_seq: i64,
+    ) -> Result<Vec<models::RepoSeq>> {
+        let did = did.to_owned();
+        self.db
+            .run(move |conn| {
+                let mut stmt = conn.prepare(&format!(
+                    "{SELECT_REPO_SEQ} WHERE did = ?1 AND seq > ?2 ORDER BY seq ASC"
+                ))?;
+                let rows = stmt
+                    .query_map(params![did, after_seq], repo_seq_from_row)?
+                    .collect::<Result<Vec<models::RepoSeq>, rusqlite::Error>>()?;
+                Ok(rows)
+            })
+            .await
+    }
+
     pub async fn sequence_evt(&mut self, evt: models::RepoSeq) -> Result<i64> {
         let seq = self
             .db

@@ -4,6 +4,7 @@ use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardIncludeChecks;
+use crate::publication;
 use crate::repo::prepare::{prepare_create, prepare_delete, PrepareCreateOpts, PrepareDeleteOpts};
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
@@ -62,13 +63,13 @@ async fn inner_create_record(
         })
         .await?;
 
-        let mut actor_store = actor_store
+        let mut actor_txn = actor_store
             .transact(did.clone(), blobstore_factory.blobstore(did.clone()))
             .await?;
         let backlink_conflicts: Vec<AtUri> = match validate {
             Some(true) => {
                 let write_at_uri: AtUri = write.uri.clone().try_into()?;
-                actor_store
+                actor_txn
                     .record
                     .get_backlink_conflicts(&write_at_uri, &write.record)
                     .await?
@@ -91,12 +92,11 @@ async fn inner_create_record(
         for delete in backlink_deletions {
             writes.push(PreparedWrite::Delete(delete));
         }
-        let commit = actor_store
+        let commit = actor_txn
             .process_writes(writes.clone(), swap_commit_cid)
             .await?;
 
-        let mut lock = sequencer.sequencer.write().await;
-        lock.sequence_commit(did.clone(), commit.clone()).await?;
+        publication::publish_pending(actor_store, sequencer, &did, None).await?;
         account_manager
             .update_repo_root(did, commit.commit_data.cid, commit.commit_data.rev)
             .await?;
@@ -143,7 +143,7 @@ pub async fn create_record(
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");
-            Err(ApiError::RuntimeError)
+            Err(ApiError::from(error))
         }
     }
 }

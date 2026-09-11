@@ -57,6 +57,27 @@ fn retry_sqlite<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
     }
 }
 
+/// How much of a write sqlite waits for before reporting it committed.
+///
+/// `Normal` is durable across process crashes but a power loss or kernel
+/// panic can lose the last transactions; `Full` waits for the WAL to reach
+/// stable storage on every commit, which a writer whose commits are
+/// acknowledged to clients needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Synchronous {
+    Normal,
+    Full,
+}
+
+impl Synchronous {
+    fn pragma_value(self) -> &'static str {
+        match self {
+            Synchronous::Normal => "NORMAL",
+            Synchronous::Full => "FULL",
+        }
+    }
+}
+
 /// An async wrapper over a single rusqlite connection.
 /// All access happens on the blocking threadpool while holding the
 /// connection mutex, so statements never interleave mid-execution.
@@ -67,23 +88,44 @@ pub struct Db {
 
 impl Db {
     pub fn open(location: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with(location, Synchronous::Normal)
+    }
+
+    pub fn open_with(location: impl AsRef<Path>, synchronous: Synchronous) -> Result<Self> {
         let conn = Connection::open(location)?;
-        Self::setup_conn(&conn)?;
+        Self::setup_conn(&conn, synchronous)?;
         Ok(Db {
             conn: Arc::new(Mutex::new(conn)),
         })
     }
 
-    fn setup_conn(conn: &Connection) -> Result<()> {
+    fn setup_conn(conn: &Connection, synchronous: Synchronous) -> Result<()> {
         let journal_mode: String =
             conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
         if !journal_mode.eq_ignore_ascii_case("wal") {
             tracing::warn!(%journal_mode, "sqlite db not using WAL journal mode");
         }
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "synchronous", synchronous.pragma_value())?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(Duration::from_millis(RETRY_TIMEOUT_MS))?;
         Ok(())
+    }
+
+    /// The file this connection is open on, when it is a file.
+    pub fn path(&self) -> Option<std::path::PathBuf> {
+        let conn = self.conn.lock().expect("sqlite connection mutex poisoned");
+        conn.path().map(std::path::PathBuf::from)
+    }
+
+    /// The `synchronous` level this connection was opened with.
+    pub fn synchronous(&self) -> Result<Synchronous> {
+        let conn = self.conn.lock().expect("sqlite connection mutex poisoned");
+        let level: i64 = conn.pragma_query_value(None, "synchronous", |row| row.get(0))?;
+        Ok(if level >= 2 {
+            Synchronous::Full
+        } else {
+            Synchronous::Normal
+        })
     }
 
     /// Runs `f` against the connection on the blocking threadpool,
@@ -153,6 +195,20 @@ mod tests {
         assert_eq!(journal_mode, "wal");
         assert_eq!(synchronous, 1);
         assert_eq!(foreign_keys, 1);
+    }
+
+    #[tokio::test]
+    async fn open_with_full_synchronous() {
+        let dir = tempfile::tempdir().unwrap();
+        let location = dir.path().join("full.sqlite");
+        let db = Db::open_with(&location, Synchronous::Full).unwrap();
+        assert_eq!(db.synchronous().unwrap(), Synchronous::Full);
+        assert_eq!(
+            db.path().unwrap().canonicalize().unwrap(),
+            location.canonicalize().unwrap()
+        );
+        let normal = Db::open(dir.path().join("normal.sqlite")).unwrap();
+        assert_eq!(normal.synchronous().unwrap(), Synchronous::Normal);
     }
 
     #[tokio::test]

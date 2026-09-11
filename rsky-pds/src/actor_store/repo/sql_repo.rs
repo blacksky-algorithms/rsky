@@ -10,15 +10,130 @@ use rsky_repo::storage::types::RepoStorage;
 use rsky_repo::storage::CidAndRev;
 use rsky_repo::storage::RepoRootError::RepoRootNotFoundError;
 use rsky_repo::types::CommitData;
-use rusqlite::OptionalExtension;
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 pub(crate) fn placeholders(len: usize) -> String {
     vec!["?"; len].join(",")
+}
+
+/// The repository root moved between formatting a commit and applying it.
+#[derive(Debug, thiserror::Error, PartialEq)]
+#[error("ConcurrentWriteError: repo root changed while the commit was prepared")]
+pub struct ConcurrentWriteError;
+
+/// An export is one read snapshot; one that outlives this bound is abandoned
+/// rather than pinning the WAL indefinitely.
+pub const EXPORT_DEADLINE: Duration = Duration::from_secs(600);
+
+const EXPORT_PAGE: usize = 500;
+
+fn put_many_in(conn: &Connection, blocks: &BlockMap, rev: &str) -> Result<()> {
+    let mut stmt = conn.prepare_cached(
+        "INSERT INTO repo_block (cid, \"repoRev\", size, content) \
+         VALUES (?1, ?2, ?3, ?4) ON CONFLICT DO NOTHING",
+    )?;
+    for (cid, bytes) in blocks.map.iter() {
+        stmt.execute(rusqlite::params![
+            cid.to_string(),
+            rev,
+            bytes.0.len() as i64,
+            bytes.0
+        ])?;
+    }
+    Ok(())
+}
+
+fn delete_many_in(conn: &Connection, cids: &[Cid]) -> Result<()> {
+    let cid_strings: Vec<String> = cids.iter().map(|c| c.to_string()).collect();
+    for batch in cid_strings.chunks(500) {
+        let sql = format!(
+            "DELETE FROM repo_block WHERE cid IN ({})",
+            placeholders(batch.len())
+        );
+        conn.execute(&sql, rusqlite::params_from_iter(batch.iter()))?;
+    }
+    Ok(())
+}
+
+/// Applies a commit on a connection that is already inside a transaction.
+/// For an existing repository the root is replaced only if it still equals
+/// `expected_root`, so a commit prepared against a stale root cannot land.
+pub fn apply_commit_in(
+    conn: &Connection,
+    did: &str,
+    now: &str,
+    commit: &CommitData,
+    expected_root: Option<&Cid>,
+) -> Result<()> {
+    match expected_root {
+        None => {
+            conn.execute(
+                "INSERT INTO repo_root (did, cid, rev, \"indexedAt\") VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![did, commit.cid.to_string(), commit.rev, now],
+            )?;
+        }
+        Some(expected) => {
+            let changed = conn.execute(
+                "UPDATE repo_root SET cid = ?1, rev = ?2, \"indexedAt\" = ?3 WHERE cid = ?4",
+                rusqlite::params![
+                    commit.cid.to_string(),
+                    commit.rev,
+                    now,
+                    expected.to_string()
+                ],
+            )?;
+            if changed != 1 {
+                return Err(ConcurrentWriteError.into());
+            }
+        }
+    }
+    put_many_in(conn, &commit.new_blocks, &commit.rev)?;
+    delete_many_in(conn, &commit.removed_cids.to_list())?;
+    Ok(())
+}
+
+fn block_range_in(
+    conn: &Connection,
+    since: &Option<String>,
+    cursor: &Option<CidAndRev>,
+) -> Result<Vec<RepoBlock>> {
+    let mut sql =
+        String::from("SELECT cid, \"repoRev\", size, content FROM repo_block WHERE 1 = 1");
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    if let Some(cursor) = cursor {
+        // use this syntax to ensure we hit the index
+        sql.push_str(" AND ((\"repoRev\", cid) < (?, ?))");
+        params.push(Box::new(cursor.rev.clone()));
+        params.push(Box::new(cursor.cid.to_string()));
+    }
+    if let Some(since) = since {
+        sql.push_str(" AND \"repoRev\" > ?");
+        params.push(Box::new(since.clone()));
+    }
+    sql.push_str(&format!(
+        " ORDER BY \"repoRev\" DESC, cid DESC LIMIT {EXPORT_PAGE}"
+    ));
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+            |row| {
+                Ok(RepoBlock {
+                    cid: row.get(0)?,
+                    repo_rev: row.get(1)?,
+                    size: row.get(2)?,
+                    content: row.get(3)?,
+                })
+            },
+        )?
+        .collect::<Result<Vec<RepoBlock>, rusqlite::Error>>()?;
+    Ok(rows)
 }
 
 #[derive(Clone, Debug)]
@@ -239,10 +354,18 @@ impl RepoStorage for SqlRepoReader {
         is_create: Option<bool>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + Sync + 'a>> {
         Box::pin(async move {
-            self.update_root(commit.cid, commit.rev.clone(), is_create)
+            let expected_root = match is_create.unwrap_or(false) {
+                true => None,
+                false => Some(self.get_root_detailed().await?.cid),
+            };
+            let did = self.did.clone();
+            let now = self.now.clone();
+            let new_blocks = commit.new_blocks.clone();
+            self.db
+                .tx(move |tx| apply_commit_in(tx, &did, &now, &commit, expected_root.as_ref()))
                 .await?;
-            self.put_many(commit.new_blocks, commit.rev).await?;
-            self.delete_many(commit.removed_cids.to_list()).await?;
+            let mut cache_guard = self.cache.write().await;
+            cache_guard.add_map(new_blocks)?;
             Ok(())
         })
     }
@@ -259,29 +382,61 @@ impl SqlRepoReader {
         }
     }
 
+    /// Exports the repository as a CAR from one read snapshot, so blocks
+    /// written while the export runs are neither mixed in nor lost. The
+    /// snapshot is a dedicated read-only connection, which leaves the
+    /// store's write connection free for the duration.
     pub async fn get_car_stream(&self, since: Option<String>) -> Result<Vec<u8>> {
-        match self.get_root().await {
-            None => Err(anyhow::Error::new(RepoRootNotFoundError)),
-            Some(root) => {
-                let mut car = BlockMap::new();
-                let mut cursor: Option<CidAndRev> = None;
-                loop {
-                    let res = self.get_block_range(&since, &cursor).await?;
-                    for row in &res {
-                        car.set(Cid::from_str(&row.cid)?, row.content.clone());
-                    }
-                    if let Some(last_row) = res.last() {
+        self.get_car_stream_within(since, EXPORT_DEADLINE).await
+    }
+
+    pub async fn get_car_stream_within(
+        &self,
+        since: Option<String>,
+        deadline: Duration,
+    ) -> Result<Vec<u8>> {
+        let Some(path) = self.db.path().filter(|path| !path.as_os_str().is_empty()) else {
+            anyhow::bail!("repository export needs a file-backed store")
+        };
+        let (root, car) = tokio::task::spawn_blocking(move || -> Result<(Cid, BlockMap)> {
+            let conn = Connection::open_with_flags(
+                &path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            conn.busy_timeout(Duration::from_millis(5000))?;
+            let snapshot = conn.unchecked_transaction()?;
+            let root: Option<String> = snapshot
+                .query_row("SELECT cid FROM repo_root LIMIT 1", [], |row| row.get(0))
+                .optional()?;
+            let Some(root) = root else {
+                return Err(anyhow::Error::new(RepoRootNotFoundError));
+            };
+            let started = Instant::now();
+            let mut car = BlockMap::new();
+            let mut cursor: Option<CidAndRev> = None;
+            loop {
+                if started.elapsed() > deadline {
+                    anyhow::bail!("repository export exceeded {deadline:?}");
+                }
+                let rows = block_range_in(&snapshot, &since, &cursor)?;
+                for row in &rows {
+                    car.set(Cid::from_str(&row.cid)?, row.content.clone());
+                }
+                match rows.last() {
+                    Some(last_row) => {
                         cursor = Some(CidAndRev {
                             cid: Cid::from_str(&last_row.cid)?,
                             rev: last_row.repo_rev.clone(),
-                        });
-                    } else {
-                        break;
+                        })
                     }
+                    None => break,
                 }
-                blocks_to_car_file(Some(&root), car).await
             }
-        }
+            snapshot.rollback()?;
+            Ok((Cid::from_str(&root)?, car))
+        })
+        .await??;
+        blocks_to_car_file(Some(&root), car).await
     }
 
     pub async fn get_block_range(
@@ -289,42 +444,11 @@ impl SqlRepoReader {
         since: &Option<String>,
         cursor: &Option<CidAndRev>,
     ) -> Result<Vec<RepoBlock>> {
-        let db = self.db.clone();
         let since = since.clone();
         let cursor = cursor.clone();
-
-        db.run(move |conn| {
-            let mut sql =
-                String::from("SELECT cid, \"repoRev\", size, content FROM repo_block WHERE 1 = 1");
-            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-            if let Some(cursor) = &cursor {
-                // use this syntax to ensure we hit the index
-                sql.push_str(" AND ((\"repoRev\", cid) < (?, ?))");
-                params.push(Box::new(cursor.rev.clone()));
-                params.push(Box::new(cursor.cid.to_string()));
-            }
-            if let Some(since) = &since {
-                sql.push_str(" AND \"repoRev\" > ?");
-                params.push(Box::new(since.clone()));
-            }
-            sql.push_str(" ORDER BY \"repoRev\" DESC, cid DESC LIMIT 500");
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt
-                .query_map(
-                    rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
-                    |row| {
-                        Ok(RepoBlock {
-                            cid: row.get(0)?,
-                            repo_rev: row.get(1)?,
-                            size: row.get(2)?,
-                            content: row.get(3)?,
-                        })
-                    },
-                )?
-                .collect::<Result<Vec<RepoBlock>, rusqlite::Error>>()?;
-            Ok(rows)
-        })
-        .await
+        self.db
+            .run(move |conn| block_range_in(conn, &since, &cursor))
+            .await
     }
 
     pub async fn count_blocks(&self) -> Result<i64> {
@@ -555,6 +679,88 @@ mod tests {
         reader.cache_rev("rev-9".to_owned()).await.unwrap();
         let cache_guard = reader.cache.read().await;
         assert_eq!(cache_guard.get(cid), Some(&bytes));
+    }
+
+    #[tokio::test]
+    async fn apply_commit_creates_the_root() {
+        let (_dir, reader) = test_reader().await;
+        let bytes = b"genesis".to_vec();
+        let cid = cid_for(&bytes);
+        let mut new_blocks = BlockMap::new();
+        new_blocks.set(cid, bytes);
+        let commit = CommitData {
+            cid,
+            rev: "rev-1".to_owned(),
+            since: None,
+            prev: None,
+            new_blocks,
+            relevant_blocks: BlockMap::new(),
+            removed_cids: CidSet::new(None),
+        };
+        reader.apply_commit(commit, Some(true)).await.unwrap();
+        assert_eq!(reader.get_root().await, Some(cid));
+        assert_eq!(reader.count_blocks().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn apply_commit_rejects_a_moved_root() {
+        let (_dir, reader) = test_reader().await;
+        let root_one = cid_for(b"root-one");
+        reader
+            .update_root(root_one, "rev-1".to_owned(), Some(true))
+            .await
+            .unwrap();
+        let stale = cid_for(b"stale");
+        let commit = CommitData {
+            cid: cid_for(b"root-two"),
+            rev: "rev-2".to_owned(),
+            since: Some("rev-1".to_owned()),
+            prev: Some(stale),
+            new_blocks: BlockMap::new(),
+            relevant_blocks: BlockMap::new(),
+            removed_cids: CidSet::new(None),
+        };
+        let did = reader.did.clone();
+        let err = reader
+            .db
+            .tx(move |tx| apply_commit_in(tx, &did, "now", &commit, Some(&stale)))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<ConcurrentWriteError>(),
+            Some(&ConcurrentWriteError)
+        );
+        assert_eq!(reader.get_root_detailed().await.unwrap().rev, "rev-1");
+    }
+
+    #[tokio::test]
+    async fn car_stream_is_a_snapshot_with_a_deadline() {
+        let (_dir, reader) = test_reader().await;
+        let root_bytes = b"snapshot-root".to_vec();
+        let root_cid = cid_for(&root_bytes);
+        reader
+            .put_block(root_cid, root_bytes, "rev-1".to_owned())
+            .await
+            .unwrap();
+        reader
+            .update_root(root_cid, "rev-1".to_owned(), Some(true))
+            .await
+            .unwrap();
+        let car = reader.get_car_stream(None).await.unwrap();
+        assert!(!car.is_empty());
+        let expired = reader
+            .get_car_stream_within(None, Duration::ZERO)
+            .await
+            .unwrap_err();
+        assert!(expired.to_string().contains("exceeded"));
+
+        let memory = SqlRepoReader::new(
+            reader.did.clone(),
+            None,
+            crate::db::sqlite::Db::open(":memory:").unwrap(),
+        );
+        let err = memory.get_car_stream(None).await.unwrap_err();
+        assert!(err.to_string().contains("file-backed"));
     }
 
     #[tokio::test]

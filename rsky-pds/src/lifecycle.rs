@@ -21,9 +21,10 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-const LIFECYCLE_MIGRATIONS: &[Migration] = &[Migration {
-    name: "001",
-    sql: "CREATE TABLE tombstone (\
+const LIFECYCLE_MIGRATIONS: &[Migration] = &[
+    Migration {
+        name: "001",
+        sql: "CREATE TABLE tombstone (\
             did TEXT PRIMARY KEY, \
             \"requestedAt\" TEXT NOT NULL, \
             \"accountSeq\" INTEGER, \
@@ -37,7 +38,18 @@ const LIFECYCLE_MIGRATIONS: &[Migration] = &[Migration {
             \"observedEmptyAt\" TEXT, \
             \"physicallyPurgedAt\" TEXT\
           );",
-}];
+    },
+    // A write marks its actor here before it commits, so a restart knows
+    // which stores may hold undelivered publication intents or unfinished
+    // blob work without opening every store on disk.
+    Migration {
+        name: "002",
+        sql: "CREATE TABLE pending_work (\
+            did TEXT PRIMARY KEY, \
+            \"markedAt\" TEXT NOT NULL\
+          );",
+    },
+];
 
 const LIFECYCLE_MIGRATION_SET: MigrationSet = MigrationSet {
     shared: &[],
@@ -70,8 +82,10 @@ pub struct PurgeObligation {
     pub manifest: serde_json::Value,
 }
 
-/// The journal of deletions and purge obligations, kept outside every
-/// actor store and written with full synchronous durability.
+/// The journal of deletions, purge obligations, and actors with work
+/// outstanding, kept outside every actor store and written with full
+/// synchronous durability.
+#[derive(Clone)]
 pub struct LifecycleStore {
     db: Db,
     tombstoned: Tombstones,
@@ -106,6 +120,48 @@ impl LifecycleStore {
 
     pub fn tombstones(&self) -> Tombstones {
         self.tombstoned.clone()
+    }
+
+    /// Records, before a write commits, that `did` may have undelivered
+    /// intents or unfinished blob work afterwards.
+    pub async fn mark_pending_work(&self, did: &str) -> Result<()> {
+        let did = did.to_owned();
+        let now = rsky_common::now();
+        self.db
+            .run(move |conn| {
+                conn.execute(
+                    "INSERT INTO pending_work (did, \"markedAt\") VALUES (?1, ?2) \
+                     ON CONFLICT (did) DO NOTHING",
+                    params![did, now],
+                )?;
+                Ok(())
+            })
+            .await
+    }
+
+    /// Forgets the mark once the actor's intents are delivered and its
+    /// blob work is terminal.
+    pub async fn clear_pending_work(&self, did: &str) -> Result<()> {
+        let did = did.to_owned();
+        self.db
+            .run(move |conn| {
+                conn.execute("DELETE FROM pending_work WHERE did = ?1", params![did])?;
+                Ok(())
+            })
+            .await
+    }
+
+    pub async fn pending_work(&self) -> Result<Vec<String>> {
+        self.db
+            .run(|conn| {
+                let mut stmt =
+                    conn.prepare("SELECT did FROM pending_work ORDER BY \"markedAt\", did")?;
+                let dids = stmt
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(dids)
+            })
+            .await
     }
 
     /// Whether writes for `did` must be refused because its deletion is in
@@ -494,8 +550,8 @@ mod tests {
                 cache_size: 10,
             },
             BackgroundQueue::default(),
-        )
-        .with_tombstones(lifecycle.tombstones());
+            lifecycle.clone(),
+        );
         World {
             _dir: dir,
             lifecycle,
@@ -510,6 +566,40 @@ mod tests {
             &Secp256k1::new(),
             &SecretKey::from_slice(&[7u8; 32]).unwrap(),
         )
+    }
+
+    #[tokio::test]
+    async fn pending_work_marks_are_idempotent_and_ordered() {
+        let world = world().await;
+        world
+            .lifecycle
+            .mark_pending_work("did:plc:b")
+            .await
+            .unwrap();
+        world
+            .lifecycle
+            .mark_pending_work("did:plc:a")
+            .await
+            .unwrap();
+        world
+            .lifecycle
+            .mark_pending_work("did:plc:b")
+            .await
+            .unwrap();
+        let mut marked = world.lifecycle.pending_work().await.unwrap();
+        marked.sort();
+        assert_eq!(marked, ["did:plc:a", "did:plc:b"]);
+        world
+            .lifecycle
+            .clear_pending_work("did:plc:b")
+            .await
+            .unwrap();
+        world
+            .lifecycle
+            .clear_pending_work("did:plc:b")
+            .await
+            .unwrap();
+        assert_eq!(world.lifecycle.pending_work().await.unwrap(), ["did:plc:a"]);
     }
 
     async fn create_account(world: &World) {

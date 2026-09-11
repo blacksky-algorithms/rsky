@@ -170,9 +170,16 @@ pub fn get_admin_token() -> String {
 */
 #[allow(dead_code)] // the compatibility binary boots over the fixture instead
 pub async fn get_client() -> (TempDir, Client) {
-    init_env();
     let dir = tempfile::tempdir().expect("Valid temporary directory");
-    let path = |name: &str| dir.path().join(name).to_str().unwrap().to_owned();
+    let client = get_client_in(dir.path()).await;
+    (dir, client)
+}
+
+/// Boots a PDS over an existing data directory, as a restart would.
+#[allow(dead_code)]
+pub async fn get_client_in(dir: &std::path::Path) -> Client {
+    init_env();
+    let path = |name: &str| dir.join(name).to_str().unwrap().to_owned();
     let rocket_cfg = RocketConfig {
         service_db: Some(ServiceDbConfig {
             account_db_location: path("account.sqlite"),
@@ -182,10 +189,9 @@ pub async fn get_client() -> (TempDir, Client) {
         }),
         actor_store_directory: Some(path("actors")),
     };
-    let client = Client::untracked(build_rocket(Some(rocket_cfg)).await)
+    Client::untracked(build_rocket(Some(rocket_cfg)).await)
         .await
-        .expect("Valid Rocket instance");
-    (dir, client)
+        .expect("Valid Rocket instance")
 }
 
 /**
