@@ -81,6 +81,7 @@ Mount a volume at `PDS_DATA_DIRECTORY` to persist data.
 | `PDS_COEXISTENCE` | `true` when another implementation shares the data directory: nothing is deleted from blob storage, deleted accounts leave a purge obligation for later |
 | `PDS_WRITE_ALLOWLIST_FILE` | The write allowlist naming the accounts this process may write (see below); every account is admitted when unset |
 | `PDS_LOCK_DIR` | Per-account advisory locks shared with the maintenance drain (default `<PDS_DATA_DIRECTORY>/rsky/locks`) |
+| `PDS_BLOB_ATTEMPTS_DB` | The journal of every physical S3 write (default `<PDS_DATA_DIRECTORY>/rsky/blob-attempts.sqlite`); never restore it from a backup |
 | `PDS_REDIS_SCRATCH_ADDRESS` | `host:port` of a redis used to track DPoP proof replay across processes (with `PDS_REDIS_SCRATCH_PASSWORD`); in-memory when unset |
 | `PDS_RECOVERY_DID_KEY` | Optional additional PLC rotation key |
 

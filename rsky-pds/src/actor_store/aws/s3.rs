@@ -1,6 +1,8 @@
 // based on https://github.com/bluesky-social/atproto/blob/main/packages/aws/src/s3.ts
 use crate::actor_store::blobstore::BlobStore;
+use crate::blob_attempts::{AttemptJournal, AttemptOutcome};
 use anyhow::Result;
+use aws_config::retry::RetryConfig;
 use aws_config::SdkConfig;
 use aws_sdk_s3 as s3;
 use aws_sdk_s3::error::SdkError;
@@ -16,20 +18,36 @@ struct MoveObject {
     to: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct S3BlobStore {
     client: s3::Client,
     pub did: String,
     pub bucket: String,
     apply_acl: bool,
+    attempts: Option<AttemptJournal>,
+}
+
+impl std::fmt::Debug for S3BlobStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3BlobStore")
+            .field("did", &self.did)
+            .field("bucket", &self.bucket)
+            .finish_non_exhaustive()
+    }
 }
 
 // Works with any S3-compatible object storage service. A configured bucket
 // holds all actors under did-prefixed keys; legacy deployments without a
 // configured bucket keep one bucket per actor named after the DID.
 impl S3BlobStore {
+    /// The client never retries on its own: a request that timed out may
+    /// still complete, and a hidden retry would report one success for two
+    /// attempts. The caller journals each attempt instead.
     pub fn new(did: String, cfg: &SdkConfig, bucket: Option<String>) -> Self {
-        let client = aws_sdk_s3::Client::new(cfg);
+        let config = s3::config::Builder::from(cfg)
+            .retry_config(RetryConfig::disabled())
+            .build();
+        let client = aws_sdk_s3::Client::from_conf(config);
         let apply_acl = !is_gcs_endpoint(cfg.endpoint_url());
         let bucket = bucket.unwrap_or_else(|| did.clone());
         S3BlobStore {
@@ -37,7 +55,40 @@ impl S3BlobStore {
             did,
             bucket,
             apply_acl,
+            attempts: None,
         }
+    }
+
+    pub fn with_attempts(mut self, attempts: AttemptJournal) -> Self {
+        self.attempts = Some(attempts);
+        self
+    }
+
+    pub fn retries_disabled(&self) -> bool {
+        self.client
+            .config()
+            .retry_config()
+            .map(|retry| retry.max_attempts() == 1)
+            .unwrap_or(false)
+    }
+
+    /// Runs one physical request with its attempt journaled before it is
+    /// sent and its outcome recorded after.
+    async fn attempt<T, F>(&self, key: &str, operation: &str, request: F) -> Result<T>
+    where
+        F: std::future::Future<Output = Result<T>>,
+    {
+        let Some(journal) = &self.attempts else {
+            return request.await;
+        };
+        let id = journal.begin(&self.did, key, operation).await?;
+        let result = request.await;
+        let outcome = match &result {
+            Ok(_) => AttemptOutcome::Succeeded,
+            Err(err) => AttemptOutcome::Failed(err.to_string()),
+        };
+        journal.resolve(id, outcome).await?;
+        result
     }
 
     fn gen_key(&self) -> String {
@@ -72,9 +123,12 @@ impl S3BlobStore {
 
     pub async fn put_temp(&self, bytes: Vec<u8>) -> Result<String> {
         let key = self.gen_key();
-        self.put_object_request(self.get_tmp_path(&key), bytes)
-            .send()
-            .await?;
+        let path = self.get_tmp_path(&key);
+        self.attempt(&path, "put", async {
+            self.put_object_request(path.clone(), bytes).send().await?;
+            Ok(())
+        })
+        .await?;
         Ok(key)
     }
 
@@ -93,10 +147,12 @@ impl S3BlobStore {
     }
 
     pub async fn put_permanent(&self, cid: Cid, bytes: Vec<u8>) -> Result<()> {
-        self.put_object_request(self.get_stored_path(cid), bytes)
-            .send()
-            .await?;
-        Ok(())
+        let path = self.get_stored_path(cid);
+        self.attempt(&path, "put", async {
+            self.put_object_request(path.clone(), bytes).send().await?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn quarantine(&self, cid: Cid) -> Result<()> {
@@ -172,16 +228,28 @@ impl S3BlobStore {
     }
 
     async fn delete_key(&self, key: String) -> Result<()> {
-        self.client
-            .delete_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .send()
-            .await?;
-        Ok(())
+        self.attempt(&key, "delete", async {
+            self.client
+                .delete_object()
+                .bucket(&self.bucket)
+                .key(key.clone())
+                .send()
+                .await?;
+            Ok(())
+        })
+        .await
     }
 
+    /// Deletes each key as its own journaled attempt: a bulk request
+    /// reports failures per key, and a per-key row is what a collector can
+    /// reason about.
     async fn delete_many_keys(&self, keys: Vec<String>) -> Result<()> {
+        if self.attempts.is_some() {
+            for key in keys {
+                self.delete_key(key).await?;
+            }
+            return Ok(());
+        }
         let objects: Vec<ObjectIdentifier> = keys
             .into_iter()
             .map(|key| Ok(ObjectIdentifier::builder().key(key).build()?))
@@ -197,19 +265,23 @@ impl S3BlobStore {
     }
 
     async fn copy_object(&self, keys: MoveObject) -> Result<()> {
-        let req = self
-            .client
-            .copy_object()
-            .bucket(&self.bucket)
-            .copy_source(format!("{0}/{1}", self.bucket, keys.from))
-            .key(keys.to);
-        let req = if self.apply_acl {
-            req.acl(ObjectCannedAcl::PublicRead)
-        } else {
-            req
-        };
-        req.send().await?;
-        Ok(())
+        let to = keys.to.clone();
+        self.attempt(&to, "copy", async {
+            let req = self
+                .client
+                .copy_object()
+                .bucket(&self.bucket)
+                .copy_source(format!("{0}/{1}", self.bucket, keys.from))
+                .key(keys.to);
+            let req = if self.apply_acl {
+                req.acl(ObjectCannedAcl::PublicRead)
+            } else {
+                req
+            };
+            req.send().await?;
+            Ok(())
+        })
+        .await
     }
 
     async fn move_object(&self, keys: MoveObject) -> Result<()> {
@@ -351,6 +423,68 @@ mod tests {
         let store = S3BlobStore::new("did:example:alice".to_owned(), &cfg, None);
         assert_eq!(store.bucket, "did:example:alice");
         assert!(store.apply_acl);
+        assert!(store.retries_disabled());
+        assert!(format!("{store:?}").contains("did:example:alice"));
+    }
+
+    /// A request against an endpoint that does not answer is journaled as
+    /// one failed attempt, never retried behind the journal's back.
+    #[tokio::test]
+    async fn every_request_is_one_journaled_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = AttemptJournal::open(dir.path().join("attempts.sqlite"), true)
+            .await
+            .unwrap();
+        let cfg = SdkConfig::builder()
+            .behavior_version(BehaviorVersion::latest())
+            .endpoint_url("http://127.0.0.1:1")
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .credentials_provider(aws_sdk_s3::config::SharedCredentialsProvider::new(
+                aws_sdk_s3::config::Credentials::new("k", "s", None, None, "test"),
+            ))
+            .build();
+        let store = S3BlobStore::new(
+            "did:example:alice".to_owned(),
+            &cfg,
+            Some("bucket".to_owned()),
+        )
+        .with_attempts(journal.clone());
+        let cid = sha256_to_cid(Sha256::digest(b"unreachable").to_vec());
+        assert!(store
+            .put_permanent(cid, b"unreachable".to_vec())
+            .await
+            .is_err());
+        assert!(store.put_temp(b"unreachable".to_vec()).await.is_err());
+        assert!(store.delete(cid).await.is_err());
+        assert!(store.delete_many(vec![cid]).await.is_err());
+        assert!(store.restore_copy_only(cid).await.is_err());
+        let stored = store.get_stored_path(cid);
+        let attempts = journal
+            .attempts("did:example:alice", &stored)
+            .await
+            .unwrap();
+        assert_eq!(
+            attempts
+                .iter()
+                .map(|attempt| attempt.operation.as_str())
+                .collect::<Vec<_>>(),
+            ["put", "delete", "delete", "copy"]
+        );
+        assert!(attempts.iter().all(|attempt| attempt
+            .outcome
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("failed")));
+        assert!(journal
+            .unresolved("did:example:alice")
+            .await
+            .unwrap()
+            .is_empty());
+        // without a journal the bulk delete goes out as one request
+        let bare = S3BlobStore::new("did:example:alice".to_owned(), &cfg, Some("b".to_owned()));
+        assert!(bare.delete_many(vec![cid]).await.is_err());
+        assert!(bare.make_permanent("k".to_owned(), cid).await.is_err());
+        assert!(bare.quarantine(cid).await.is_err());
     }
 
     #[test]

@@ -101,11 +101,22 @@ impl BlobStore for UnavailableBlobStore {
 pub struct BlobstoreFactory {
     cfg: BlobstoreConfig,
     aws_cfg: SdkConfig,
+    attempts: Option<crate::blob_attempts::AttemptJournal>,
 }
 
 impl BlobstoreFactory {
     pub fn new(cfg: BlobstoreConfig, aws_cfg: SdkConfig) -> Self {
-        BlobstoreFactory { cfg, aws_cfg }
+        BlobstoreFactory {
+            cfg,
+            aws_cfg,
+            attempts: None,
+        }
+    }
+
+    /// Journals every physical write the S3 stores make.
+    pub fn with_attempts(mut self, attempts: crate::blob_attempts::AttemptJournal) -> Self {
+        self.attempts = Some(attempts);
+        self
     }
 
     pub fn blobstore(&self, did: String) -> Arc<dyn BlobStore> {
@@ -120,7 +131,11 @@ impl BlobstoreFactory {
                 None,
             )),
             BlobstoreConfig::S3 { bucket } => {
-                Arc::new(S3BlobStore::new(did, &self.aws_cfg, bucket.clone()))
+                let store = S3BlobStore::new(did, &self.aws_cfg, bucket.clone());
+                Arc::new(match &self.attempts {
+                    Some(attempts) => store.with_attempts(attempts.clone()),
+                    None => store,
+                })
             }
         }
     }
@@ -494,8 +509,20 @@ mod tests {
         let store = factory.blobstore("did:example:alice".to_owned());
         assert!(store.delete_all().is_none());
 
-        let legacy = BlobstoreFactory::new(BlobstoreConfig::S3 { bucket: None }, aws_cfg);
+        let legacy = BlobstoreFactory::new(BlobstoreConfig::S3 { bucket: None }, aws_cfg.clone());
         let store = legacy.blobstore("did:example:alice".to_owned());
         assert!(store.delete_all().is_none());
+
+        let dir = tempfile::tempdir().unwrap();
+        let journal =
+            crate::blob_attempts::AttemptJournal::open(dir.path().join("attempts.sqlite"), true)
+                .await
+                .unwrap();
+        let journaled = BlobstoreFactory::new(BlobstoreConfig::S3 { bucket: None }, aws_cfg)
+            .with_attempts(journal);
+        assert!(journaled
+            .blobstore("did:example:alice".to_owned())
+            .delete_all()
+            .is_none());
     }
 }

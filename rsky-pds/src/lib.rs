@@ -14,6 +14,7 @@ pub mod admission;
 pub mod apis;
 pub mod auth_verifier;
 pub mod background;
+pub mod blob_attempts;
 pub mod config;
 pub mod context;
 pub mod crawlers;
@@ -273,7 +274,14 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         .endpoint_url(env::var("AWS_ENDPOINT").unwrap_or("localhost".to_owned()))
         .load()
         .await;
-    let blobstore_factory = BlobstoreFactory::new(cfg.blobstore.clone(), aws_sdk_config);
+    let blob_attempts = blob_attempts::AttemptJournal::open(
+        &cfg.service_db.blob_attempts_db_location,
+        cfg.service.coexistence,
+    )
+    .await
+    .expect("Failed to open the blob attempt journal");
+    let blobstore_factory =
+        BlobstoreFactory::new(cfg.blobstore.clone(), aws_sdk_config).with_attempts(blob_attempts);
 
     let id_resolver = SharedIdResolver {
         id_resolver: RwLock::new(IdResolver::new(IdentityResolverOpts {

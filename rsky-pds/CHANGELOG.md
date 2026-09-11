@@ -119,6 +119,17 @@ Every moderation decision advances a per-blob version, and a restoration
 that resumes after a newer decision ends `superseded` instead of clearing
 it. Outside coexistence takedowns still move objects to and from quarantine.
 
+### Changed — every S3 request is one journaled attempt
+
+The S3 client no longer retries on its own: a request that timed out may
+still complete later, and a hidden retry would report one success for two
+attempts. Each put, copy, and delete is recorded in `PDS_BLOB_ATTEMPTS_DB`
+before it is sent and resolved after, with the namespace's first write by
+this implementation and whether another implementation could have written
+it. The journal lives outside every actor store and must never be restored
+from a backup: an attempt with no outcome is the evidence that an object
+may still appear.
+
 ### Added — write admission and the maintenance drain
 
 `PDS_WRITE_ALLOWLIST_FILE` names the accounts this process may write while

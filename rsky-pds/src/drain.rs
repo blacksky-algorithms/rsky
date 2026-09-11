@@ -182,8 +182,15 @@ pub async fn run_from_env(args: DrainArgs) -> Result<DrainStatus> {
         .endpoint_url(std::env::var("AWS_ENDPOINT").unwrap_or("localhost".to_owned()))
         .load()
         .await;
-    let blobstore =
-        BlobstoreFactory::new(cfg.blobstore.clone(), aws_sdk_config).blobstore(args.did.clone());
+    let blobstore = BlobstoreFactory::new(cfg.blobstore.clone(), aws_sdk_config)
+        .with_attempts(
+            crate::blob_attempts::AttemptJournal::open(
+                &cfg.service_db.blob_attempts_db_location,
+                cfg.service.coexistence,
+            )
+            .await?,
+        )
+        .blobstore(args.did.clone());
     drain_did(
         &actor_store,
         &sequencer,

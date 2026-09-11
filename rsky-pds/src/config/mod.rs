@@ -66,6 +66,8 @@ pub struct ServiceDbConfig {
     pub lifecycle_db_location: String,
     /// Per-actor advisory locks shared with maintenance tooling.
     pub lock_dir: String,
+    /// The journal of every physical object-storage write.
+    pub blob_attempts_db_location: String,
 }
 
 /// Per-location overrides of the layout under the data directory.
@@ -78,6 +80,7 @@ pub struct StorageOverrides {
     pub did_cache_db_location: Option<String>,
     pub lifecycle_db_location: Option<String>,
     pub lock_dir: Option<String>,
+    pub blob_attempts_db_location: Option<String>,
 }
 
 pub fn storage_cfg_from(
@@ -108,6 +111,9 @@ pub fn storage_cfg_from(
             .lifecycle_db_location
             .unwrap_or_else(|| db_loc("rsky/lifecycle.sqlite")),
         lock_dir: overrides.lock_dir.unwrap_or_else(|| db_loc("rsky/locks")),
+        blob_attempts_db_location: overrides
+            .blob_attempts_db_location
+            .unwrap_or_else(|| db_loc("rsky/blob-attempts.sqlite")),
     };
     (actor_store, service_db)
 }
@@ -265,6 +271,7 @@ pub fn env_to_cfg() -> ServerConfig {
             did_cache_db_location: env_str("PDS_DID_CACHE_DB_LOCATION"),
             lifecycle_db_location: env_str("PDS_LIFECYCLE_DB"),
             lock_dir: env_str("PDS_LOCK_DIR"),
+            blob_attempts_db_location: env_str("PDS_BLOB_ATTEMPTS_DB"),
         },
     );
     let blobstore_cfg = blobstore_cfg_from(
@@ -504,6 +511,10 @@ mod tests {
         assert_eq!(service_db.did_cache_db_location, "did_cache.sqlite");
         assert_eq!(service_db.lifecycle_db_location, "rsky/lifecycle.sqlite");
         assert_eq!(service_db.lock_dir, "rsky/locks");
+        assert_eq!(
+            service_db.blob_attempts_db_location,
+            "rsky/blob-attempts.sqlite"
+        );
     }
 
     #[test]
@@ -519,6 +530,10 @@ mod tests {
             "/data/rsky/lifecycle.sqlite"
         );
         assert_eq!(service_db.lock_dir, "/data/rsky/locks");
+        assert_eq!(
+            service_db.blob_attempts_db_location,
+            "/data/rsky/blob-attempts.sqlite"
+        );
     }
 
     #[test]
@@ -533,6 +548,7 @@ mod tests {
                 did_cache_db_location: Some("/dbs/did_cache.sqlite".to_owned()),
                 lifecycle_db_location: Some("/dbs/lifecycle.sqlite".to_owned()),
                 lock_dir: Some("/dbs/locks".to_owned()),
+                blob_attempts_db_location: Some("/dbs/attempts.sqlite".to_owned()),
             },
         );
         assert_eq!(actor_store.directory, "/elsewhere/actors");
@@ -542,5 +558,6 @@ mod tests {
         assert_eq!(service_db.did_cache_db_location, "/dbs/did_cache.sqlite");
         assert_eq!(service_db.lifecycle_db_location, "/dbs/lifecycle.sqlite");
         assert_eq!(service_db.lock_dir, "/dbs/locks");
+        assert_eq!(service_db.blob_attempts_db_location, "/dbs/attempts.sqlite");
     }
 }
