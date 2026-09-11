@@ -34,6 +34,14 @@ pub trait BlobStore: Send + Sync {
     fn delete_all(&self) -> Option<BoxFuture<'_, Result<()>>> {
         None
     }
+    /// Copies a temporary object to its permanent key and leaves the
+    /// temporary object in place, for a store another implementation may
+    /// still read.
+    fn make_permanent_copy_only(&self, key: String, cid: Cid) -> BoxFuture<'_, Result<()>>;
+    fn has_quarantined(&self, cid: Cid) -> BoxFuture<'_, Result<bool>>;
+    /// Copies a quarantined object back to its permanent key and leaves the
+    /// quarantined object in place.
+    fn restore_copy_only(&self, cid: Cid) -> BoxFuture<'_, Result<()>>;
 }
 
 /// A blob store for code paths that only read a store's journal and never
@@ -78,6 +86,15 @@ impl BlobStore for UnavailableBlobStore {
     fn delete_many(&self, _cids: Vec<Cid>) -> BoxFuture<'_, Result<()>> {
         Box::pin(async { bail!("blob store unavailable") })
     }
+    fn make_permanent_copy_only(&self, _key: String, _cid: Cid) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { bail!("blob store unavailable") })
+    }
+    fn has_quarantined(&self, _cid: Cid) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async { bail!("blob store unavailable") })
+    }
+    fn restore_copy_only(&self, _cid: Cid) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { bail!("blob store unavailable") })
+    }
 }
 
 /// Builds the configured blobstore implementation for a given actor.
@@ -109,11 +126,14 @@ impl BlobstoreFactory {
     }
 }
 
-/// In-memory blobstore used by deterministic tests.
+/// In-memory blobstore used by deterministic tests. It counts every call
+/// that deletes or moves an object, so a test can prove that a code path
+/// never issues one.
 #[derive(Debug, Default)]
 pub struct MemoryBlobStore {
     state: Mutex<MemoryBlobStoreState>,
     next_key: AtomicU64,
+    destructive_calls: AtomicU64,
 }
 
 #[derive(Debug, Default)]
@@ -141,6 +161,21 @@ impl MemoryBlobStore {
     pub fn has_quarantined(&self, cid: &Cid) -> bool {
         self.lock().quarantined.contains_key(&cid.to_string())
     }
+
+    /// Places an object in quarantine with no permanent copy, as a takedown
+    /// by the reference implementation leaves it.
+    pub fn put_quarantined(&self, cid: Cid, bytes: Vec<u8>) {
+        self.lock().quarantined.insert(cid.to_string(), bytes);
+    }
+
+    /// How many calls deleted or moved an object.
+    pub fn destructive_calls(&self) -> u64 {
+        self.destructive_calls.load(Ordering::SeqCst)
+    }
+
+    fn destructive(&self) {
+        self.destructive_calls.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 impl BlobStore for MemoryBlobStore {
@@ -154,9 +189,42 @@ impl BlobStore for MemoryBlobStore {
 
     fn make_permanent(&self, key: String, cid: Cid) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
+            self.destructive();
             let mut state = self.lock();
+            // like the disk and S3 stores, an already-stored object only
+            // needs its temporary copy removed
+            if state.stored.contains_key(&cid.to_string()) {
+                state.temp.remove(&key);
+                return Ok(());
+            }
             let Some(bytes) = state.temp.remove(&key) else {
                 bail!("temp blob not found: {key}")
+            };
+            state.stored.insert(cid.to_string(), bytes);
+            Ok(())
+        })
+    }
+
+    fn make_permanent_copy_only(&self, key: String, cid: Cid) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            let mut state = self.lock();
+            let Some(bytes) = state.temp.get(&key).cloned() else {
+                bail!("temp blob not found: {key}")
+            };
+            state.stored.entry(cid.to_string()).or_insert(bytes);
+            Ok(())
+        })
+    }
+
+    fn has_quarantined(&self, cid: Cid) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async move { Ok(MemoryBlobStore::has_quarantined(self, &cid)) })
+    }
+
+    fn restore_copy_only(&self, cid: Cid) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            let mut state = self.lock();
+            let Some(bytes) = state.quarantined.get(&cid.to_string()).cloned() else {
+                bail!("quarantined blob not found: {cid}")
             };
             state.stored.entry(cid.to_string()).or_insert(bytes);
             Ok(())
@@ -172,6 +240,7 @@ impl BlobStore for MemoryBlobStore {
 
     fn quarantine(&self, cid: Cid) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
+            self.destructive();
             let mut state = self.lock();
             let Some(bytes) = state.stored.remove(&cid.to_string()) else {
                 bail!("stored blob not found: {cid}")
@@ -183,6 +252,7 @@ impl BlobStore for MemoryBlobStore {
 
     fn unquarantine(&self, cid: Cid) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
+            self.destructive();
             let mut state = self.lock();
             let Some(bytes) = state.quarantined.remove(&cid.to_string()) else {
                 bail!("quarantined blob not found: {cid}")
@@ -218,6 +288,7 @@ impl BlobStore for MemoryBlobStore {
 
     fn delete(&self, cid: Cid) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
+            self.destructive();
             self.lock().stored.remove(&cid.to_string());
             Ok(())
         })
@@ -225,6 +296,7 @@ impl BlobStore for MemoryBlobStore {
 
     fn delete_many(&self, cids: Vec<Cid>) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
+            self.destructive();
             let mut state = self.lock();
             for cid in cids {
                 state.stored.remove(&cid.to_string());
@@ -267,7 +339,43 @@ mod tests {
             .unwrap()
             .to_vec();
         assert_eq!(streamed, bytes);
-        assert!(store.make_permanent(key, cid).await.is_err());
+        // promoting again finds the object stored and nothing left to move
+        store.make_permanent(key, cid).await.unwrap();
+        let other = cid_for(b"never uploaded");
+        assert!(store
+            .make_permanent("missing".to_owned(), other)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn copy_only_operations_leave_the_source_and_count_nothing() {
+        let store = MemoryBlobStore::default();
+        let bytes = b"copy me".to_vec();
+        let cid = cid_for(&bytes);
+        assert!(store
+            .make_permanent_copy_only("nope".to_owned(), cid)
+            .await
+            .is_err());
+        let key = store.put_temp(bytes.clone()).await.unwrap();
+        store
+            .make_permanent_copy_only(key.clone(), cid)
+            .await
+            .unwrap();
+        assert!(store.has_temp(&key));
+        assert!(store.has_stored(cid).await.unwrap());
+        // copying again is a no-op
+        store.make_permanent_copy_only(key, cid).await.unwrap();
+
+        assert!(store.restore_copy_only(cid).await.is_err());
+        store.delete(cid).await.unwrap();
+        store.put_quarantined(cid, bytes.clone());
+        assert!(BlobStore::has_quarantined(&store, cid).await.unwrap());
+        store.restore_copy_only(cid).await.unwrap();
+        assert!(store.has_stored(cid).await.unwrap());
+        assert!(store.has_quarantined(&cid));
+        assert_eq!(store.destructive_calls(), 1);
+        assert!(store.unavailable_never_counts().await);
     }
 
     #[tokio::test]
@@ -300,6 +408,19 @@ mod tests {
         assert_eq!(store.stored_cids(), [cid_two.to_string()]);
         store.delete_many(vec![cid_one, cid_two]).await.unwrap();
         assert!(store.stored_cids().is_empty());
+    }
+
+    impl MemoryBlobStore {
+        async fn unavailable_never_counts(&self) -> bool {
+            let store = unavailable();
+            let cid = cid_for(b"nothing");
+            store
+                .make_permanent_copy_only("k".to_owned(), cid)
+                .await
+                .is_err()
+                && store.has_quarantined(cid).await.is_err()
+                && store.restore_copy_only(cid).await.is_err()
+        }
     }
 
     #[tokio::test]

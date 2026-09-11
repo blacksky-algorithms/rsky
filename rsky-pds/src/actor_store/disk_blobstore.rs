@@ -208,6 +208,30 @@ impl BlobStore for DiskBlobStore {
             remove_dir_if_exists(&self.quarantine_location.join(&self.did)).await
         }))
     }
+
+    fn make_permanent_copy_only(&self, key: String, cid: Cid) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            self.ensure_dir().await?;
+            if !BlobStore::has_stored(self, cid).await? {
+                copy_from_temp(&self.tmp_path(&key), &self.stored_path(cid)).await?;
+            }
+            Ok(())
+        })
+    }
+
+    fn has_quarantined(&self, cid: Cid) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async move { Ok(tokio::fs::try_exists(self.quarantine_path(cid)).await?) })
+    }
+
+    fn restore_copy_only(&self, cid: Cid) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            self.ensure_dir().await?;
+            if !BlobStore::has_stored(self, cid).await? {
+                copy_from_temp(&self.quarantine_path(cid), &self.stored_path(cid)).await?;
+            }
+            Ok(())
+        })
+    }
 }
 
 #[cfg(test)]
@@ -253,6 +277,44 @@ mod tests {
             store.quarantine_path(cid),
             Path::new("/quarantine/blobs/did:example:alice").join(cid.to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn copy_only_promotion_and_restoration_keep_their_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let bytes = b"copy only".to_vec();
+        let cid = cid_for(&bytes);
+        assert!(store
+            .make_permanent_copy_only("missing".to_owned(), cid)
+            .await
+            .is_err());
+        let key = store.put_temp(bytes.clone()).await.unwrap();
+        store
+            .make_permanent_copy_only(key.clone(), cid)
+            .await
+            .unwrap();
+        store
+            .make_permanent_copy_only(key.clone(), cid)
+            .await
+            .unwrap();
+        assert!(store.tmp_path(&key).is_file());
+        assert_eq!(BlobStore::get_bytes(&store, cid).await.unwrap(), bytes);
+
+        assert!(!BlobStore::has_quarantined(&store, cid).await.unwrap());
+        assert!(
+            store.restore_copy_only(cid).await.is_ok(),
+            "nothing to restore over"
+        );
+        store.quarantine(cid).await.unwrap();
+        assert!(BlobStore::has_quarantined(&store, cid).await.unwrap());
+        store.restore_copy_only(cid).await.unwrap();
+        assert!(store.quarantine_path(cid).is_file());
+        assert_eq!(BlobStore::get_bytes(&store, cid).await.unwrap(), bytes);
+        store.delete(cid).await.unwrap();
+        store.unquarantine(cid).await.unwrap();
+        store.delete(cid).await.unwrap();
+        assert!(store.restore_copy_only(cid).await.is_err());
     }
 
     #[tokio::test]

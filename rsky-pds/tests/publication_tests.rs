@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{create_account, get_client_in, sequencer_events};
+use common::{create_account, get_admin_token, get_client_in, sequencer_events};
 use rocket::http::{ContentType, Header, Status};
 use rocket::local::asynchronous::Client;
 use rocket::serde::json::json;
@@ -196,4 +196,77 @@ async fn writes_publish_once_and_a_restart_finishes_an_interrupted_delivery() {
     .await;
     assert_eq!(status, Status::Ok, "{json}");
     assert_eq!(sequencer_events(&sequencer, DID).len(), before.len() + 1);
+
+    // a blob referenced by a record is served until a moderator takes it
+    // down, and again once the takedown is reversed
+    // a one-pixel PNG, since an image embed accepts only images
+    let png: Vec<u8> = vec![
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8,
+        0xcf, 0xc0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xc9, 0xfe, 0x92, 0xef, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    let upload = client
+        .post("/xrpc/com.atproto.repo.uploadBlob")
+        .header(ContentType::PNG)
+        .header(Header::new("Authorization", token.clone()))
+        .body(png)
+        .dispatch()
+        .await;
+    assert_eq!(upload.status(), Status::Ok);
+    let blob: Value = upload.into_json().await.unwrap();
+    let blob_cid = blob["blob"]["ref"]["$link"].as_str().unwrap().to_owned();
+    let (status, json) = post(
+        &client,
+        "/xrpc/com.atproto.repo.createRecord",
+        &token,
+        json!({
+            "repo": DID,
+            "collection": "app.bsky.feed.post",
+            "rkey": "3lfixtureaa2d",
+            "record": {
+                "$type": "app.bsky.feed.post",
+                "text": "with blob",
+                "createdAt": "2024-01-01T00:00:00.000Z",
+                "embed": {
+                    "$type": "app.bsky.embed.images",
+                    "images": [{"alt": "", "image": blob["blob"]}],
+                },
+            },
+        }),
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{json}");
+    let get_blob = || {
+        client
+            .get(format!(
+                "/xrpc/com.atproto.sync.getBlob?did={DID}&cid={blob_cid}"
+            ))
+            .dispatch()
+    };
+    assert_eq!(get_blob().await.status(), Status::Ok);
+    for applied in [true, false] {
+        let (status, json) = post(
+            &client,
+            "/xrpc/com.atproto.admin.updateSubjectStatus",
+            &get_admin_token(),
+            json!({
+                "subject": {
+                    "$type": "com.atproto.admin.defs#repoBlobRef",
+                    "did": DID,
+                    "cid": blob_cid,
+                },
+                "takedown": {"applied": applied, "ref": "mod-1"},
+            }),
+        )
+        .await;
+        assert_eq!(status, Status::Ok, "{json}");
+        let expected = if applied {
+            Status::BadRequest
+        } else {
+            Status::Ok
+        };
+        assert_eq!(get_blob().await.status(), expected);
+    }
 }

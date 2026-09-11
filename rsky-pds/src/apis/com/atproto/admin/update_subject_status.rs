@@ -54,6 +54,7 @@ async fn inner_update_subject_status(
                     .blob
                     .update_blob_takedown_status(Cid::from_str(&subject.cid)?, takedown.clone())
                     .await?;
+                actor_store.blob.queue_blob_work();
             }
         }
     }

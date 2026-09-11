@@ -196,7 +196,7 @@ impl S3BlobStore {
         Ok(())
     }
 
-    async fn move_object(&self, keys: MoveObject) -> Result<()> {
+    async fn copy_object(&self, keys: MoveObject) -> Result<()> {
         let req = self
             .client
             .copy_object()
@@ -209,13 +209,39 @@ impl S3BlobStore {
             req
         };
         req.send().await?;
-        self.client
-            .delete_object()
-            .bucket(&self.bucket)
-            .key(keys.from)
-            .send()
-            .await?;
         Ok(())
+    }
+
+    async fn move_object(&self, keys: MoveObject) -> Result<()> {
+        let from = keys.from.clone();
+        self.copy_object(keys).await?;
+        self.delete_key(from).await
+    }
+
+    pub async fn make_permanent_copy_only(&self, key: String, cid: Cid) -> Result<()> {
+        if self.has_stored(cid).await? {
+            return Ok(());
+        }
+        self.copy_object(MoveObject {
+            from: self.get_tmp_path(&key),
+            to: self.get_stored_path(cid),
+        })
+        .await
+    }
+
+    pub async fn has_quarantined(&self, cid: Cid) -> Result<bool> {
+        Ok(self.has_key(self.get_quarantined_path(cid)).await)
+    }
+
+    pub async fn restore_copy_only(&self, cid: Cid) -> Result<()> {
+        if self.has_stored(cid).await? {
+            return Ok(());
+        }
+        self.copy_object(MoveObject {
+            from: self.get_quarantined_path(cid),
+            to: self.get_stored_path(cid),
+        })
+        .await
     }
 }
 
@@ -266,6 +292,18 @@ impl BlobStore for S3BlobStore {
 
     fn delete_many(&self, cids: Vec<Cid>) -> BoxFuture<'_, Result<()>> {
         Box::pin(S3BlobStore::delete_many(self, cids))
+    }
+
+    fn make_permanent_copy_only(&self, key: String, cid: Cid) -> BoxFuture<'_, Result<()>> {
+        Box::pin(S3BlobStore::make_permanent_copy_only(self, key, cid))
+    }
+
+    fn has_quarantined(&self, cid: Cid) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(S3BlobStore::has_quarantined(self, cid))
+    }
+
+    fn restore_copy_only(&self, cid: Cid) -> BoxFuture<'_, Result<()>> {
+        Box::pin(S3BlobStore::restore_copy_only(self, cid))
     }
 }
 

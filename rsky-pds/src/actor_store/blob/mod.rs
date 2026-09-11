@@ -48,13 +48,21 @@ pub enum BlobWorkState {
     /// The object is dereferenced but stays until a collector runs after
     /// every other implementation sharing the store is gone.
     GcDeferred,
+    /// A taken-down object whose permanent copy is missing is being
+    /// restored from quarantine; the row carries the moderation version the
+    /// restoration was requested under.
+    RestorePending,
+    /// A newer moderation decision made the row moot.
+    Superseded,
     Done,
 }
 
 impl BlobWorkState {
-    pub const ALL: [BlobWorkState; 3] = [
+    pub const ALL: [BlobWorkState; 5] = [
         BlobWorkState::DeletePending,
         BlobWorkState::GcDeferred,
+        BlobWorkState::RestorePending,
+        BlobWorkState::Superseded,
         BlobWorkState::Done,
     ];
 
@@ -62,6 +70,8 @@ impl BlobWorkState {
         match self {
             BlobWorkState::DeletePending => "delete-pending",
             BlobWorkState::GcDeferred => "gc-deferred",
+            BlobWorkState::RestorePending => "restore-pending",
+            BlobWorkState::Superseded => "superseded",
             BlobWorkState::Done => "done",
         }
     }
@@ -77,8 +87,8 @@ impl BlobWorkState {
     /// hand-back, or convergence check waits only on non-terminal rows.
     pub fn is_terminal(self) -> bool {
         match self {
-            BlobWorkState::DeletePending => false,
-            BlobWorkState::GcDeferred | BlobWorkState::Done => true,
+            BlobWorkState::DeletePending | BlobWorkState::RestorePending => false,
+            BlobWorkState::GcDeferred | BlobWorkState::Superseded | BlobWorkState::Done => true,
         }
     }
 }
@@ -88,6 +98,7 @@ impl BlobWorkState {
 pub enum BlobWorkKind {
     Permanent,
     Temp,
+    Quarantine,
 }
 
 impl BlobWorkKind {
@@ -95,6 +106,7 @@ impl BlobWorkKind {
         match self {
             BlobWorkKind::Permanent => "permanent",
             BlobWorkKind::Temp => "temp",
+            BlobWorkKind::Quarantine => "quarantine",
         }
     }
 
@@ -102,6 +114,7 @@ impl BlobWorkKind {
         match value {
             "permanent" => Ok(BlobWorkKind::Permanent),
             "temp" => Ok(BlobWorkKind::Temp),
+            "quarantine" => Ok(BlobWorkKind::Quarantine),
             other => bail!("unknown blob work kind: {other}"),
         }
     }
@@ -111,9 +124,21 @@ impl BlobWorkKind {
 pub struct BlobWork {
     pub id: i64,
     pub kind: BlobWorkKind,
-    /// The CID of a permanent object or the temporary key of a temp object.
+    /// The CID of a permanent or quarantined object, or the temporary key of
+    /// a temp object.
     pub key: String,
+    pub cid: Option<String>,
     pub state: BlobWorkState,
+    /// For a restoration, the moderation version it was requested under.
+    pub version: Option<i64>,
+}
+
+/// Where a restoration stopped; tests stop after a step to stand in for a
+/// crash there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreStep {
+    Copied,
+    Confirmed,
 }
 
 /// A blob promoted out of temporary storage before a write's transaction;
@@ -124,12 +149,16 @@ pub struct PromotedBlob {
     pub temp_key: String,
 }
 
+const SELECT_BLOB_WORK: &str = "SELECT id, kind, key, cid, state, version FROM blob_work";
+
 fn blob_work_from_row(row: &rusqlite::Row) -> Result<BlobWork> {
     Ok(BlobWork {
         id: row.get(0)?,
         kind: BlobWorkKind::parse(&row.get::<_, String>(1)?)?,
         key: row.get(2)?,
-        state: BlobWorkState::parse(&row.get::<_, String>(3)?)?,
+        cid: row.get(3)?,
+        state: BlobWorkState::parse(&row.get::<_, String>(4)?)?,
+        version: row.get(5)?,
     })
 }
 
@@ -139,14 +168,68 @@ fn insert_blob_work_in(
     key: &str,
     cid: Option<&str>,
     state: BlobWorkState,
+    version: Option<i64>,
     now: &str,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO blob_work (kind, key, cid, state, \"createdAt\", \"updatedAt\") \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-        rusqlite::params![kind.as_str(), key, cid, state.as_str(), now],
+        "INSERT INTO blob_work (kind, key, cid, state, version, \"createdAt\", \"updatedAt\") \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        rusqlite::params![kind.as_str(), key, cid, state.as_str(), version, now],
     )?;
     Ok(())
+}
+
+fn set_blob_work_state_in(
+    conn: &rusqlite::Connection,
+    id: i64,
+    state: BlobWorkState,
+    now: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE blob_work SET state = ?1, \"updatedAt\" = ?2 WHERE id = ?3",
+        rusqlite::params![state.as_str(), now, id],
+    )?;
+    Ok(())
+}
+
+/// Advances the blob's moderation version and marks every restoration
+/// requested under an earlier version moot; returns the new version.
+fn bump_moderation_version_in(conn: &rusqlite::Connection, cid: &str, now: &str) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO blob_moderation (cid, version) VALUES (?1, 1) \
+         ON CONFLICT (cid) DO UPDATE SET version = version + 1",
+        [cid],
+    )?;
+    let version: i64 = conn.query_row(
+        "SELECT version FROM blob_moderation WHERE cid = ?1",
+        [cid],
+        |row| row.get(0),
+    )?;
+    conn.execute(
+        "UPDATE blob_work SET state = ?1, \"updatedAt\" = ?2 WHERE cid = ?3 AND state = ?4",
+        rusqlite::params![
+            BlobWorkState::Superseded.as_str(),
+            now,
+            cid,
+            BlobWorkState::RestorePending.as_str()
+        ],
+    )?;
+    Ok(version)
+}
+
+/// Clears the takedown only if no newer moderation decision was made since
+/// `version`; returns whether it did.
+fn clear_takedown_at_version_in(
+    conn: &rusqlite::Connection,
+    cid: &str,
+    version: i64,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE blob SET \"takedownRef\" = NULL WHERE cid = ?1 \
+         AND (SELECT version FROM blob_moderation WHERE cid = ?1) = ?2",
+        rusqlite::params![cid, version],
+    )?;
+    Ok(changed == 1)
 }
 
 fn query_strings<P: rusqlite::ToSql>(
@@ -236,9 +319,44 @@ pub fn dereference_blobs_in(
         BlobWorkState::DeletePending
     };
     for cid in &cids_to_delete {
-        insert_blob_work_in(conn, BlobWorkKind::Permanent, cid, Some(cid), state, now)?;
+        insert_blob_work_in(
+            conn,
+            BlobWorkKind::Permanent,
+            cid,
+            Some(cid),
+            state,
+            None,
+            now,
+        )?;
     }
     Ok(cids_to_delete)
+}
+
+/// Records a promotion: the temporary key is cleared, and under coexistence
+/// the temporary object, which was copied rather than moved, is left for
+/// the collector.
+fn record_promotion_in(
+    conn: &rusqlite::Connection,
+    blob: &PromotedBlob,
+    coexistence: bool,
+    now: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE blob SET \"tempKey\" = NULL WHERE cid = ?1 AND \"tempKey\" = ?2",
+        rusqlite::params![blob.cid.to_string(), blob.temp_key],
+    )?;
+    if coexistence {
+        insert_blob_work_in(
+            conn,
+            BlobWorkKind::Temp,
+            &blob.temp_key,
+            Some(&blob.cid.to_string()),
+            BlobWorkState::GcDeferred,
+            None,
+            now,
+        )?;
+    }
+    Ok(())
 }
 
 /// Records a write's blob effects on a connection inside a transaction:
@@ -253,10 +371,7 @@ pub fn apply_write_blobs_in(
 ) -> Result<()> {
     dereference_blobs_in(conn, writes, coexistence, now)?;
     for blob in promoted {
-        conn.execute(
-            "UPDATE blob SET \"tempKey\" = NULL WHERE cid = ?1 AND \"tempKey\" = ?2",
-            rusqlite::params![blob.cid.to_string(), blob.temp_key],
-        )?;
+        record_promotion_in(conn, blob, coexistence, now)?;
     }
     let mut associate = conn.prepare_cached(
         "INSERT INTO record_blob (\"blobCid\", \"recordUri\") VALUES (?1, ?2) \
@@ -334,7 +449,7 @@ impl BlobReader {
             })
             .await?;
         match found {
-            None => bail!("Blob not found"),
+            None => Err(crate::actor_store::blobstore::BlobNotFoundError.into()),
             Some(found) => Ok(GetBlobMetadataOutput {
                 size: found.size,
                 mime_type: Some(found.mime_type),
@@ -400,6 +515,7 @@ impl BlobReader {
             height,
         } = metadata;
         let mime_type_clone = mime_type.clone();
+        let temp_key_for_row = temp_key.clone();
         self.db
             .run(move |conn| {
                 let found: Option<BlobRow> = conn
@@ -423,7 +539,7 @@ impl BlobReader {
                         cid.to_string(),
                         mime_type_clone,
                         size,
-                        temp_key,
+                        temp_key_for_row,
                         width,
                         height,
                         now()
@@ -432,6 +548,38 @@ impl BlobReader {
                 Ok(())
             })
             .await?;
+        // A re-upload of a blob that is already permanent adopts nothing:
+        // the fresh temporary object is never referenced, and under
+        // coexistence it is left for the collector rather than deleted.
+        if self.coexistence {
+            let cid_str = cid.to_string();
+            let temp_key = temp_key.clone();
+            let stamp = now();
+            self.db
+                .run(move |conn| {
+                    let adopted: bool = conn
+                        .query_row(
+                            "SELECT COALESCE(\"tempKey\" = ?1, 0) FROM blob WHERE cid = ?2",
+                            rusqlite::params![temp_key, cid_str],
+                            |row| row.get(0),
+                        )
+                        .optional()?
+                        .unwrap_or(false);
+                    if !adopted {
+                        insert_blob_work_in(
+                            conn,
+                            BlobWorkKind::Temp,
+                            &temp_key,
+                            Some(&cid_str),
+                            BlobWorkState::GcDeferred,
+                            None,
+                            &stamp,
+                        )?;
+                    }
+                    Ok(())
+                })
+                .await?;
+        }
         // A blob uploaded after the record referencing it was imported is
         // already associated; promote it now or it stays temp forever.
         let cid_str = cid.to_string();
@@ -496,11 +644,28 @@ impl BlobReader {
             };
             verify_blob(blob, &found).await?;
             if let Some(temp_key) = found.temp_key {
-                self.blobstore.make_permanent(temp_key.clone(), cid).await?;
+                self.promote(&temp_key, cid).await?;
                 promoted.push(PromotedBlob { cid, temp_key });
             }
         }
         Ok(promoted)
+    }
+
+    /// Moves a temporary object to its permanent key, or copies it when
+    /// another implementation may still read the temporary one.
+    async fn promote(&self, temp_key: &str, cid: Cid) -> Result<()> {
+        match self.coexistence {
+            true => {
+                self.blobstore
+                    .make_permanent_copy_only(temp_key.to_owned(), cid)
+                    .await
+            }
+            false => {
+                self.blobstore
+                    .make_permanent(temp_key.to_owned(), cid)
+                    .await
+            }
+        }
     }
 
     /// The write path as one unit, for callers outside a store transaction:
@@ -531,9 +696,14 @@ impl BlobReader {
     /// Deletes every object journaled `delete-pending` and marks the row
     /// done; a row whose deletion fails stays pending for the next run.
     pub async fn run_blob_work(&self) -> Result<()> {
-        let pending: Vec<BlobWork> = self
-            .blob_work()
-            .await?
+        let all = self.blob_work().await?;
+        for restore in all
+            .iter()
+            .filter(|work| work.state == BlobWorkState::RestorePending)
+        {
+            self.run_restore(restore, None).await?;
+        }
+        let pending: Vec<BlobWork> = all
             .into_iter()
             .filter(|work| work.state == BlobWorkState::DeletePending)
             .collect();
@@ -576,8 +746,7 @@ impl BlobReader {
     pub async fn blob_work(&self) -> Result<Vec<BlobWork>> {
         self.db
             .run(|conn| {
-                let mut stmt =
-                    conn.prepare("SELECT id, kind, key, state FROM blob_work ORDER BY id")?;
+                let mut stmt = conn.prepare(&format!("{SELECT_BLOB_WORK} ORDER BY id"))?;
                 let rows = stmt
                     .query_and_then([], blob_work_from_row)?
                     .collect::<Result<Vec<BlobWork>>>()?;
@@ -614,17 +783,12 @@ impl BlobReader {
         if let Some(found) = found {
             verify_blob(&blob, &found).await?;
             if let Some(temp_key) = found.temp_key {
-                self.blobstore
-                    .make_permanent(temp_key.clone(), blob.cid)
-                    .await?;
+                self.promote(&temp_key, cid).await?;
+                let promoted = PromotedBlob { cid, temp_key };
+                let coexistence = self.coexistence;
+                let now = now();
                 self.db
-                    .run(move |conn| {
-                        conn.execute(
-                            "UPDATE blob SET \"tempKey\" = NULL WHERE \"tempKey\" = ?1",
-                            [temp_key.clone()],
-                        )?;
-                        Ok(())
-                    })
+                    .tx(move |tx| record_promotion_in(tx, &promoted, coexistence, &now))
                     .await?;
             }
             Ok(())
@@ -785,6 +949,16 @@ impl BlobReader {
     // Transactors
     // -------------------
 
+    /// Applies or reverses a takedown. Every decision advances the blob's
+    /// moderation version and supersedes any restoration still pending, so
+    /// a restoration that resumes after a newer decision cannot clear it.
+    ///
+    /// Outside coexistence the object is moved to or from quarantine as the
+    /// reference implementation does. Under coexistence nothing is moved: a
+    /// takedown is the flag alone, and a reversal clears the flag when the
+    /// permanent object exists, or restores it by copy from a quarantine the
+    /// reference implementation left and clears the flag once the copy is
+    /// confirmed (see `run_restore`).
     pub async fn update_blob_takedown_status(&self, blob: Cid, takedown: StatusAttr) -> Result<()> {
         let takedown_ref: Option<String> = match takedown.applied {
             true => match takedown.r#ref {
@@ -793,16 +967,41 @@ impl BlobReader {
             },
             false => None,
         };
+        let cid = blob.to_string();
+        let coexistence = self.coexistence;
+        let restore_needed = coexistence
+            && !takedown.applied
+            && !self.blobstore.has_stored(blob).await?
+            && self.blobstore.has_quarantined(blob).await?;
+        let flag_now = takedown.applied || !restore_needed;
+        let stamp = now();
         self.db
-            .run(move |conn| {
-                conn.execute(
-                    "UPDATE blob SET \"takedownRef\" = ?1 WHERE cid = ?2",
-                    rusqlite::params![takedown_ref, blob.to_string()],
-                )?;
+            .tx(move |tx| {
+                let version = bump_moderation_version_in(tx, &cid, &stamp)?;
+                if flag_now {
+                    tx.execute(
+                        "UPDATE blob SET \"takedownRef\" = ?1 WHERE cid = ?2",
+                        rusqlite::params![takedown_ref, cid],
+                    )?;
+                } else {
+                    insert_blob_work_in(
+                        tx,
+                        BlobWorkKind::Permanent,
+                        &cid,
+                        Some(&cid),
+                        BlobWorkState::RestorePending,
+                        Some(version),
+                        &stamp,
+                    )?;
+                }
                 Ok(())
             })
             .await?;
-
+        if coexistence {
+            // a restoration, when one was journaled, runs with the store's
+            // other blob work
+            return Ok(());
+        }
         let res = match takedown.applied {
             true => self.blobstore.quarantine(blob).await,
             false => self.blobstore.unquarantine(blob).await,
@@ -811,6 +1010,72 @@ impl BlobReader {
             tracing::error!(?err, cid = %blob, "could not update blob takedown status in blobstore");
         }
         Ok(())
+    }
+
+    /// The blob's moderation version; zero before any decision.
+    pub async fn moderation_version(&self, cid: Cid) -> Result<i64> {
+        self.db
+            .run(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT version FROM blob_moderation WHERE cid = ?1",
+                        [cid.to_string()],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .unwrap_or(0))
+            })
+            .await
+    }
+
+    /// Restores one taken-down object from quarantine by copy, confirms the
+    /// copy, then clears the takedown only if no newer decision was made
+    /// since the restoration was requested; the quarantined source stays
+    /// for the collector. Every step is safe to repeat after a crash.
+    pub async fn run_restore(
+        &self,
+        work: &BlobWork,
+        stop_after: Option<RestoreStep>,
+    ) -> Result<()> {
+        let cid = Cid::from_str(&work.key)?;
+        let version = work
+            .version
+            .ok_or_else(|| anyhow::anyhow!("restoration {} carries no version", work.id))?;
+        self.blobstore.restore_copy_only(cid).await?;
+        if stop_after == Some(RestoreStep::Copied) {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            self.blobstore.has_stored(cid).await?,
+            "restored object {cid} is not readable yet"
+        );
+        if stop_after == Some(RestoreStep::Confirmed) {
+            return Ok(());
+        }
+        let id = work.id;
+        let key = work.key.clone();
+        let stamp = now();
+        self.db
+            .tx(move |tx| {
+                let state = match clear_takedown_at_version_in(tx, &key, version)? {
+                    true => BlobWorkState::Done,
+                    false => BlobWorkState::Superseded,
+                };
+                set_blob_work_state_in(tx, id, state, &stamp)?;
+                if state == BlobWorkState::Done {
+                    insert_blob_work_in(
+                        tx,
+                        BlobWorkKind::Quarantine,
+                        &key,
+                        Some(&key),
+                        BlobWorkState::GcDeferred,
+                        None,
+                        &stamp,
+                    )?;
+                }
+                Ok(())
+            })
+            .await
     }
 }
 
@@ -1249,13 +1514,288 @@ mod tests {
             let _ = state.is_terminal();
         }
         assert!(!BlobWorkState::DeletePending.is_terminal());
+        assert!(!BlobWorkState::RestorePending.is_terminal());
         assert!(BlobWorkState::GcDeferred.is_terminal());
+        assert!(BlobWorkState::Superseded.is_terminal());
         assert!(BlobWorkState::Done.is_terminal());
         assert!(BlobWorkState::parse("promote-someday").is_err());
-        for kind in [BlobWorkKind::Permanent, BlobWorkKind::Temp] {
+        for kind in [
+            BlobWorkKind::Permanent,
+            BlobWorkKind::Temp,
+            BlobWorkKind::Quarantine,
+        ] {
             assert_eq!(BlobWorkKind::parse(kind.as_str()).unwrap(), kind);
         }
-        assert!(BlobWorkKind::parse("quarantine").is_err());
+        assert!(BlobWorkKind::parse("generation").is_err());
+    }
+
+    fn post_with(uri: &str, blob: &BlobRef) -> PreparedWrite {
+        PreparedWrite::Create(PreparedCreateOrUpdate {
+            action: WriteOpAction::Create,
+            uri: uri.to_owned(),
+            cid: blob.get_cid().unwrap(),
+            swap_cid: None,
+            record: serde_json::from_value(serde_json::json!({
+                "$type": "app.bsky.feed.post",
+                "text": "with blob",
+                "createdAt": "2023-01-01T00:00:00.000Z",
+            }))
+            .unwrap(),
+            blobs: vec![prepared_ref(blob)],
+        })
+    }
+
+    fn takedown(applied: bool) -> StatusAttr {
+        StatusAttr {
+            applied,
+            r#ref: Some("mod-ref".to_owned()),
+        }
+    }
+
+    /// Under coexistence nothing is ever deleted or moved: promotion copies
+    /// and journals the temporary object, a takedown is a flag, and a
+    /// reversal with the permanent object present clears the flag alone.
+    #[tokio::test]
+    async fn coexistence_never_deletes_or_moves_an_object() {
+        let mut t = test_reader().await;
+        t.reader.coexistence = true;
+        let blob = upload(&t, b"shared object").await;
+        let cid = blob.get_cid().unwrap();
+        let uri = "at://did:example:alice/app.bsky.feed.post/3jt5vlkoraa2a";
+        t.reader
+            .process_write_blobs(vec![post_with(uri, &blob)])
+            .await
+            .unwrap();
+        t.reader.background_queue.process_all().await;
+        assert!(t.store.has_stored(cid).await.unwrap());
+        let work = t.reader.blob_work().await.unwrap();
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].kind, BlobWorkKind::Temp);
+        assert_eq!(work[0].state, BlobWorkState::GcDeferred);
+        assert!(t.store.has_temp(&work[0].key), "the temporary object stays");
+        assert_eq!(work[0].cid.as_deref(), Some(cid.to_string().as_str()));
+        assert!(t.reader.get_blob_metadata(cid).await.is_ok());
+
+        // a re-upload of the same bytes leaves a temporary object nothing
+        // will reference; it is journaled for the collector
+        let again = upload(&t, b"shared object").await;
+        assert_eq!(again.get_cid().unwrap(), cid);
+        t.reader.background_queue.process_all().await;
+        assert!(t.reader.get_blob_metadata(cid).await.is_ok());
+        let work = t.reader.blob_work().await.unwrap();
+        assert_eq!(work.len(), 2);
+        assert_eq!(work[1].kind, BlobWorkKind::Temp);
+        assert!(t.store.has_temp(&work[1].key));
+
+        // takedown: flag only, object untouched, version advanced
+        t.reader
+            .update_blob_takedown_status(cid, takedown(true))
+            .await
+            .unwrap();
+        assert!(t.reader.get_blob_metadata(cid).await.is_err());
+        assert!(t.store.has_stored(cid).await.unwrap());
+        assert!(!t.store.has_quarantined(&cid));
+        assert_eq!(t.reader.moderation_version(cid).await.unwrap(), 1);
+        // reversal with the permanent object present
+        t.reader
+            .update_blob_takedown_status(cid, takedown(false))
+            .await
+            .unwrap();
+        t.reader.queue_blob_work();
+        t.reader.background_queue.process_all().await;
+        assert!(t.reader.get_blob_metadata(cid).await.is_ok());
+        assert_eq!(t.reader.moderation_version(cid).await.unwrap(), 2);
+
+        // dereferencing journals the permanent object instead of deleting it
+        t.reader
+            .process_write_blobs(vec![PreparedWrite::Delete(PreparedDelete {
+                action: WriteOpAction::Delete,
+                uri: uri.to_owned(),
+                swap_cid: None,
+            })])
+            .await
+            .unwrap();
+        t.reader.background_queue.process_all().await;
+        assert!(t.store.has_stored(cid).await.unwrap());
+        assert_eq!(t.reader.nonterminal_blob_work().await.unwrap(), 0);
+        assert_eq!(t.store.destructive_calls(), 0);
+    }
+
+    /// A takedown the reference implementation applied moved the object to
+    /// quarantine; reversing it here restores the object by copy, confirms
+    /// the copy, and only then clears the flag. Each step resumes after a
+    /// crash, and the quarantined source is kept for the collector.
+    #[tokio::test]
+    async fn reversal_restores_a_reference_quarantine_by_copy() {
+        let mut t = test_reader().await;
+        t.reader.coexistence = true;
+        let blob = upload(&t, b"quarantined by the reference").await;
+        let cid = blob.get_cid().unwrap();
+        // the reference's takedown: flag set, permanent object moved away
+        t.reader
+            .db
+            .run(move |conn| {
+                conn.execute(
+                    "UPDATE blob SET \"takedownRef\" = 'ts-ref', \"tempKey\" = NULL WHERE cid = ?1",
+                    [cid.to_string()],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        t.store
+            .put_quarantined(cid, b"quarantined by the reference".to_vec());
+        assert!(!t.store.has_stored(cid).await.unwrap());
+
+        t.reader
+            .update_blob_takedown_status(cid, takedown(false))
+            .await
+            .unwrap();
+        // the flag is not cleared until the object is back
+        assert!(t.reader.get_blob_metadata(cid).await.is_err());
+        let row = t.reader.blob_work().await.unwrap().remove(0);
+        assert_eq!(row.kind, BlobWorkKind::Permanent);
+        assert_eq!(row.state, BlobWorkState::RestorePending);
+        assert_eq!(row.version, Some(1));
+        assert_eq!(t.reader.nonterminal_blob_work().await.unwrap(), 1);
+        // crash after the copy: the object is back, the flag is not
+        t.reader
+            .run_restore(&row, Some(RestoreStep::Copied))
+            .await
+            .unwrap();
+        assert!(t.store.has_stored(cid).await.unwrap());
+        assert!(t.reader.get_blob_metadata(cid).await.is_err());
+        // crash after the confirmation: same
+        t.reader
+            .run_restore(&row, Some(RestoreStep::Confirmed))
+            .await
+            .unwrap();
+        assert!(t.reader.get_blob_metadata(cid).await.is_err());
+        // the worker finishes what was left
+        t.reader.queue_blob_work();
+        t.reader.background_queue.process_all().await;
+        assert!(t.reader.get_blob_metadata(cid).await.is_ok());
+        assert!(t.store.has_stored(cid).await.unwrap());
+        assert!(t.store.has_quarantined(&cid), "the source is retained");
+        let work = t.reader.blob_work().await.unwrap();
+        assert_eq!(work[0].state, BlobWorkState::Done);
+        assert_eq!(work[1].kind, BlobWorkKind::Quarantine);
+        assert_eq!(work[1].state, BlobWorkState::GcDeferred);
+        assert_eq!(t.reader.nonterminal_blob_work().await.unwrap(), 0);
+        assert_eq!(t.store.destructive_calls(), 0);
+
+        // a reversal with neither object present clears the flag, as the
+        // reference does when there is nothing to move back
+        let ghost = sha256_to_cid(Sha256::digest(b"ghost").to_vec());
+        t.reader
+            .db
+            .run(move |conn| {
+                conn.execute(
+                    "INSERT INTO blob (cid, \"mimeType\", size, \"createdAt\", \"takedownRef\") \
+                     VALUES (?1, 'text/plain', 5, '2024-01-01T00:00:00.000Z', 'ref')",
+                    [ghost.to_string()],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        t.reader
+            .update_blob_takedown_status(ghost, takedown(false))
+            .await
+            .unwrap();
+        assert!(t
+            .reader
+            .get_blob_takedown_status(ghost)
+            .await
+            .unwrap()
+            .map(|status| !status.applied)
+            .unwrap_or(false));
+    }
+
+    /// Takedown, restoration copies then crashes, restriction cleared,
+    /// takedown again, restoration resumes last: the resumed restoration
+    /// finds a newer version and ends superseded, and the newer takedown
+    /// stands.
+    #[tokio::test]
+    async fn a_resumed_restoration_never_clears_a_newer_takedown() {
+        let mut t = test_reader().await;
+        t.reader.coexistence = true;
+        let blob = upload(&t, b"aba").await;
+        let cid = blob.get_cid().unwrap();
+        t.reader
+            .db
+            .run(move |conn| {
+                conn.execute(
+                    "UPDATE blob SET \"takedownRef\" = 'ts-ref', \"tempKey\" = NULL WHERE cid = ?1",
+                    [cid.to_string()],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        t.store.put_quarantined(cid, b"aba".to_vec());
+
+        // request the restoration; the worker copies and then crashes
+        t.reader
+            .update_blob_takedown_status(cid, takedown(false))
+            .await
+            .unwrap();
+        let row = t.reader.blob_work().await.unwrap().remove(0);
+        assert_eq!(row.version, Some(1));
+        assert_eq!(row.state, BlobWorkState::RestorePending);
+        t.reader
+            .run_restore(&row, Some(RestoreStep::Copied))
+            .await
+            .unwrap();
+
+        // a newer takedown lands while the restoration is pending
+        t.reader
+            .update_blob_takedown_status(cid, takedown(true))
+            .await
+            .unwrap();
+        assert_eq!(t.reader.moderation_version(cid).await.unwrap(), 2);
+        let superseded = t.reader.blob_work().await.unwrap().remove(0);
+        assert_eq!(superseded.state, BlobWorkState::Superseded);
+
+        // the crashed restoration resumes with its stale version
+        t.reader.run_restore(&row, None).await.unwrap();
+        assert!(t.reader.get_blob_metadata(cid).await.is_err());
+        assert_eq!(
+            t.reader.blob_work().await.unwrap()[0].state,
+            BlobWorkState::Superseded
+        );
+        assert_eq!(t.reader.blob_work().await.unwrap().len(), 1);
+        // a row without a version cannot be restored
+        let bad = BlobWork {
+            version: None,
+            ..row
+        };
+        assert!(t.reader.run_restore(&bad, None).await.is_err());
+        assert_eq!(t.store.destructive_calls(), 0);
+    }
+
+    /// The reference behaviour stays when this server owns the objects.
+    #[tokio::test]
+    async fn takedown_moves_objects_when_not_coexisting() {
+        let t = test_reader().await;
+        let blob = upload(&t, b"owned object").await;
+        let cid = blob.get_cid().unwrap();
+        t.reader
+            .verify_blob_and_make_permanent(prepared_ref(&blob))
+            .await
+            .unwrap();
+        t.reader
+            .update_blob_takedown_status(cid, takedown(true))
+            .await
+            .unwrap();
+        assert!(t.store.has_quarantined(&cid));
+        assert_eq!(t.reader.moderation_version(cid).await.unwrap(), 1);
+        t.reader
+            .update_blob_takedown_status(cid, takedown(false))
+            .await
+            .unwrap();
+        assert!(t.store.has_stored(cid).await.unwrap());
+        assert!(t.reader.blob_work().await.unwrap().is_empty());
     }
 
     /// While another implementation may still serve the store's objects,
@@ -1291,10 +1831,11 @@ mod tests {
         assert_eq!(t.reader.blob_count().await.unwrap(), 0);
         assert!(t.store.has_stored(cid).await.unwrap());
         let work = t.reader.blob_work().await.unwrap();
-        assert_eq!(work.len(), 1);
-        assert_eq!(work[0].kind, BlobWorkKind::Permanent);
-        assert_eq!(work[0].key, cid.to_string());
-        assert_eq!(work[0].state, BlobWorkState::GcDeferred);
+        assert_eq!(work.len(), 2);
+        assert_eq!(work[0].kind, BlobWorkKind::Temp);
+        assert_eq!(work[1].kind, BlobWorkKind::Permanent);
+        assert_eq!(work[1].key, cid.to_string());
+        assert_eq!(work[1].state, BlobWorkState::GcDeferred);
         assert_eq!(t.reader.nonterminal_blob_work().await.unwrap(), 0);
     }
 

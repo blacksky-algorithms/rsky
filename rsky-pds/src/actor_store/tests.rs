@@ -560,6 +560,19 @@ impl crate::actor_store::blobstore::BlobStore for FailingBlobStore {
             None
         }
     }
+    fn make_permanent_copy_only(
+        &self,
+        _key: String,
+        _cid: Cid,
+    ) -> futures::future::BoxFuture<'_, Result<()>> {
+        Box::pin(async { bail!("blobstore unavailable") })
+    }
+    fn has_quarantined(&self, _cid: Cid) -> futures::future::BoxFuture<'_, Result<bool>> {
+        Box::pin(async { bail!("blobstore unavailable") })
+    }
+    fn restore_copy_only(&self, _cid: Cid) -> futures::future::BoxFuture<'_, Result<()>> {
+        Box::pin(async { bail!("blobstore unavailable") })
+    }
 }
 
 #[tokio::test]
@@ -1060,6 +1073,55 @@ async fn a_failed_transaction_leaves_no_trace() {
     assert_eq!(txn.get_repo_root().await.unwrap(), root_before);
     assert_eq!(txn.all_intents().await.unwrap().len(), 2);
     assert_eq!(txn.record.record_count().await.unwrap(), 0);
+}
+
+/// A blob promoted for a write whose transaction then fails stays
+/// unreadable: the promotion is only recorded by the transaction, so the
+/// blob is served once a record referencing it commits.
+#[tokio::test]
+async fn a_failed_write_leaves_its_blob_unreadable_until_a_write_commits() {
+    let (_dir, store) = test_store(10).await;
+    store.create(TEST_DID, &test_keypair()).await.unwrap();
+    let blobs = blobstore();
+    let mut txn = store
+        .transact(TEST_DID.to_owned(), blobs.clone())
+        .await
+        .unwrap();
+    txn.create_repo(vec![], true).await.unwrap();
+    let metadata = txn
+        .blob
+        .upload_blob_and_get_metadata("text/plain".to_owned(), b"pending".to_vec())
+        .await
+        .unwrap();
+    let blob_ref = txn.blob.track_untethered_blob(metadata).await.unwrap();
+    let cid = blob_ref.get_cid().unwrap();
+    let prepared = rsky_repo::types::PreparedBlobRef {
+        cid,
+        mime_type: "text/plain".to_owned(),
+        constraints: rsky_repo::types::BlobConstraint {
+            max_size: None,
+            accept: None,
+        },
+    };
+    let mut foreign = post_write("3jt5vlkorbad2", "with blob");
+    foreign.uri = "at://example.com/app.bsky.feed.post/3jt5vlkorbad2".to_owned();
+    foreign.blobs = vec![prepared.clone()];
+    assert!(txn
+        .process_writes(vec![PreparedWrite::Create(foreign)], None)
+        .await
+        .is_err());
+    assert!(
+        blobs.has_stored(cid).await.unwrap(),
+        "promoted before the transaction"
+    );
+    assert!(txn.blob.get_blob_metadata(cid).await.is_err(), "not served");
+
+    let mut good = post_write("3jt5vlkorgood", "with blob");
+    good.blobs = vec![prepared];
+    txn.process_writes(vec![PreparedWrite::Create(good)], None)
+        .await
+        .unwrap();
+    assert!(txn.blob.get_blob_metadata(cid).await.is_ok());
 }
 
 const ALLOWLIST: &str = r#"

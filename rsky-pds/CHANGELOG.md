@@ -106,6 +106,19 @@ Writes are subject to the reference limits of 200 operations and a 2 MB
 event per commit, answered with `InvalidRequest`. Repository exports read
 from a single snapshot on a dedicated connection, bounded to ten minutes.
 
+### Changed — blob storage under coexistence
+
+While `PDS_COEXISTENCE` is set, no object is deleted or moved: promotion
+copies a temporary object to its permanent key and journals the temporary
+one `gc-deferred`, a re-upload of a permanent blob journals its unused
+temporary object, a blob takedown sets the flag alone, and a reversal clears
+the flag when the permanent object exists or restores it by copy from a
+quarantine the reference implementation left, confirming the copy before
+the flag is cleared (`restore-pending` blob work, resumable after a crash).
+Every moderation decision advances a per-blob version, and a restoration
+that resumes after a newer decision ends `superseded` instead of clearing
+it. Outside coexistence takedowns still move objects to and from quarantine.
+
 ### Added — write admission and the maintenance drain
 
 `PDS_WRITE_ALLOWLIST_FILE` names the accounts this process may write while
@@ -133,6 +146,8 @@ publication and blob work, and reports the same counters that
 - `com.atproto.server.describeServer` includes `blobUploadLimit`.
 - Outgoing mail is logged and skipped when `PDS_MAILGUN_API_KEY` is unset or
   empty instead of aborting the request.
+- `com.atproto.sync.getBlob` answers `BlobNotFound` for a taken-down or
+  unregistered blob instead of an internal error.
 
 ### Added — reference-PDS compatibility fixture
 
