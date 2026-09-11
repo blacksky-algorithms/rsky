@@ -1,34 +1,34 @@
 {
-  "did": "did:plc:mz7zx7sh53fjl3xq6wpvh4ds",
+  "did": "did:plc:ojboo4h3a2czrmpelfyyn2lx",
   "client_id": "http://localhost?redirect_uri=http%3A%2F%2F127.0.0.1%2Fcb&scope=atproto+transition%3Ageneric",
   "redirect_uri": "http://127.0.0.1/cb",
   "scope": "atproto transition:generic",
   "dpop": {
     "private_jwk": {
       "kty": "EC",
-      "x": "UHG3qs0w1A-zBEH2gxXiH_8B6dQJmDgCZvbHfpK8ots",
-      "y": "tBS9WdRO-TA1t7Wm2ASo0zLDvN20NVGpruKuBKphBao",
+      "x": "STEGR37cxLPqv4qtezVR57l7zh124O7smP6L5qDQWMs",
+      "y": "KoEfpdSuJSYCTJuFyfoB4e7tUX3GVRPS6cugCIiye8g",
       "crv": "P-256",
-      "d": "cuGjXhRfX7WT7OI8qV_h8hjLbPG31aNIsO_fLmlT7ps"
+      "d": "wOHAL8_T3dqr9yJugszy04QfMgegB82gE46R4DiNDbY"
     },
     "public_jwk": {
       "kty": "EC",
-      "x": "UHG3qs0w1A-zBEH2gxXiH_8B6dQJmDgCZvbHfpK8ots",
-      "y": "tBS9WdRO-TA1t7Wm2ASo0zLDvN20NVGpruKuBKphBao",
+      "x": "STEGR37cxLPqv4qtezVR57l7zh124O7smP6L5qDQWMs",
+      "y": "KoEfpdSuJSYCTJuFyfoB4e7tUX3GVRPS6cugCIiye8g",
       "crv": "P-256"
     },
-    "jkt": "LWoZQ0Dk16pOdTyVOGHdRCywLyPu1XLzh-MS6FfWG3A"
+    "jkt": "Fx7xestMWogg6AJ2KH0nQc8WF0SYNWLrtxPTSfHWIqc"
   },
   "cookies": {
-    "dev-id": "dev-51747f69faf8d9c60c84fd089ec2fc0b",
-    "ses-id": "ses-7a97cf93ecbfecab24b091e9fc137bb4",
-    "csrf-token": "813924648f957b2ecbc65b5d"
+    "dev-id": "dev-3b2789ae6ef4c40df879a470d36b06e1",
+    "ses-id": "ses-e2c8b2a791e112cabe94c744abe4ba15",
+    "csrf-token": "b5f8e6431df4e3482de1811b"
   },
   "consent_error": {
     "redirect_mode": "query",
     "redirect_uri": "http://127.0.0.1/cb",
     "iss": "https://fixture.test",
-    "state": "l6prDcnJhuUXWrUR0AFb7g",
+    "state": "mJ69OCWaiwnDSvVx3RaU2w",
     "error": "access_denied",
     "error_description": "This account has been deactivated"
   }

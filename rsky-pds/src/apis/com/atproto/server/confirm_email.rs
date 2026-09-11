@@ -12,49 +12,32 @@ async fn inner_confirm_email(
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     let did = auth.access.credentials.unwrap().did.unwrap();
-
-    let user = match account_manager
+    let user = account_manager
         .get_account(
             &did,
             Some(AvailabilityFlags {
                 include_deactivated: Some(true),
-                include_taken_down: None,
+                include_taken_down: Some(true),
             }),
         )
-        .await
-    {
-        Ok(res) => res,
-        Err(e) => {
-            tracing::error!("Error: {e}");
-            return Err(ApiError::RuntimeError);
-        }
+        .await?;
+    let Some(user) = user else {
+        return Err(ApiError::BadRequest(
+            "AccountNotFound".to_string(),
+            "user not found".to_string(),
+        ));
     };
-    if let Some(user) = user {
-        if let Some(user_email) = user.email {
-            let ConfirmEmailInput { token, email } = body.into_inner();
-            if user_email != email.to_lowercase() {
-                return Err(ApiError::InvalidEmail);
-            }
-            match account_manager
-                .confirm_email(ConfirmEmailOpts {
-                    did: &did,
-                    token: &token,
-                })
-                .await
-            {
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::error!("Error: {e}");
-                    return Err(ApiError::RuntimeError);
-                }
-            }
-            Ok(())
-        } else {
-            Err(ApiError::InvalidRequest("Missing Email".to_string()))
-        }
-    } else {
-        Err(ApiError::AccountNotFound)
+    let ConfirmEmailInput { token, email } = body.into_inner();
+    if user.email.as_deref() != Some(email.to_lowercase().as_str()) {
+        return Err(ApiError::InvalidEmail);
     }
+    account_manager
+        .confirm_email(ConfirmEmailOpts {
+            did: &did,
+            token: &token,
+        })
+        .await?;
+    Ok(())
 }
 
 #[tracing::instrument(skip_all)]

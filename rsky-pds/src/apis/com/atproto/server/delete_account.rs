@@ -1,21 +1,37 @@
-use crate::account_manager::helpers::account::{AccountStatus, AvailabilityFlags};
+use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
-use crate::auth_verifier::AdminToken;
+use crate::config::ServerConfig;
+use crate::lifecycle::{self, DeletionContext, LifecycleStore};
 use crate::models::models::EmailTokenPurpose;
 use crate::SharedSequencer;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::server::DeleteAccountInput;
 
+/// Passwords longer than this were never accepted, so a longer one cannot
+/// be a legitimate credential.
+const OLD_PASSWORD_MAX_LENGTH: usize = 512;
+
+/// Deletes the caller's account, authenticated by the account password and
+/// the token mailed by `requestAccountDelete`, in the reference PDS's order:
+/// account rows first, then the deletion event, then the actor store.
 #[tracing::instrument(skip_all)]
-async fn inner_delete_account(
+#[rocket::post(
+    "/xrpc/com.atproto.server.deleteAccount",
+    format = "json",
+    data = "<body>"
+)]
+#[allow(clippy::too_many_arguments)]
+pub async fn delete_account(
     body: Json<DeleteAccountInput>,
     sequencer: &State<SharedSequencer>,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
+    lifecycle_store: &State<LifecycleStore>,
+    cfg: &State<ServerConfig>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     let DeleteAccountInput {
@@ -23,6 +39,11 @@ async fn inner_delete_account(
         password,
         token,
     } = body.into_inner();
+    if password.len() > OLD_PASSWORD_MAX_LENGTH {
+        return Err(ApiError::AuthRequiredError(
+            "Password too long. Consider resetting your password.".to_string(),
+        ));
+    }
     let account = account_manager
         .get_account(
             &did,
@@ -32,58 +53,33 @@ async fn inner_delete_account(
             }),
         )
         .await?;
-    if account.is_some() {
-        let valid_pass = account_manager
-            .verify_account_password(&did, &password)
-            .await?;
-        if !valid_pass {
-            return Err(ApiError::InvalidLogin);
-        }
-        account_manager
-            .assert_valid_email_token(&did, EmailTokenPurpose::from_str("delete_account")?, &token)
-            .await?;
-
-        actor_store
-            .destroy(&did, blobstore_factory.blobstore(did.clone()))
-            .await?;
-        account_manager.delete_account(&did).await?;
-        let mut lock = sequencer.sequencer.write().await;
-        let account_seq = lock
-            .sequence_account_evt(did.clone(), AccountStatus::Deleted)
-            .await?;
-        lock.delete_all_for_user(&did, Some(vec![account_seq]))
-            .await?;
-        Ok(())
-    } else {
-        tracing::error!("account not found");
-        Err(ApiError::RuntimeError)
+    if account.is_none() {
+        return Err(ApiError::InvalidRequest("account not found".to_string()));
     }
-}
-
-#[tracing::instrument(skip_all)]
-#[rocket::post(
-    "/xrpc/com.atproto.server.deleteAccount",
-    format = "json",
-    data = "<body>"
-)]
-pub async fn delete_account(
-    body: Json<DeleteAccountInput>,
-    sequencer: &State<SharedSequencer>,
-    blobstore_factory: &State<BlobstoreFactory>,
-    actor_store: &State<ActorStore>,
-    _auth: AdminToken,
-    account_manager: AccountManager,
-) -> Result<(), ApiError> {
-    match inner_delete_account(
-        body,
-        sequencer,
-        blobstore_factory,
-        actor_store,
-        account_manager,
-    )
-    .await
+    if !account_manager
+        .verify_account_password(&did, &password)
+        .await?
     {
-        Ok(_) => Ok(()),
-        Err(error) => Err(error),
+        return Err(ApiError::AuthRequiredError(
+            "Invalid did or password".to_string(),
+        ));
     }
+    account_manager
+        .assert_valid_email_token(&did, EmailTokenPurpose::DeleteAccount, &token)
+        .await?;
+
+    let blobstore = (!cfg.service.coexistence).then(|| blobstore_factory.blobstore(did.clone()));
+    lifecycle::delete_account(
+        &DeletionContext {
+            lifecycle: lifecycle_store,
+            account_manager: &account_manager,
+            sequencer,
+            actor_store,
+            blobstore,
+        },
+        &did,
+        None,
+    )
+    .await?;
+    Ok(())
 }

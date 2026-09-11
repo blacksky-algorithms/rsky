@@ -153,6 +153,8 @@ pub enum ApiError {
     ExpiredToken,
     /// A refresh token that was revoked or already rotated past its grace period.
     RefreshTokenRevoked,
+    /// An email token past its validity window.
+    ExpiredEmailToken,
     InvalidToken(String),
     /// No credentials were presented.
     AuthMissing,
@@ -252,6 +254,9 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 "Token has been revoked".to_string(),
                 __req,
             ),
+            ApiError::ExpiredEmailToken => {
+                json_error(400, "ExpiredToken", "Token is expired".to_string(), __req)
+            }
             ApiError::InvalidToken(message) => json_error(400, "InvalidToken", message, __req),
             ApiError::AuthMissing => json_error(
                 401,
@@ -308,7 +313,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
             ApiError::InvalidEmail => {
                 let body = Json(ErrorBody {
                     error: "InvalidEmail".to_string(),
-                    message: "Invalid email".to_string(),
+                    message: "invalid email".to_string(),
                 });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
@@ -540,13 +545,27 @@ fn json_error<'r, 'o: 'r>(
 
 impl From<Error> for ApiError {
     fn from(value: Error) -> Self {
+        use crate::account_manager::helpers::email_token::EmailTokenError;
         use crate::apis::com::atproto::repo::RepoUnavailable;
-        match value.downcast_ref::<RepoUnavailable>() {
-            Some(RepoUnavailable::NotFound(_)) => ApiError::RepoNotFound(value.to_string()),
-            Some(RepoUnavailable::Takendown(_)) => ApiError::RepoTakendown(value.to_string()),
-            Some(RepoUnavailable::Deactivated(_)) => ApiError::RepoDeactivated(value.to_string()),
-            None => ApiError::RuntimeError,
+        use crate::lifecycle::AccountDeleting;
+        if let Some(unavailable) = value.downcast_ref::<RepoUnavailable>() {
+            return match unavailable {
+                RepoUnavailable::NotFound(_) => ApiError::RepoNotFound(value.to_string()),
+                RepoUnavailable::Takendown(_) => ApiError::RepoTakendown(value.to_string()),
+                RepoUnavailable::Deactivated(_) => ApiError::RepoDeactivated(value.to_string()),
+            };
         }
+        if let Some(token) = value.downcast_ref::<EmailTokenError>() {
+            return match token {
+                EmailTokenError::Invalid => ApiError::InvalidToken("Token is invalid".to_string()),
+                EmailTokenError::Expired => ApiError::ExpiredEmailToken,
+            };
+        }
+        if value.downcast_ref::<AccountDeleting>().is_some() {
+            return ApiError::InvalidRequest(value.to_string());
+        }
+        tracing::error!(error = ?value, "request failed with an internal error");
+        ApiError::RuntimeError
     }
 }
 

@@ -368,28 +368,80 @@ pub struct AccessFull {
     pub access: AccessOutput,
 }
 
+/// Full-access methods manage credentials themselves; the reference PDS
+/// does not let an OAuth session reach them at all. `extra` widens the
+/// accepted scopes beyond `Access`.
+async fn full_access_check(
+    req: &Request<'_>,
+    extra: Vec<AuthScope>,
+    opts: Option<ValidateAccessTokenOpts>,
+) -> Outcome<AccessOutput, AuthError> {
+    if dpop_token_from_req(req).is_some() {
+        let error = AuthError::Forbidden(
+            "OAuth credentials are not supported for this endpoint".to_string(),
+        );
+        req.local_cache(|| Some(ApiError::from(&error)));
+        return Outcome::Error((Status::Forbidden, error));
+    }
+    let mut scopes = vec![AuthScope::Access];
+    scopes.extend(extra);
+    match access_check(req, scopes, opts).await {
+        Outcome::Success(access) => Outcome::Success(access),
+        Outcome::Error(error) => {
+            req.local_cache(|| Some(ApiError::from(&error.1)));
+            Outcome::Error(error)
+        }
+        Outcome::Forward(_) => panic!("Outcome::Forward returned"),
+    }
+}
+
 #[rocket::async_trait]
 impl<'r> FromRequest<'r> for AccessFull {
     type Error = AuthError;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        // full-access methods manage credentials themselves; the reference
-        // PDS does not let an OAuth session reach them at all
-        if dpop_token_from_req(req).is_some() {
-            let error = AuthError::Forbidden(
-                "OAuth credentials are not supported for this endpoint".to_string(),
-            );
-            req.local_cache(|| Some(ApiError::from(&error)));
-            return Outcome::Error((Status::Forbidden, error));
-        }
-        match access_check(req, vec![AuthScope::Access], None).await {
-            Outcome::Success(access) => Outcome::Success(AccessFull { access }),
-            Outcome::Error(error) => {
-                req.local_cache(|| Some(ApiError::from(&error.1)));
-                Outcome::Error(error)
-            }
-            Outcome::Forward(_) => panic!("Outcome::Forward returned"),
-        }
+        full_access_check(req, vec![], None)
+            .await
+            .map(|access| AccessFull { access })
+    }
+}
+
+/// Full access, also open to a taken-down account's recovery session.
+pub struct AccessFullAllowTakendown {
+    pub access: AccessOutput,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for AccessFullAllowTakendown {
+    type Error = AuthError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        full_access_check(req, vec![AuthScope::Takendown], None)
+            .await
+            .map(|access| AccessFullAllowTakendown { access })
+    }
+}
+
+/// Full access from an account that is not taken down.
+pub struct AccessFullCheckTakedown {
+    pub access: AccessOutput,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for AccessFullCheckTakedown {
+    type Error = AuthError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        full_access_check(
+            req,
+            vec![],
+            Some(ValidateAccessTokenOpts {
+                check_deactivated: None,
+                check_takedown: Some(true),
+            }),
+        )
+        .await
+        .map(|access| AccessFullCheckTakedown { access })
     }
 }
 

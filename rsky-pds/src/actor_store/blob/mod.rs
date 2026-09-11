@@ -88,7 +88,8 @@ impl BlobReader {
             .run(move |conn| {
                 Ok(conn
                     .query_row(
-                        "SELECT * FROM blob WHERE cid = ?1 AND \"takedownRef\" IS NULL",
+                        "SELECT * FROM blob WHERE cid = ?1 AND \"takedownRef\" IS NULL \
+                         AND \"tempKey\" IS NULL",
                         [cid.to_string()],
                         blob_from_row,
                     )
@@ -678,6 +679,28 @@ mod tests {
                 accept: None,
             },
         }
+    }
+
+    /// An uploaded blob is not served until a record references it and it
+    /// has been promoted out of temporary storage, on both readers of a
+    /// shared data directory.
+    #[tokio::test]
+    async fn unreferenced_uploads_are_not_served() {
+        let t = test_reader().await;
+        let blob = upload(&t, b"pending blob bytes").await;
+        let cid = blob.get_cid().unwrap();
+        let err = t.reader.get_blob_metadata(cid).await.map(drop).unwrap_err();
+        assert_eq!(err.to_string(), "Blob not found");
+        assert!(t.reader.get_blob(cid).await.is_err());
+        // uploading the same bytes again changes nothing
+        let again = upload(&t, b"pending blob bytes").await;
+        assert_eq!(again.get_cid().unwrap(), cid);
+        assert!(t.reader.get_blob_metadata(cid).await.is_err());
+        t.reader
+            .verify_blob_and_make_permanent(prepared_ref(&blob))
+            .await
+            .unwrap();
+        assert_eq!(t.reader.get_blob_metadata(cid).await.unwrap().size, 18);
     }
 
     #[tokio::test]

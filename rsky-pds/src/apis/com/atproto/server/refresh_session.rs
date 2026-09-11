@@ -2,15 +2,21 @@ use crate::account_manager::helpers::account::{
     format_account_status, AvailabilityFlags, FormattedAccountStatus,
 };
 use crate::account_manager::AccountManager;
+use crate::apis::com::atproto::server::did_doc_for_session;
 use crate::apis::ApiError;
 use crate::auth_verifier::{Credentials, Refresh};
+use crate::config::ServerConfig;
+use crate::SharedIdResolver;
 use anyhow::Result;
 use rocket::serde::json::Json;
+use rocket::State;
 use rsky_lexicon::com::atproto::server::RefreshSessionOutput;
 use rsky_syntax::handle::INVALID_HANDLE;
 
 async fn inner_refresh_session(
     auth: Refresh,
+    cfg: &ServerConfig,
+    id_resolver: &SharedIdResolver,
     account_manager: AccountManager,
 ) -> Result<RefreshSessionOutput, ApiError> {
     let Credentials { did, token_id, .. } = auth.access.credentials.unwrap();
@@ -38,10 +44,12 @@ async fn inner_refresh_session(
         return Err(ApiError::RefreshTokenRevoked);
     };
     let FormattedAccountStatus { active, status } = format_account_status(Some(user.clone()));
+    let did_doc =
+        did_doc_for_session(cfg.identity.enable_did_doc_with_session, id_resolver, &did).await;
     Ok(RefreshSessionOutput {
         handle: user.handle.unwrap_or(INVALID_HANDLE.to_string()),
         did,
-        did_doc: None,
+        did_doc,
         access_jwt,
         refresh_jwt,
         email: user.email,
@@ -55,9 +63,11 @@ async fn inner_refresh_session(
 #[rocket::post("/xrpc/com.atproto.server.refreshSession")]
 pub async fn refresh_session(
     auth: Refresh,
+    cfg: &State<ServerConfig>,
+    id_resolver: &State<SharedIdResolver>,
     account_manager: AccountManager,
 ) -> Result<Json<RefreshSessionOutput>, ApiError> {
-    match inner_refresh_session(auth, account_manager).await {
+    match inner_refresh_session(auth, cfg, id_resolver, account_manager).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => Err(error),
     }

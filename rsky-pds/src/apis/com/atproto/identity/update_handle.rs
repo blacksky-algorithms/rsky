@@ -71,13 +71,6 @@ async fn inner_update_handle(
         Ok(_) => (),
         Err(error) => tracing::error!("Error: {}; DID: {}; Handle: {}", error, &requester, &handle),
     };
-    match lock
-        .sequence_handle_update(requester.clone(), handle.clone())
-        .await
-    {
-        Ok(_) => (),
-        Err(error) => tracing::error!("Error: {}; DID: {}; Handle: {}", error, &requester, &handle),
-    };
     Ok(())
 }
 

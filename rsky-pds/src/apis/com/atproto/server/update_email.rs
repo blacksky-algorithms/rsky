@@ -3,7 +3,6 @@ use crate::account_manager::{AccountManager, UpdateEmailOpts};
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessFull;
 use crate::models::models::EmailTokenPurpose;
-use anyhow::{bail, Result};
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::UpdateEmailInput;
 
@@ -11,11 +10,13 @@ async fn inner_update_email(
     body: Json<UpdateEmailInput>,
     auth: AccessFull,
     account_manager: AccountManager,
-) -> Result<()> {
+) -> Result<(), ApiError> {
     let did = auth.access.credentials.unwrap().did.unwrap();
     let UpdateEmailInput { email, token } = body.into_inner();
     if !mailchecker::is_valid(&email) {
-        bail!("This email address is not supported, please use a different email.")
+        return Err(ApiError::InvalidRequest(
+            "This email address is not supported, please use a different email.".to_string(),
+        ));
     }
     let account = account_manager
         .get_account(
@@ -35,7 +36,9 @@ async fn inner_update_email(
                     .assert_valid_email_token(&did, EmailTokenPurpose::UpdateEmail, &token)
                     .await?;
             } else {
-                bail!("Confirmation token required")
+                return Err(ApiError::InvalidRequest(
+                    "Confirmation token required".to_string(),
+                ));
             }
         }
         match account_manager
@@ -44,14 +47,15 @@ async fn inner_update_email(
         {
             Ok(_) => Ok(()),
             Err(e) => match e.downcast_ref() {
-                Some(AccountHelperError::UserAlreadyExistsError) => {
-                    bail!("This email address is already in use, please use a different email.")
-                }
-                _ => Err(e),
+                Some(AccountHelperError::UserAlreadyExistsError) => Err(ApiError::InvalidRequest(
+                    "This email address is already in use, please use a different email."
+                        .to_string(),
+                )),
+                _ => Err(e.into()),
             },
         }
     } else {
-        bail!("Account not found")
+        Err(ApiError::InvalidRequest("account not found".to_string()))
     }
 }
 
@@ -66,11 +70,5 @@ pub async fn update_email(
     auth: AccessFull,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    match inner_update_email(body, auth, account_manager).await {
-        Ok(_) => Ok(()),
-        Err(error) => {
-            tracing::error!("@LOG: ERROR: {error}");
-            Err(ApiError::RuntimeError)
-        }
-    }
+    inner_update_email(body, auth, account_manager).await
 }

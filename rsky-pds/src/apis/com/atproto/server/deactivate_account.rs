@@ -1,10 +1,15 @@
+use crate::account_manager::helpers::account::{AccountStatus, AvailabilityFlags};
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessFull;
-use anyhow::Result;
+use crate::auth_verifier::AccessFullAllowTakendown;
+use crate::SharedSequencer;
 use rocket::serde::json::Json;
+use rocket::State;
 use rsky_lexicon::com::atproto::server::DeactivateAccountInput;
 
+/// Deactivates the caller's account and publishes the new status, the way
+/// the reference PDS does. A taken-down account may deactivate itself with
+/// its recovery session.
 #[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.server.deactivateAccount",
@@ -13,16 +18,32 @@ use rsky_lexicon::com::atproto::server::DeactivateAccountInput;
 )]
 pub async fn deactivate_account(
     body: Json<DeactivateAccountInput>,
-    auth: AccessFull,
+    auth: AccessFullAllowTakendown,
+    sequencer: &State<SharedSequencer>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     let did = auth.access.credentials.unwrap().did.unwrap();
     let DeactivateAccountInput { delete_after } = body.into_inner();
-    match account_manager.deactivate_account(&did, delete_after).await {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            tracing::error!("Internal Error: {error}");
-            Err(ApiError::RuntimeError)
-        }
+    let account = account_manager
+        .get_account(
+            &did,
+            Some(AvailabilityFlags {
+                include_deactivated: Some(true),
+                include_taken_down: Some(true),
+            }),
+        )
+        .await?;
+    if account.is_none() {
+        return Err(ApiError::InvalidRequest("Account not found".to_string()));
     }
+    account_manager
+        .deactivate_account(&did, delete_after)
+        .await?;
+    let status = account_manager.get_account_status(&did).await?;
+    if status == AccountStatus::Deleted {
+        return Err(ApiError::InvalidRequest("Account not found".to_string()));
+    }
+    let mut lock = sequencer.sequencer.write().await;
+    lock.sequence_account_evt(did, status).await?;
+    Ok(())
 }

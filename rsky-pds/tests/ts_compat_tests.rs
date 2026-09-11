@@ -12,8 +12,9 @@ use rocket::local::asynchronous::Client;
 use rsky_oauth::jwk::Jwk;
 use rsky_oauth::jwt::{JwtClaims, JwtHeader};
 use rsky_pds::account_manager::helpers::auth::{
-    create_refresh_token_with, CreateTokensOpts, JwtSigner,
+    create_access_token_with, create_refresh_token_with, CreateTokensOpts, JwtSigner,
 };
+use rsky_pds::auth_verifier::AuthScope;
 use rsky_repo::car::read_car;
 use rsky_repo::sync::consumer::verify_proofs;
 use rsky_repo::types::RecordCidClaim;
@@ -1011,4 +1012,462 @@ async fn reference_oauth_refresh_tokens_rotate() {
     assert_eq!(json, exercised["refresh_replayed"]["body"]);
     let (status, _, _) = dpop_request(&client, "GET", path, &key, Some(access), None).await;
     assert_eq!(status, Status::Unauthorized);
+}
+
+fn fixture_signer(fixture: &Fixture) -> JwtSigner {
+    JwtSigner::hmac(fixture.secret("PDS_JWT_SECRET").as_bytes())
+}
+
+fn access_token_for(fixture: &Fixture, did: &str, scope: AuthScope) -> String {
+    create_access_token_with(
+        &fixture_signer(fixture),
+        CreateTokensOpts {
+            did: did.to_owned(),
+            service_did: "did:web:fixture.test".to_owned(),
+            scope: Some(scope),
+            jti: None,
+            expires_in_secs: None,
+            issued_at: None,
+        },
+    )
+    .unwrap()
+}
+
+async fn post_empty_with(client: &Client, path: &str, token: &str) -> (Status, Value) {
+    post_json_with(client, path, Some(token), None).await
+}
+
+fn insert_email_token(
+    dir: &std::path::Path,
+    purpose: &str,
+    did: &str,
+    token: &str,
+    requested_at: &str,
+) {
+    let conn = rusqlite::Connection::open(dir.join("data").join("account.sqlite")).unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO email_token (purpose, did, token, \"requestedAt\") VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![purpose, did, token, requested_at],
+    )
+    .unwrap();
+}
+
+fn decode_event(bytes: &[u8]) -> Value {
+    serde_ipld_dagcbor::from_slice(bytes).unwrap()
+}
+
+/// Deactivating and reactivating an account produces the same sequencer
+/// events, byte for byte, as the reference PDS produced for the same
+/// account.
+#[tokio::test]
+async fn account_status_transitions_match_the_reference() {
+    let (fixture, dir, client) = get_client_with_fixture_copy().await;
+    let frank = fixture.did("frank");
+    let token = access_token_for(fixture, &frank, AuthScope::Access);
+    let reference = fixture.reference_events(&frank);
+    let before = common::sequencer_events(&dir.path().join("data/sequencer.sqlite"), &frank).len();
+    let new_events = |count: usize| {
+        let rows = common::sequencer_events(&dir.path().join("data/sequencer.sqlite"), &frank);
+        assert_eq!(rows.len(), before + count, "new events");
+        rows[before..].to_vec()
+    };
+    // the reference history: creation, two deactivations, two activations
+    let deactivated: Vec<_> = reference
+        .iter()
+        .filter(|(_, kind, event)| {
+            kind == "account" && decode_event(event)["status"] == "deactivated"
+        })
+        .collect();
+    assert_eq!(deactivated.len(), 2);
+    let first_activation = reference
+        .iter()
+        .position(|(seq, kind, event)| {
+            *seq > deactivated[0].0 && kind == "account" && decode_event(event)["active"] == true
+        })
+        .unwrap();
+    let activation_batch: Vec<_> = reference[first_activation..first_activation + 3].to_vec();
+
+    let deactivate = "/xrpc/com.atproto.server.deactivateAccount";
+    let (status, json) = post_json_with(
+        &client,
+        deactivate,
+        Some(&token),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(
+        status.code,
+        fixture.expected_status("deactivateAccount_frank.json"),
+        "{json}"
+    );
+    let events = new_events(1);
+    assert_eq!(events[0].1, "account");
+    assert_eq!(events[0].2, deactivated[0].2, "deactivation event bytes");
+    assert_auth_json_matches(
+        &client,
+        fixture,
+        "getSession_frank_deactivated.json",
+        "/xrpc/com.atproto.server.getSession",
+        &token,
+    )
+    .await;
+    let (status, _) = post_json_with(
+        &client,
+        deactivate,
+        Some(&token),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(
+        status.code,
+        fixture.expected_status("deactivateAccount_frank_again.json")
+    );
+    new_events(2);
+
+    let activate = "/xrpc/com.atproto.server.activateAccount";
+    let (status, json) = post_empty_with(&client, activate, &token).await;
+    assert_eq!(
+        status.code,
+        fixture.expected_status("activateAccount_frank.json"),
+        "{json}"
+    );
+    let events = new_events(5);
+    for (ours, theirs) in events[2..].iter().zip(activation_batch.iter()) {
+        assert_eq!(ours.1, theirs.1, "event type");
+        assert_eq!(ours.2, theirs.2, "{} event bytes", theirs.1);
+    }
+    let (status, _) = post_empty_with(&client, activate, &token).await;
+    assert_eq!(
+        status.code,
+        fixture.expected_status("activateAccount_frank_again.json")
+    );
+    new_events(8);
+
+    // scope and status rules
+    let app_password = fixture.token("alice_app_password_access");
+    let (status, json) = post_json_with(
+        &client,
+        deactivate,
+        Some(&app_password),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(
+        status.code,
+        fixture.expected_status("deactivateAccount_app_password.json")
+    );
+    assert_eq!(
+        json,
+        fixture.expected_json("deactivateAccount_app_password.json")
+    );
+    let carol = fixture.did("carol");
+    let recovery = access_token_for(fixture, &carol, AuthScope::Takendown);
+    let carol_before =
+        common::sequencer_events(&dir.path().join("data/sequencer.sqlite"), &carol).len();
+    let (status, json) = post_json_with(
+        &client,
+        deactivate,
+        Some(&recovery),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(
+        status.code,
+        fixture.expected_status("deactivateAccount_carol.json"),
+        "{json}"
+    );
+    let carol_events = common::sequencer_events(&dir.path().join("data/sequencer.sqlite"), &carol);
+    assert_eq!(carol_events.len(), carol_before + 1);
+    let carol_reference = fixture.reference_events(&carol);
+    assert_eq!(
+        carol_events.last().unwrap().2,
+        carol_reference.last().unwrap().2
+    );
+    let (status, json) = post_empty_with(&client, activate, &recovery).await;
+    assert_eq!(
+        status.code,
+        fixture.expected_status("activateAccount_carol.json")
+    );
+    assert_eq!(json, fixture.expected_json("activateAccount_carol.json"));
+    let oauth = fixture.oauth("alice-fresh");
+    let (status, json, _) = dpop_request_with(
+        &client,
+        "POST",
+        deactivate,
+        &dpop_key(&oauth),
+        Some(oauth["token"]["access_token"].as_str().unwrap()),
+        Some((ContentType::JSON, "{}".to_owned())),
+    )
+    .await;
+    assert_eq!(status, Status::Forbidden, "{json}");
+}
+
+/// Email-token flows answer like the reference and change the same state.
+#[tokio::test]
+async fn email_token_flows_match_the_reference() {
+    let (fixture, dir, client) = get_client_with_fixture_copy().await;
+    let frank = fixture.did("frank");
+    let now = rsky_common::now();
+    insert_email_token(dir.path(), "reset_password", &frank, "FIXTURE-RESET", &now);
+    insert_email_token(dir.path(), "confirm_email", &frank, "FIXTURE-CONFIRM", &now);
+    insert_email_token(
+        dir.path(),
+        "update_email",
+        &frank,
+        "FIXTURE-OLD",
+        "2020-01-01T00:00:00.000Z",
+    );
+
+    let reset = "/xrpc/com.atproto.server.resetPassword";
+    for (name, body) in [
+        (
+            "resetPassword_bad_token.json",
+            serde_json::json!({"token": "NOPE", "password": "new-password-123"}),
+        ),
+        (
+            "resetPassword_long.json",
+            serde_json::json!({"token": "FIXTURE-RESET", "password": "x".repeat(257)}),
+        ),
+        (
+            "resetPassword_frank.json",
+            serde_json::json!({"token": "fixture-reset", "password": "new-password-123"}),
+        ),
+    ] {
+        let (status, json) = post_json_with(&client, reset, None, Some(body)).await;
+        assert_eq!(status.code, fixture.expected_status(name), "{name}: {json}");
+        if fixture.expected(name).is_empty() {
+            assert_eq!(json, Value::Null, "{name}");
+        } else {
+            assert_eq!(json, fixture.expected_json(name), "{name}");
+        }
+    }
+    let create = "/xrpc/com.atproto.server.createSession";
+    let (status, json) = post_json_with(
+        &client,
+        create,
+        None,
+        Some(
+            serde_json::json!({"identifier": "frank.fixture.test", "password": "new-password-123"}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status.code,
+        fixture.expected_status("createSession_frank_new_password.json"),
+        "{json}"
+    );
+    assert_eq!(
+        without_tokens(json.clone()),
+        without_tokens(fixture.expected_json("createSession_frank_new_password.json"))
+    );
+    let frank_token = json["accessJwt"].as_str().unwrap().to_owned();
+    let (status, json) = post_json_with(&client, create, None, Some(serde_json::json!({"identifier": "frank.fixture.test", "password": fixture.account("alice")["password"]}))).await;
+    assert_eq!(
+        status.code,
+        fixture.expected_status("createSession_frank_old_password.json")
+    );
+    assert_eq!(
+        json,
+        fixture.expected_json("createSession_frank_old_password.json")
+    );
+
+    let confirm = "/xrpc/com.atproto.server.confirmEmail";
+    for (name, body) in [
+        (
+            "confirmEmail_wrong_email.json",
+            serde_json::json!({"email": "someone@fixture.invalid", "token": "FIXTURE-CONFIRM"}),
+        ),
+        (
+            "confirmEmail_bad_token.json",
+            serde_json::json!({"email": "frank@fixture.invalid", "token": "NOPE"}),
+        ),
+        (
+            "confirmEmail_frank.json",
+            serde_json::json!({"email": "FRANK@fixture.invalid", "token": "fixture-confirm"}),
+        ),
+    ] {
+        let (status, json) = post_json_with(&client, confirm, Some(&frank_token), Some(body)).await;
+        assert_eq!(status.code, fixture.expected_status(name), "{name}: {json}");
+        if fixture.expected(name).is_empty() {
+            assert_eq!(json, Value::Null, "{name}");
+        } else {
+            assert_eq!(json, fixture.expected_json(name), "{name}");
+        }
+    }
+    assert_auth_json_matches(
+        &client,
+        fixture,
+        "getSession_frank_confirmed.json",
+        "/xrpc/com.atproto.server.getSession",
+        &frank_token,
+    )
+    .await;
+    let (status, json) = post_json_with(
+        &client,
+        "/xrpc/com.atproto.server.updateEmail",
+        Some(&frank_token),
+        Some(serde_json::json!({"email": "frank2@fixture.invalid", "token": "FIXTURE-OLD"})),
+    )
+    .await;
+    assert_eq!(
+        status.code,
+        fixture.expected_status("updateEmail_expired_token.json"),
+        "{json}"
+    );
+    assert_eq!(
+        json,
+        fixture.expected_json("updateEmail_expired_token.json")
+    );
+    // an email another account already uses is refused with the reference message
+    let (status, json) = post_json_with(
+        &client,
+        "/xrpc/com.atproto.server.updateEmail",
+        Some(&fixture.token("alice_access")),
+        Some(serde_json::json!({"email": "bob@fixture.invalid"})),
+    )
+    .await;
+    assert_eq!(status, Status::BadRequest, "{json}");
+    assert_eq!(
+        json["message"],
+        "This email address is already in use, please use a different email."
+    );
+    let (status, json) = post_empty_with(
+        &client,
+        "/xrpc/com.atproto.server.requestAccountDelete",
+        &fixture.token("alice_app_password_access"),
+    )
+    .await;
+    assert_eq!(
+        status.code,
+        fixture.expected_status("requestAccountDelete_app_password.json")
+    );
+    assert_eq!(
+        json,
+        fixture.expected_json("requestAccountDelete_app_password.json")
+    );
+}
+
+/// Deleting an account leaves what the reference PDS leaves: only the
+/// deletion event in the sequencer, no rows, no repository, no session.
+#[tokio::test]
+async fn account_deletion_matches_the_reference() {
+    let (fixture, dir, client) = get_client_with_fixture_copy().await;
+    let dave = fixture.did("dave");
+    let erin = fixture.did("erin");
+    let password = fixture.account("alice")["password"].as_str().unwrap();
+    let dave_token = access_token_for(fixture, &dave, AuthScope::Access);
+    insert_email_token(
+        dir.path(),
+        "delete_account",
+        &dave,
+        "FIXTURE-DELETE-DAVE",
+        &rsky_common::now(),
+    );
+
+    let delete = "/xrpc/com.atproto.server.deleteAccount";
+    let substitute = |value: Value| -> Value {
+        serde_json::from_str(&value.to_string().replace(&erin, &dave)).unwrap()
+    };
+    for (name, body) in [
+        (
+            "deleteAccount_wrong_password.json",
+            serde_json::json!({"did": dave, "password": "nope", "token": "FIXTURE-DELETE-DAVE"}),
+        ),
+        (
+            "deleteAccount_bad_token.json",
+            serde_json::json!({"did": dave, "password": password, "token": "NOPE"}),
+        ),
+        (
+            "deleteAccount_unknown.json",
+            serde_json::json!({"did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa", "password": password, "token": "NOPE"}),
+        ),
+        (
+            "deleteAccount_erin.json",
+            serde_json::json!({"did": dave, "password": password, "token": "fixture-delete-dave"}),
+        ),
+        (
+            "deleteAccount_erin_again.json",
+            serde_json::json!({"did": dave, "password": password, "token": "fixture-delete-dave"}),
+        ),
+    ] {
+        let (status, json) = post_json_with(&client, delete, None, Some(body)).await;
+        assert_eq!(status.code, fixture.expected_status(name), "{name}: {json}");
+        if fixture.expected(name).is_empty() {
+            assert_eq!(json, Value::Null, "{name}");
+        } else {
+            assert_eq!(json, substitute(fixture.expected_json(name)), "{name}");
+        }
+    }
+
+    let (status, json) =
+        get_json_with(&client, "/xrpc/com.atproto.server.getSession", &dave_token).await;
+    assert_eq!(
+        status.code,
+        fixture.expected_status("getSession_erin_deleted.json")
+    );
+    assert_eq!(
+        json,
+        substitute(fixture.expected_json("getSession_erin_deleted.json"))
+    );
+    let (status, json) = post_json_with(
+        &client,
+        "/xrpc/com.atproto.server.createSession",
+        None,
+        Some(serde_json::json!({"identifier": "dave.fixture.test", "password": password})),
+    )
+    .await;
+    assert_eq!(
+        status.code,
+        fixture.expected_status("createSession_erin_deleted.json")
+    );
+    assert_eq!(
+        json,
+        fixture.expected_json("createSession_erin_deleted.json")
+    );
+    let (status, json) = get_json(
+        &client,
+        &format!("/xrpc/com.atproto.sync.getRepo?did={dave}"),
+    )
+    .await;
+    assert_eq!(status.code, fixture.expected_status("erin_getRepo.json"));
+    assert_eq!(json, substitute(fixture.expected_json("erin_getRepo.json")));
+
+    // the reference keeps exactly one event for a deleted account
+    let ours = common::sequencer_events(&dir.path().join("data/sequencer.sqlite"), &dave);
+    let theirs = fixture.reference_events(&erin);
+    assert_eq!(theirs.len(), 1);
+    assert_eq!(ours.len(), 1);
+    assert_eq!(ours[0].1, "account");
+    assert_eq!(
+        decode_event(&ours[0].2),
+        substitute(decode_event(&theirs[0].2))
+    );
+    let shard = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(dave.as_bytes()));
+    assert!(!dir
+        .path()
+        .join("data/actors")
+        .join(&shard[..2])
+        .join(&dave)
+        .exists());
+
+    // the deletion journal: complete, with a purge obligation because blob
+    // storage is shared during coexistence
+    let conn = rusqlite::Connection::open(dir.path().join("data/rsky/lifecycle.sqlite")).unwrap();
+    let (deleted_at, seq): (Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT \"logicallyDeletedAt\", \"accountSeq\" FROM tombstone WHERE did = ?1",
+            [&dave],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(deleted_at.is_some());
+    assert_eq!(seq, Some(ours[0].0));
+    let prefixes: String = conn
+        .query_row(
+            "SELECT \"namespacePrefixes\" FROM purge_obligation WHERE did = ?1",
+            [&dave],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(prefixes.contains(&format!("blocks/{dave}/")));
 }

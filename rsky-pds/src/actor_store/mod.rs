@@ -155,6 +155,8 @@ pub struct ActorStore {
     pub background_queue: BackgroundQueue,
     cache: Mutex<LruCache<String, CachedDb>>,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// DIDs whose deletion is in progress; no write is admitted for them.
+    tombstones: crate::lifecycle::Tombstones,
 }
 
 /// How an actor store is being opened. Reads never modify the store's
@@ -183,7 +185,27 @@ impl ActorStore {
             background_queue,
             cache: Mutex::new(LruCache::new(cache_size)),
             locks: Mutex::new(HashMap::new()),
+            tombstones: Default::default(),
         }
+    }
+
+    /// Shares the deletion journal's set of in-progress deletions.
+    pub fn with_tombstones(mut self, tombstones: crate::lifecycle::Tombstones) -> Self {
+        self.tombstones = tombstones;
+        self
+    }
+
+    /// The CIDs of every blob the store registers, from the store alone.
+    pub async fn blob_cids(&self, did: &str) -> Result<Vec<String>> {
+        let db = self.open_db(did, OpenMode::Read).await?;
+        db.run(|conn| {
+            let mut stmt = conn.prepare("SELECT cid FROM blob ORDER BY cid")?;
+            let cids = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(cids)
+        })
+        .await
     }
 
     pub fn get_location(&self, did: &str) -> Result<ActorLocation> {
@@ -281,6 +303,7 @@ impl ActorStore {
         did: String,
         blobstore: Arc<dyn BlobStore>,
     ) -> Result<ActorStoreTransactor> {
+        crate::lifecycle::assert_not_deleting(&self.tombstones, &did)?;
         let guard = self.did_lock(&did).lock_owned().await;
         let db = self.open_db(&did, OpenMode::Write).await?;
         let key_location = self.get_location(&did)?.key_location;
@@ -300,6 +323,7 @@ impl ActorStore {
     }
 
     pub async fn create(&self, did: &str, keypair: &Keypair) -> Result<()> {
+        crate::lifecycle::assert_not_deleting(&self.tombstones, did)?;
         let location = self.get_location(did)?;
         tokio::fs::create_dir_all(&location.directory).await?;
         if tokio::fs::try_exists(&location.db_location).await? {
@@ -322,6 +346,13 @@ impl ActorStore {
     }
 
     pub async fn destroy(&self, did: &str, blobstore: Arc<dyn BlobStore>) -> Result<()> {
+        self.delete_blobs(did, blobstore).await?;
+        self.unlink(did).await
+    }
+
+    /// Deletes the account's objects from blob storage; failures are logged
+    /// because the store is going away regardless.
+    pub async fn delete_blobs(&self, did: &str, blobstore: Arc<dyn BlobStore>) -> Result<()> {
         if let Some(delete_all) = blobstore.delete_all() {
             if let Err(err) = delete_all.await {
                 tracing::error!(?err, did, "failed to delete blobs from blobstore");
@@ -335,6 +366,12 @@ impl ActorStore {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Removes the actor directory and forgets the store, touching nothing
+    /// in blob storage.
+    pub async fn unlink(&self, did: &str) -> Result<()> {
         {
             let mut cache = self.cache.lock().expect("actor store cache poisoned");
             cache.pop(did);

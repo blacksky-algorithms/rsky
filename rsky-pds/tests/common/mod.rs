@@ -176,6 +176,7 @@ pub async fn get_client() -> (TempDir, Client) {
             account_db_location: path("account.sqlite"),
             sequencer_db_location: path("sequencer.sqlite"),
             did_cache_db_location: path("did_cache.sqlite"),
+            lifecycle_db_location: path("rsky/lifecycle.sqlite"),
         }),
         actor_store_directory: Some(path("actors")),
     };
@@ -308,6 +309,11 @@ impl Fixture {
         self.dir.join("data").join(relative)
     }
 
+    /// `(seq, eventType, event)` rows of the reference sequencer for `did`.
+    pub fn reference_events(&self, did: &str) -> Vec<(i64, String, Vec<u8>)> {
+        sequencer_events(&self.source.join("data").join("sequencer.sqlite"), did)
+    }
+
     pub fn actor_store(&self, name: &str) -> std::path::PathBuf {
         let did = self.did(name);
         let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(did.as_bytes()));
@@ -330,6 +336,18 @@ fn fixture_source() -> std::path::PathBuf {
             .join("fixtures")
             .join("ts-pds-0.5.27"),
     }
+}
+
+/// OAuth session lifetimes are measured from the row timestamps, so a copy
+/// of the fixture starts every recorded session as if it were created now.
+#[allow(dead_code)]
+fn refresh_oauth_session_times(data: &std::path::Path) {
+    let conn = rusqlite::Connection::open(data.join("account.sqlite")).unwrap();
+    conn.execute(
+        "UPDATE token SET \"createdAt\" = ?1, \"updatedAt\" = ?1",
+        [rsky_common::now()],
+    )
+    .unwrap();
 }
 
 #[allow(dead_code)]
@@ -400,6 +418,7 @@ fn fixture() -> &'static Fixture {
                     .unwrap();
             let tmp = tempfile::tempdir().expect("Valid temporary directory");
             copy_dir(&source.join("data"), &tmp.path().join("data"));
+            refresh_oauth_session_times(&tmp.path().join("data"));
             let secrets = manifest["secrets"].as_object().unwrap();
             for (key, value) in secrets {
                 std::env::set_var(key, value.as_str().unwrap());
@@ -409,6 +428,8 @@ fn fixture() -> &'static Fixture {
                 secrets["PDS_ADMIN_PASSWORD"].as_str().unwrap(),
             );
             std::env::set_var("PDS_INVITE_REQUIRED", "false");
+            // the fixture is a shared data directory; nothing leaves blob storage
+            std::env::set_var("PDS_COEXISTENCE", "true");
             std::env::set_var(
                 "PDS_BLOBSTORE_DISK_LOCATION",
                 tmp.path().join("data").join("blocks"),
@@ -441,6 +462,7 @@ pub async fn get_client_with_fixture() -> (&'static Fixture, Client) {
             account_db_location: path("account.sqlite"),
             sequencer_db_location: path("sequencer.sqlite"),
             did_cache_db_location: path("did_cache.sqlite"),
+            lifecycle_db_location: path("rsky/lifecycle.sqlite"),
         }),
         actor_store_directory: Some(path("actors")),
     };
@@ -458,6 +480,7 @@ pub async fn get_client_with_fixture_copy() -> (&'static Fixture, TempDir, Clien
     init_env();
     let dir = tempfile::tempdir().expect("Valid temporary directory");
     copy_dir(&fixture.source.join("data"), &dir.path().join("data"));
+    refresh_oauth_session_times(&dir.path().join("data"));
     let path = |name: &str| {
         dir.path()
             .join("data")
@@ -471,6 +494,7 @@ pub async fn get_client_with_fixture_copy() -> (&'static Fixture, TempDir, Clien
             account_db_location: path("account.sqlite"),
             sequencer_db_location: path("sequencer.sqlite"),
             did_cache_db_location: path("did_cache.sqlite"),
+            lifecycle_db_location: path("rsky/lifecycle.sqlite"),
         }),
         actor_store_directory: Some(path("actors")),
     };
@@ -478,4 +502,19 @@ pub async fn get_client_with_fixture_copy() -> (&'static Fixture, TempDir, Clien
         .await
         .expect("Valid Rocket instance");
     (fixture, dir, client)
+}
+
+/// `(seq, eventType, event)` rows of a sequencer database for `did`.
+#[allow(dead_code)]
+pub fn sequencer_events(path: &std::path::Path, did: &str) -> Vec<(i64, String, Vec<u8>)> {
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let mut stmt = conn
+        .prepare("SELECT seq, \"eventType\", event FROM repo_seq WHERE did = ?1 ORDER BY seq")
+        .unwrap();
+    stmt.query_map([did], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
 }

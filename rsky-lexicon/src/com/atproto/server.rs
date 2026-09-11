@@ -168,7 +168,7 @@ pub struct CreateSessionOutput {
     pub handle: String,
     pub did: String,
     #[serde(rename = "didDoc", skip_serializing_if = "Option::is_none")]
-    pub did_doc: Option<String>,
+    pub did_doc: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
     #[serde(rename = "emailConfirmed", skip_serializing_if = "Option::is_none")]
@@ -190,7 +190,7 @@ pub struct GetSessionOutput {
     #[serde(rename = "emailConfirmed", skip_serializing_if = "Option::is_none")]
     pub email_confirmed: Option<bool>,
     #[serde(rename = "didDoc", skip_serializing_if = "Option::is_none")]
-    pub did_doc: Option<String>,
+    pub did_doc: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<bool>,
     /// Why the account is inactive: `takendown`, `suspended`, or `deactivated`.
@@ -265,7 +265,7 @@ pub struct RefreshSessionOutput {
     pub handle: String,
     pub did: String,
     #[serde(rename = "didDoc", skip_serializing_if = "Option::is_none")]
-    pub did_doc: Option<String>,
+    pub did_doc: Option<Value>,
     #[serde(rename = "accessJwt")]
     pub access_jwt: String,
     #[serde(rename = "refreshJwt")]

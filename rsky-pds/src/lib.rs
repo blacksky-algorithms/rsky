@@ -21,6 +21,7 @@ pub mod did_cache;
 pub mod handle;
 pub mod image;
 pub mod lexicon;
+pub mod lifecycle;
 pub mod mailer;
 pub mod models;
 pub mod oauth;
@@ -229,6 +230,9 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
     let did_cache_db = did_cache::get_migrated_db(&cfg.service_db.did_cache_db_location)
         .await
         .expect("Failed to open did cache database");
+    let lifecycle = lifecycle::LifecycleStore::open(&cfg.service_db.lifecycle_db_location)
+        .await
+        .expect("Failed to open lifecycle database");
 
     let background_queue = BackgroundQueue::default();
     let shared_oauth_provider = oauth::SharedOAuthProvider::new(
@@ -308,7 +312,23 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
             },
         })),
     };
-    let actor_store = ActorStore::new(&cfg.actor_store, background_queue);
+    let actor_store =
+        ActorStore::new(&cfg.actor_store, background_queue).with_tombstones(lifecycle.tombstones());
+    let resumed = lifecycle::resume_deletions(&lifecycle::DeletionContext {
+        lifecycle: &lifecycle,
+        account_manager: &account_manager,
+        sequencer: &sequencer,
+        actor_store: &actor_store,
+        blobstore: None,
+    })
+    .await
+    .expect("Failed to resume incomplete account deletions");
+    if !resumed.is_empty() {
+        tracing::warn!(
+            count = resumed.len(),
+            "resumed incomplete account deletions"
+        );
+    }
 
     let shield = Shield::default().enable(NoSniff::Enable);
 
@@ -461,4 +481,5 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(crate::space_auth::SharedSpaceDpop::default())
         .manage(crate::permission_set::SharedPermissionSets::default())
         .manage(actor_store)
+        .manage(lifecycle)
 }

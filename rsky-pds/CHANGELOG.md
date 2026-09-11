@@ -60,6 +60,25 @@ clients get the extended session lifetimes. Rejected OAuth credentials
 answer with their OAuth error code (`invalid_token`, `use_dpop_nonce`) and
 a 401. rsky-oauth 0.4.0 carries the signing-key and replay-store changes.
 
+### Added — account lifecycle parity
+
+`deleteAccount` is the public method the reference PDS exposes (account
+password plus the mailed token), and deletion runs in the reference order:
+account rows, the deletion event with the earlier history pruned, then the
+actor store. Each move is journaled in `PDS_LIFECYCLE_DB` (a tombstone
+before the first one, a purge obligation before the actor directory is
+unlinked when `PDS_COEXISTENCE` keeps blob storage untouched), no write is
+admitted for a DID whose deletion is in progress, and an interrupted
+deletion is resumed at the next start. `deactivateAccount` publishes the
+account status event, accepts a taken-down account's recovery session, and
+`updateHandle` no longer emits the retired `#handle` event. `resetPassword`,
+`confirmEmail`, `updateEmail`, `requestAccountDelete`, and `activateAccount`
+answer with the reference error names and messages (`InvalidToken`,
+`ExpiredToken`, `InvalidEmail`, `AccountNotFound`, `Forbidden` for OAuth
+sessions). Session outputs carry `didDoc` when
+`PDS_ENABLE_DID_DOC_WITH_SESSION` is set, and a blob that has been uploaded
+but not yet referenced by a record is not served.
+
 ### Fixed — responses that differed from the reference PDS
 
 - `com.atproto.sync.*` reads of a missing, taken-down, or deactivated

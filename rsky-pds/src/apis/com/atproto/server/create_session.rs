@@ -3,8 +3,12 @@ use crate::account_manager::helpers::account::{
 };
 use crate::account_manager::helpers::password::AppPassDescript;
 use crate::account_manager::AccountManager;
+use crate::apis::com::atproto::server::did_doc_for_session;
 use crate::apis::ApiError;
+use crate::config::ServerConfig;
+use crate::SharedIdResolver;
 use rocket::serde::json::Json;
+use rocket::State;
 use rsky_lexicon::com::atproto::server::{CreateSessionInput, CreateSessionOutput};
 use rsky_syntax::handle::INVALID_HANDLE;
 use std::time::{Duration, Instant};
@@ -83,6 +87,8 @@ async fn login_inner(
 #[tracing::instrument(skip_all)]
 async fn inner_create_session(
     body: Json<CreateSessionInput>,
+    cfg: &ServerConfig,
+    id_resolver: &SharedIdResolver,
     account_manager: AccountManager,
 ) -> Result<CreateSessionOutput, ApiError> {
     let CreateSessionInput {
@@ -109,9 +115,15 @@ async fn inner_create_session(
         .create_session(user.did.clone(), app_password, is_soft_deleted)
         .await?;
     let FormattedAccountStatus { active, status } = format_account_status(Some(user.clone()));
+    let did_doc = did_doc_for_session(
+        cfg.identity.enable_did_doc_with_session,
+        id_resolver,
+        &user.did,
+    )
+    .await;
     Ok(CreateSessionOutput {
         did: user.did,
-        did_doc: None,
+        did_doc,
         handle: user.handle.unwrap_or(INVALID_HANDLE.to_string()),
         email: user.email,
         email_confirmed: Some(user.email_confirmed_at.is_some()),
@@ -129,10 +141,12 @@ async fn inner_create_session(
 )]
 pub async fn create_session(
     body: Json<CreateSessionInput>,
+    cfg: &State<ServerConfig>,
+    id_resolver: &State<SharedIdResolver>,
     account_manager: AccountManager,
 ) -> Result<Json<CreateSessionOutput>, ApiError> {
     // @TODO: Add rate limiting
-    match inner_create_session(body, account_manager).await {
+    match inner_create_session(body, cfg, id_resolver, account_manager).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => Err(error),
     }

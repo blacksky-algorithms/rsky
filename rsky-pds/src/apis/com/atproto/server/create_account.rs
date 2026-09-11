@@ -53,6 +53,7 @@ pub async fn server_create_account(
     id_resolver: &State<SharedIdResolver>,
     account_manager: AccountManager,
     actor_store: &State<ActorStore>,
+    lifecycle_store: &State<crate::lifecycle::LifecycleStore>,
 ) -> Result<Json<CreateAccountOutput>, ApiError> {
     tracing::info!("Creating new user account");
     let requester = match auth.access {
@@ -237,6 +238,9 @@ pub async fn server_create_account(
         },
     }
 
+    // a DID deleted here earlier may be created again; its purge
+    // obligation, if any, stays until the objects are gone
+    lifecycle_store.clear_tombstone(&did).await?;
     Ok(Json(CreateAccountOutput {
         access_jwt,
         refresh_jwt,

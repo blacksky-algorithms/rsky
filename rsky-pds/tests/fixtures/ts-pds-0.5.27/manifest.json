@@ -2,52 +2,70 @@
   "accounts": {
     "alice": {
       "app_password": {
-        "createdAt": "2026-09-11T13:52:33.712Z",
+        "createdAt": "2026-09-11T16:04:36.058Z",
         "name": "phone",
-        "password": "bwvs-lury-qdvj-vmaa",
+        "password": "or2a-fpoz-mr7z-hc2i",
         "privileged": false
       },
       "app_password_privileged": {
-        "createdAt": "2026-09-11T13:52:33.745Z",
+        "createdAt": "2026-09-11T16:04:36.089Z",
         "name": "chat",
-        "password": "pze6-42tv-3iit-uigp",
+        "password": "lory-e6fn-hu2q-6aeu",
         "privileged": true
       },
       "blob_cid": "bafkreihl6t3dlil5cdlowrv2nafxafbedgvdeihsfaabua3ngencf3u5fi",
-      "did": "did:plc:hvzovzmwacgwcqovxqxnvl7j",
+      "did": "did:plc:diecgddnxmwpv7mtpbtopth5",
       "email": "alice@fixture.invalid",
       "handle": "alice.fixture.test",
       "password": "fixture-password-123",
-      "repo_rev": "3mvapmr7hrs22",
+      "repo_rev": "3mvawyukeq22m",
       "state": "active"
     },
     "bob": {
-      "did": "did:plc:mz7zx7sh53fjl3xq6wpvh4ds",
+      "did": "did:plc:ojboo4h3a2czrmpelfyyn2lx",
       "handle": "bob.fixture.test",
       "password": "fixture-password-123",
       "state": "deactivated"
     },
     "carol": {
-      "did": "did:plc:eel7xpaysy4e3e6fhvjyp5kw",
+      "did": "did:plc:rurnkeyapo7zk42ymozwfzsc",
       "handle": "carol.fixture.test",
       "password": "fixture-password-123",
       "state": "takendown"
     },
     "dave": {
-      "did": "did:plc:qy46fiiwvsmul7cnbg66g6fb",
+      "did": "did:plc:7fogfqklwrf4gh2cvwgcss7m",
       "handle": "dave.fixture.test",
       "note": "DID document deliberately absent from plc/ and did_cache.sqlite",
       "password": "fixture-password-123",
+      "state": "active"
+    },
+    "erin": {
+      "did": "did:plc:o7trnb2fzf2w4n6cs4xagkwh",
+      "email": "erin@fixture.invalid",
+      "handle": "erin.fixture.test",
+      "password": "fixture-password-123",
+      "state": "deleted"
+    },
+    "frank": {
+      "did": "did:plc:ntjbr3p32v5hxth453hauf44",
+      "email": "frank@fixture.invalid",
+      "handle": "frank.fixture.test",
+      "note": "deactivated, reactivated, password reset, email confirmed on the reference",
+      "password": "new-password-123",
       "state": "active"
     }
   },
   "expected_sha256": {
     "getBlob.png": "ebf4f635a17d10d6eb46ba680b70142419aa3220f228001a036d311a22ee9d2a",
-    "getRepo.car": "a1228d5db59273e44a7e160ce95535a1e2958783fac82b3639bc9ed6eac358da",
-    "syncGetRecord_missing.car": "7024169aecb5cf6eaa75e7a13f55ea00835b539a2b14fdacae1a1404d01eed56",
-    "syncGetRecord_profile.car": "94606ef228b11c56b0b41d35a0bf59faece2bad1a794caba773dd65f23b79576"
+    "getRepo.car": "aabd63fea495dda4a35f6e3c626bb14a309c70200301d8082892e8690bbf5787",
+    "syncGetRecord_missing.car": "6521e4aefb0ff1a8e88d4b1ee6029038d7d4906dee2a3aa2b725b84ca8d64756",
+    "syncGetRecord_profile.car": "3796b23cc9eedaa3f4bb643255ce5222e176059e3f3b67beaedb34c5a0f17094"
   },
   "expected_status": {
+    "activateAccount_carol.json": "400",
+    "activateAccount_frank.json": "200",
+    "activateAccount_frank_again.json": "200",
     "alice_listRecords_limit101.json": "400",
     "bob_describeRepo.json": "400",
     "bob_getRepo.json": "400",
@@ -56,6 +74,9 @@
     "carol_getLatestCommit.json": "400",
     "carol_getRepo.json": "400",
     "carol_listRecords.json": "400",
+    "confirmEmail_bad_token.json": "400",
+    "confirmEmail_frank.json": "200",
+    "confirmEmail_wrong_email.json": "400",
     "createSession_alice.json": "200",
     "createSession_alice_app_password.json": "200",
     "createSession_alice_email.json": "200",
@@ -63,12 +84,26 @@
     "createSession_carol.json": "401",
     "createSession_carol_allow_takendown.json": "200",
     "createSession_carol_wrong_password.json": "401",
+    "createSession_erin_deleted.json": "401",
+    "createSession_frank_new_password.json": "200",
+    "createSession_frank_old_password.json": "401",
     "createSession_long_password.json": "401",
     "createSession_unknown.json": "401",
     "createSession_wrong_password.json": "401",
     "dave_describeRepo.json": "400",
+    "deactivateAccount_app_password.json": "400",
+    "deactivateAccount_bob_again.json": "200",
+    "deactivateAccount_carol.json": "200",
+    "deactivateAccount_frank.json": "200",
+    "deactivateAccount_frank_again.json": "200",
+    "deleteAccount_bad_token.json": "400",
+    "deleteAccount_erin.json": "200",
+    "deleteAccount_erin_again.json": "400",
+    "deleteAccount_unknown.json": "400",
+    "deleteAccount_wrong_password.json": "401",
     "describeRepo.json": "200",
     "describeServer.json": "200",
+    "erin_getRepo.json": "400",
     "getBlob.png": "200",
     "getLatestCommit.json": "200",
     "getRecord_profile.json": "200",
@@ -78,7 +113,10 @@
     "getSession_app_password.json": "200",
     "getSession_app_password_privileged.json": "200",
     "getSession_bob.json": "200",
+    "getSession_erin_deleted.json": "400",
     "getSession_expired.json": "400",
+    "getSession_frank_confirmed.json": "200",
+    "getSession_frank_deactivated.json": "200",
     "getSession_typ_jwt.json": "400",
     "getSession_with_refresh.json": "400",
     "listAppPasswords_access.json": "200",
@@ -99,11 +137,16 @@
     "refreshSession_alice_again.json": "200",
     "refreshSession_unknown_jti.json": "400",
     "refreshSession_with_access.json": "400",
+    "requestAccountDelete_app_password.json": "400",
+    "resetPassword_bad_token.json": "400",
+    "resetPassword_frank.json": "200",
+    "resetPassword_long.json": "400",
     "syncGetRecord_missing.car": "200",
-    "syncGetRecord_profile.car": "200"
+    "syncGetRecord_profile.car": "200",
+    "updateEmail_expired_token.json": "400"
   },
   "image": "blacksky/pds:0.5.27-bsky.2-local",
-  "pds_image_commit": "c52276bdb7094184ff93400f43da8333355f5ba4",
+  "pds_image_commit": "d20541ff3a1a2a58ca6f887b0025d77c2f747fdc",
   "secrets": {
     "PDS_ADMIN_PASSWORD": "fixture-admin-password",
     "PDS_DPOP_SECRET": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
@@ -115,17 +158,17 @@
     "PDS_SERVICE_HANDLE_DOMAINS": ".fixture.test"
   },
   "tokens": {
-    "alice_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpodnpvdnptd2FjZ3djcW92eHF4bnZsN2oiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.RjMrY2QP_9R28A2b5j47Ih8YksTIGuklDIHW45d4P7Q",
-    "alice_access_typ_jwt": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpodnpvdnptd2FjZ3djcW92eHF4bnZsN2oiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.RbzMFldSw-_RCGJZr-VedjM-ZXG-AeuLUY3vv8MpM_w",
-    "alice_app_password_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFwcFBhc3MiLCJhdWQiOiJkaWQ6d2ViOmZpeHR1cmUudGVzdCIsInN1YiI6ImRpZDpwbGM6aHZ6b3Z6bXdhY2d3Y3FvdnhxeG52bDdqIiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjIxMDAwMDAwMDB9.RXJUe18e-hsIYF6eCzTI3PL1HalisUxlDERMjew2iNE",
-    "alice_app_password_privileged_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFwcFBhc3NQcml2aWxlZ2VkIiwiYXVkIjoiZGlkOndlYjpmaXh0dXJlLnRlc3QiLCJzdWIiOiJkaWQ6cGxjOmh2em92em13YWNnd2Nxb3Z4cXhudmw3aiIsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoyMTAwMDAwMDAwfQ.y-_z04yJONeS43rdPMXYUA4i1hOtXwPAFx9r47V0e2M",
-    "alice_expired_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpodnpvdnptd2FjZ3djcW92eHF4bnZsN2oiLCJpYXQiOjE3MDAwMDAwMDAsImV4cCI6MTcwMDAwMDA2MH0.WSeVWttW62GAnYHq2XBmTsBNHaGo2PEAPrCEGvLiYEg",
-    "alice_refresh": "eyJ0eXAiOiJyZWZyZXNoK2p3dCIsImFsZyI6IkhTMjU2In0.eyJzY29wZSI6ImNvbS5hdHByb3RvLnJlZnJlc2giLCJqdGkiOiIzcW9hK2JRUzZxVVdsMVpBVjdXT01ZKzJqWGxETmNIZEtKcXpzbVJRRzdjPSIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpodnpvdnptd2FjZ3djcW92eHF4bnZsN2oiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.-ft3xQaHLOm606DR49Ijf31IyezVILifByn34R4TogU",
-    "alice_refresh_2": "eyJ0eXAiOiJyZWZyZXNoK2p3dCIsImFsZyI6IkhTMjU2In0.eyJzY29wZSI6ImNvbS5hdHByb3RvLnJlZnJlc2giLCJqdGkiOiJYV1JIZWh3ZFFuZHZnemZGY2FXTFJ4ZFN0MXpNUk5VbnNScDFaV2tXSGpjPSIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpodnpvdnptd2FjZ3djcW92eHF4bnZsN2oiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.SYczgKBXy4LCXYQOZQbthjR7F-gREa3AU_AU2IvcmzE",
-    "alice_refresh_2_jti": "XWRHehwdQndvgzfFcaWLRxdSt1zMRNUnsRp1ZWkWHjc=",
-    "alice_refresh_jti": "3qoa+bQS6qUWl1ZAV7WOMY+2jXlDNcHdKJqzsmRQG7c=",
-    "alice_signup_queued_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLnNpZ251cFF1ZXVlZCIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpodnpvdnptd2FjZ3djcW92eHF4bnZsN2oiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.7UuXjkugDuv8ipe3uNAnIDdmUFf0BPjsy5IBSccinA4",
-    "bob_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzptejd6eDdzaDUzZmpsM3hxNndwdmg0ZHMiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.E2TuPr9qIO5LiyWJxSs5jIlqu3nA4TjyE1rxxPjaU5o",
+    "alice_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpkaWVjZ2Rkbnhtd3B2N210cGJ0b3B0aDUiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.ZUBTu4F0JEAjggX-BUiiEEYWyMJL77beq5upHCpX_Fo",
+    "alice_access_typ_jwt": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpkaWVjZ2Rkbnhtd3B2N210cGJ0b3B0aDUiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.Rc-ah4fQks6Q4Y0SPCO0iKOfdXwwymu_J0JAPqw0-Qk",
+    "alice_app_password_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFwcFBhc3MiLCJhdWQiOiJkaWQ6d2ViOmZpeHR1cmUudGVzdCIsInN1YiI6ImRpZDpwbGM6ZGllY2dkZG54bXdwdjdtdHBidG9wdGg1IiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjIxMDAwMDAwMDB9.x8GWmh_0YOi6LU2oBBdTIx9vGdCTwpZEZK8rCflr4e0",
+    "alice_app_password_privileged_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFwcFBhc3NQcml2aWxlZ2VkIiwiYXVkIjoiZGlkOndlYjpmaXh0dXJlLnRlc3QiLCJzdWIiOiJkaWQ6cGxjOmRpZWNnZGRueG13cHY3bXRwYnRvcHRoNSIsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoyMTAwMDAwMDAwfQ.Uvf2kKGni81QyQMLyAJBPjkMHF7kdvmd_zkDFcfpN8M",
+    "alice_expired_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpkaWVjZ2Rkbnhtd3B2N210cGJ0b3B0aDUiLCJpYXQiOjE3MDAwMDAwMDAsImV4cCI6MTcwMDAwMDA2MH0.FdfncMG4chVONBT_dN8A8FKy94S0p-3VSlidMU1WuME",
+    "alice_refresh": "eyJ0eXAiOiJyZWZyZXNoK2p3dCIsImFsZyI6IkhTMjU2In0.eyJzY29wZSI6ImNvbS5hdHByb3RvLnJlZnJlc2giLCJqdGkiOiIzV3ByTEVBTHRwMGtLZ2U5MldoY3l2UGRxT2ErK05rUEJ1TnE4eDErbmJVPSIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpkaWVjZ2Rkbnhtd3B2N210cGJ0b3B0aDUiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.FRoTx1pY481lZB6j8RSXhY7mSOJ_bOAe88PG9fBaomY",
+    "alice_refresh_2": "eyJ0eXAiOiJyZWZyZXNoK2p3dCIsImFsZyI6IkhTMjU2In0.eyJzY29wZSI6ImNvbS5hdHByb3RvLnJlZnJlc2giLCJqdGkiOiJQdWhKTmlOTWxmR2swMjJ1Zi9BQ3F1RlUvWFdYcUFHQlpTY0hwYUdBVmpzPSIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpkaWVjZ2Rkbnhtd3B2N210cGJ0b3B0aDUiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.WLzZRL17t0fEgyujWWzVQN5Pyk0E2ZAQorWw2IP7Yz4",
+    "alice_refresh_2_jti": "PuhJNiNMlfGk022uf/ACquFU/XWXqAGBZScHpaGAVjs=",
+    "alice_refresh_jti": "3WprLEALtp0kKge92WhcyvPdqOa++NkPBuNq8x1+nbU=",
+    "alice_signup_queued_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLnNpZ251cFF1ZXVlZCIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpkaWVjZ2Rkbnhtd3B2N210cGJ0b3B0aDUiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.qlQYdXHQyy2YjebnRAXKDrSFrYNWF8lTRCPP53G7zGs",
+    "bob_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpvamJvbzRoM2EyY3pybXBlbGZ5eW4ybHgiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.MKmEq4yhF8q9CucXvOPUDHjG3kf6yLlHUnJemIDP0pw",
     "exp": 2100000000,
     "iat": 1800000000
   }
