@@ -25,6 +25,19 @@ unused `recoveryKey`, `createdAt`, and `inviteNote` columns are dropped).
 `kysely_migration` ledger and will fail to open a converted database. Back up
 `account.sqlite` before upgrading if a rollback to 1.1.x must remain possible.
 
+
+### Fixed — responses that differed from the reference PDS
+
+- `com.atproto.sync.*` reads of a missing, taken-down, or deactivated
+  repository answer `RepoNotFound`, `RepoTakendown`, or `RepoDeactivated`
+  (HTTP 400) instead of an internal error.
+- `com.atproto.sync.listRepos` and `getRepoStatus` report a taken-down
+  repository as `takendown`, the value the lexicon defines.
+- `com.atproto.repo.describeRepo` answers the same `RepoNotFound`,
+  `RepoTakendown`, and `RepoDeactivated` errors as the reference PDS, and
+  `com.atproto.repo.listRecords` answers `InvalidRequest` for a repository it
+  does not serve, instead of internal errors.
+- `com.atproto.server.describeServer` includes `blobUploadLimit`.
 ## [1.1.0]
 
 ### Changed — password hashing switched from Argon2 to scrypt

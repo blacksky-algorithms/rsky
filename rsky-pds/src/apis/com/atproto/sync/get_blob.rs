@@ -83,7 +83,7 @@ pub async fn get_blob(
             {
                 Err(ApiError::BlobNotFound)
             } else {
-                Err(ApiError::RuntimeError)
+                Err(ApiError::from(error))
             }
             // @TODO: Need to update error handling to return 404 if we have it but it's in tmp
         }

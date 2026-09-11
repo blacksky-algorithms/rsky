@@ -198,6 +198,9 @@ pub struct DescribeServerOutput {
     /// Contact information
     pub contact: DescribeServerRefContact,
     pub did: String,
+    /// Maximum size, in bytes, of a single blob upload.
+    #[serde(rename = "blobUploadLimit", skip_serializing_if = "Option::is_none")]
+    pub blob_upload_limit: Option<u64>,
 }
 
 /// Get a signed token on behalf of the requesting DID for the requested service.

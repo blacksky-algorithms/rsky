@@ -98,6 +98,7 @@ pub struct ListReposOutput {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RepoStatus {
+    #[serde(rename = "takendown")]
     Takedown,
     Suspended,
     Deactivated,

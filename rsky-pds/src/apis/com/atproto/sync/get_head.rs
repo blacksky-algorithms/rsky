@@ -25,7 +25,7 @@ async fn inner_get_head(
         .await
         .map_err(|error| {
             tracing::error!("@LOG: ERROR: {error}");
-            ApiError::RuntimeError
+            ApiError::from(error)
         })?;
     let actor_store = actor_store
         .read(did.clone(), blobstore_factory.blobstore(did.clone()))

@@ -112,7 +112,7 @@ pub async fn open_local_repo(
     did: &str,
     is_user_or_admin: bool,
 ) -> Result<ActorStoreReader, ApiError> {
-    assert_repo_availability(&did.to_string(), is_user_or_admin, account_manager)
+    assert_repo_availability(did, is_user_or_admin, account_manager)
         .await
         .map_err(|error| ApiError::BadRequest("RepoNotFound".to_string(), error.to_string()))?;
     actor_store

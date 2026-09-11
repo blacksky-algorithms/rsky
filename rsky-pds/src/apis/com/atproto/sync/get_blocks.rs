@@ -80,7 +80,7 @@ pub async fn get_blocks(
         Ok(res) => Ok(BlockResponder(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");
-            Err(ApiError::RuntimeError)
+            Err(ApiError::from(error))
         }
     }
 }

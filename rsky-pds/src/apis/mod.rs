@@ -171,6 +171,12 @@ pub enum ApiError {
     BlobNotFound,
     BadRequest(String, String),
     AuthRequiredError(String),
+    /// The repository does not exist on this server.
+    RepoNotFound(String),
+    /// The repository exists but has been taken down.
+    RepoTakendown(String),
+    /// The repository exists but its account is deactivated.
+    RepoDeactivated(String),
     /// Error passed through from an upstream service: status code, error, message
     UpstreamResponse(u16, String, String),
 }
@@ -228,6 +234,11 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 )));
                 res.set_status(Status { code: 400u16 });
                 Ok(res)
+            }
+            ApiError::RepoNotFound(message) => json_error(400, "RepoNotFound", message, __req),
+            ApiError::RepoTakendown(message) => json_error(400, "RepoTakendown", message, __req),
+            ApiError::RepoDeactivated(message) => {
+                json_error(400, "RepoDeactivated", message, __req)
             }
             ApiError::InvalidRequest(message) => {
                 let body = Json(ErrorBody {
@@ -544,9 +555,65 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
     }
 }
 
+fn json_error<'r, 'o: 'r>(
+    status: u16,
+    error: &str,
+    message: String,
+    req: &'r Request<'_>,
+) -> response::Result<'o> {
+    let body = Json(ErrorBody {
+        error: error.to_string(),
+        message,
+    });
+    let mut res = <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, req)?;
+    res.set_header(ContentType(rocket::http::MediaType::const_new(
+        "application",
+        "json",
+        &[],
+    )));
+    res.set_status(Status { code: status });
+    Ok(res)
+}
+
 impl From<Error> for ApiError {
-    fn from(_value: Error) -> Self {
-        ApiError::RuntimeError
+    fn from(value: Error) -> Self {
+        use crate::apis::com::atproto::repo::RepoUnavailable;
+        match value.downcast_ref::<RepoUnavailable>() {
+            Some(RepoUnavailable::NotFound(_)) => ApiError::RepoNotFound(value.to_string()),
+            Some(RepoUnavailable::Takendown(_)) => ApiError::RepoTakendown(value.to_string()),
+            Some(RepoUnavailable::Deactivated(_)) => ApiError::RepoDeactivated(value.to_string()),
+            None => ApiError::RuntimeError,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ApiError;
+    use crate::apis::com::atproto::repo::RepoUnavailable;
+
+    #[test]
+    fn repo_unavailability_keeps_its_reference_error_name() {
+        let did = "did:plc:x".to_string();
+        for (error, expected) in [
+            (
+                RepoUnavailable::NotFound(did.clone()),
+                ApiError::RepoNotFound("Could not find repo for DID: did:plc:x".to_string()),
+            ),
+            (
+                RepoUnavailable::Takendown(did.clone()),
+                ApiError::RepoTakendown("Repo has been takendown: did:plc:x".to_string()),
+            ),
+            (
+                RepoUnavailable::Deactivated(did),
+                ApiError::RepoDeactivated("Repo has been deactivated: did:plc:x".to_string()),
+            ),
+        ] {
+            let converted: ApiError = anyhow::Error::from(error).into();
+            assert_eq!(format!("{converted:?}"), format!("{expected:?}"));
+        }
+        let other: ApiError = anyhow::anyhow!("disk on fire").into();
+        assert!(matches!(other, ApiError::RuntimeError));
     }
 }
 

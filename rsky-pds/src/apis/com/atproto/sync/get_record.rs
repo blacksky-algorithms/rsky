@@ -85,7 +85,7 @@ pub async fn get_record(
         Ok(res) => Ok(BlockResponder(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");
-            Err(ApiError::RuntimeError)
+            Err(ApiError::from(error))
         }
     }
 }

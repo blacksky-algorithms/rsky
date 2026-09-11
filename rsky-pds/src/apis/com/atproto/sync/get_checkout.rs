@@ -49,7 +49,7 @@ pub async fn get_checkout(
         Ok(res) => Ok(CheckoutResponder(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");
-            Err(ApiError::RuntimeError)
+            Err(ApiError::from(error))
         }
     }
 }
