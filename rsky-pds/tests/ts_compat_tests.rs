@@ -9,6 +9,8 @@ mod common;
 use common::{get_client_with_fixture, get_client_with_fixture_copy, Fixture};
 use rocket::http::{ContentType, Header, Status};
 use rocket::local::asynchronous::Client;
+use rsky_oauth::jwk::Jwk;
+use rsky_oauth::jwt::{JwtClaims, JwtHeader};
 use rsky_pds::account_manager::helpers::auth::{
     create_refresh_token_with, CreateTokensOpts, JwtSigner,
 };
@@ -761,4 +763,252 @@ async fn create_session_matches_the_reference() {
             assert_eq!(jwt_part(access, 1)["scope"], expected_scope, "{name}");
         }
     }
+}
+
+fn dpop_key(session: &Value) -> Jwk {
+    serde_json::from_value(session["dpop"]["private_jwk"].clone()).unwrap()
+}
+
+fn dpop_proof(
+    key: &Jwk,
+    method: &str,
+    htu: &str,
+    nonce: Option<&str>,
+    access_token: Option<&str>,
+) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let mut header = JwtHeader::new("ES256");
+    header.typ = Some("dpop+jwt".to_owned());
+    header.jwk = Some(key.to_public());
+    let mut claims = JwtClaims {
+        iat: Some(rsky_pds::account_manager::helpers::auth::now_secs()),
+        jti: Some(format!("jti-{}", rsky_common::get_random_str())),
+        ..Default::default()
+    };
+    claims
+        .extra
+        .insert("htm".to_owned(), Value::String(method.to_owned()));
+    claims
+        .extra
+        .insert("htu".to_owned(), Value::String(htu.to_owned()));
+    if let Some(nonce) = nonce {
+        claims
+            .extra
+            .insert("nonce".to_owned(), Value::String(nonce.to_owned()));
+    }
+    if let Some(token) = access_token {
+        let ath = URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()));
+        claims.extra.insert("ath".to_owned(), Value::String(ath));
+    }
+    rsky_oauth::jwt::sign(&header, &claims, key).unwrap()
+}
+
+/// Sends a DPoP-bound request, retrying once with the server's nonce the
+/// way a client does.
+async fn dpop_request(
+    client: &Client,
+    method: &str,
+    path: &str,
+    key: &Jwk,
+    access_token: Option<&str>,
+    form: Option<&str>,
+) -> (Status, Value, Option<String>) {
+    let body = form.map(|form| (ContentType::Form, form.to_owned()));
+    dpop_request_with(client, method, path, key, access_token, body).await
+}
+
+async fn dpop_request_with(
+    client: &Client,
+    method: &str,
+    path: &str,
+    key: &Jwk,
+    access_token: Option<&str>,
+    body: Option<(ContentType, String)>,
+) -> (Status, Value, Option<String>) {
+    let htu = format!("https://fixture.test{}", path.split('?').next().unwrap());
+    let mut nonce: Option<String> = None;
+    for _ in 0..2 {
+        let proof = dpop_proof(key, method, &htu, nonce.as_deref(), access_token);
+        let mut request = match method {
+            "GET" => client.get(path),
+            _ => client.post(path),
+        };
+        request = request.header(Header::new("DPoP", proof));
+        if let Some(token) = access_token {
+            request = request.header(Header::new("Authorization", format!("DPoP {token}")));
+        }
+        if let Some((content_type, body)) = body.clone() {
+            request = request.header(content_type).body(body);
+        }
+        let response = request.dispatch().await;
+        let status = response.status();
+        let next_nonce = response.headers().get_one("DPoP-Nonce").map(str::to_owned);
+        let www = response
+            .headers()
+            .get_one("WWW-Authenticate")
+            .map(str::to_owned);
+        let body = response.into_string().await.unwrap_or_default();
+        let json: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+        let wants_nonce = json["error"] == "use_dpop_nonce";
+        if wants_nonce && nonce.is_none() && next_nonce.is_some() {
+            nonce = next_nonce;
+            continue;
+        }
+        return (status, json, www);
+    }
+    unreachable!("nonce retry loop")
+}
+
+/// OAuth sessions the reference PDS issued (DPoP-bound HS256 tokens backed
+/// by its token rows) authenticate on rsky-pds with the reference outputs.
+#[tokio::test]
+async fn reference_oauth_sessions_authenticate() {
+    let (fixture, client) = get_client_with_fixture().await;
+    let session = fixture.oauth("alice-fresh");
+    let key = dpop_key(&session);
+    let access = session["token"]["access_token"].as_str().unwrap();
+    let path = "/xrpc/com.atproto.server.getSession";
+    let (status, json, _) = dpop_request(&client, "GET", path, &key, Some(access), None).await;
+    let exercised = fixture.oauth("alice-exercised");
+    assert_eq!(
+        status.code,
+        exercised["session"]["status"].as_u64().unwrap() as u16,
+        "{json}"
+    );
+    assert_eq!(json, exercised["session"]["body"]);
+
+    // a token superseded by a refresh is refused the way the reference refuses it
+    let refreshed = fixture.oauth("alice-refreshed");
+    let stale = refreshed["token"]["access_token"].as_str().unwrap();
+    let (status, json, www) = dpop_request(
+        &client,
+        "GET",
+        path,
+        &dpop_key(&refreshed),
+        Some(stale),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status.code,
+        exercised["session_after_refresh"]["status"]
+            .as_u64()
+            .unwrap() as u16
+    );
+    assert_eq!(json, exercised["session_after_refresh"]["body"]);
+    assert!(www.unwrap_or_default().contains("error=\"invalid_token\""));
+    let current = refreshed["refreshed"]["body"]["access_token"]
+        .as_str()
+        .unwrap();
+    let (status, json, _) = dpop_request(
+        &client,
+        "GET",
+        path,
+        &dpop_key(&refreshed),
+        Some(current),
+        None,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{json}");
+
+    // a method the reference PDS keeps away from OAuth sessions altogether
+    let (status, json, _) = dpop_request_with(
+        &client,
+        "POST",
+        "/xrpc/com.atproto.server.createAppPassword",
+        &key,
+        Some(access),
+        Some((
+            ContentType::JSON,
+            serde_json::json!({"name": "oauth-made"}).to_string(),
+        )),
+    )
+    .await;
+    assert_eq!(
+        status.code,
+        exercised["forbidden_method"]["status"].as_u64().unwrap() as u16,
+        "{json}"
+    );
+    assert_eq!(json, exercised["forbidden_method"]["body"]);
+
+    // a proof signed by another key than the token is bound to
+    let (status, json, _) = dpop_request(
+        &client,
+        "GET",
+        path,
+        &dpop_key(&refreshed),
+        Some(access),
+        None,
+    )
+    .await;
+    assert_eq!(status, Status::Unauthorized);
+    assert_eq!(json["error"], "invalid_token");
+
+    // the OAuth metadata documents match the reference
+    let (status, json) = get_json(&client, "/oauth/jwks").await;
+    assert_eq!(status, Status::Ok);
+    assert_eq!(json, fixture.expected_json("oauth_jwks.json"));
+    let (status, json) = get_json(&client, "/.well-known/oauth-protected-resource").await;
+    assert_eq!(status, Status::Ok);
+    assert_eq!(json, fixture.expected_json("oauth_protected_resource.json"));
+}
+
+/// A refresh token the reference PDS issued rotates on rsky-pds, and a
+/// replay of the consumed refresh token revokes the session.
+#[tokio::test]
+async fn reference_oauth_refresh_tokens_rotate() {
+    let (fixture, _dir, client) = get_client_with_fixture_copy().await;
+    let session = fixture.oauth("alice-fresh");
+    let key = dpop_key(&session);
+    let client_id = session["client_id"].as_str().unwrap();
+    let refresh_token = session["token"]["refresh_token"].as_str().unwrap();
+    let form = format!(
+        "grant_type=refresh_token&refresh_token={}&client_id={}",
+        urlencoding::encode(refresh_token),
+        urlencoding::encode(client_id)
+    );
+    let (status, json, _) =
+        dpop_request(&client, "POST", "/oauth/token", &key, None, Some(&form)).await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(json["token_type"], "DPoP");
+    assert_eq!(json["sub"], fixture.did("alice"));
+    assert_eq!(json["scope"], session["token"]["scope"]);
+    let access = json["access_token"].as_str().unwrap();
+    assert_eq!(
+        jwt_part(access, 0),
+        serde_json::json!({"typ": "at+jwt", "alg": "HS256"})
+    );
+    let claims = jwt_part(access, 1);
+    assert_eq!(claims["iss"], "https://fixture.test");
+    assert_eq!(claims["aud"], "did:web:fixture.test");
+    assert_eq!(claims["cnf"]["jkt"], session["dpop"]["jkt"]);
+    assert!(claims.get("scope").is_none());
+    let path = "/xrpc/com.atproto.server.getSession";
+    let (status, body, _) = dpop_request(&client, "GET", path, &key, Some(access), None).await;
+    assert_eq!(status, Status::Ok, "{body}");
+    assert_eq!(body, fixture.oauth("alice-exercised")["session"]["body"]);
+
+    // the reference-issued access token is superseded
+    let stale = session["token"]["access_token"].as_str().unwrap();
+    let (status, body, _) = dpop_request(&client, "GET", path, &key, Some(stale), None).await;
+    assert_eq!(status, Status::Unauthorized);
+    assert_eq!(
+        body,
+        serde_json::json!({"error": "invalid_token", "message": "Invalid token"})
+    );
+
+    // replaying the consumed refresh token is refused and revokes the session
+    let (status, json, _) =
+        dpop_request(&client, "POST", "/oauth/token", &key, None, Some(&form)).await;
+    let exercised = fixture.oauth("alice-exercised");
+    assert_eq!(
+        status.code,
+        exercised["refresh_replayed"]["status"].as_u64().unwrap() as u16,
+        "{json}"
+    );
+    assert_eq!(json, exercised["refresh_replayed"]["body"]);
+    let (status, _, _) = dpop_request(&client, "GET", path, &key, Some(access), None).await;
+    assert_eq!(status, Status::Unauthorized);
 }

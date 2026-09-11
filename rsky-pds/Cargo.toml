@@ -32,6 +32,7 @@ event-emitter-rs = "0.1.4"
 futures = "0.3.28"
 hex = "0.4.3"
 hmac = "0.12"
+redis = { version = "0.27", default-features = false, features = ["tokio-comp", "connection-manager"] }
 image = "0.25.1"
 indexmap = { version = "1.9.3", features = ["serde-1"] }
 infer = "0.15.0"
@@ -43,7 +44,7 @@ lru = "0.14"
 mailchecker = "6.0.1"
 mailgun-rs = "0.1.10"
 rand = { workspace = true }
-rsky-oauth = { path = "../rsky-oauth", version = "0.3.0" }
+rsky-oauth = { path = "../rsky-oauth", version = "0.4.0" }
 rand_core = { workspace = true }
 regex = "1.10.3"
 reqwest = { version = "0.12.3", features = ["json", "blocking"] }

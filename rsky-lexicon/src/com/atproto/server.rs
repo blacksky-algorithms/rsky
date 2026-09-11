@@ -169,6 +169,7 @@ pub struct CreateSessionOutput {
     pub did: String,
     #[serde(rename = "didDoc", skip_serializing_if = "Option::is_none")]
     pub did_doc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
     #[serde(rename = "emailConfirmed", skip_serializing_if = "Option::is_none")]
     pub email_confirmed: Option<bool>,
@@ -184,6 +185,7 @@ pub struct CreateSessionOutput {
 pub struct GetSessionOutput {
     pub handle: String,
     pub did: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
     #[serde(rename = "emailConfirmed", skip_serializing_if = "Option::is_none")]
     pub email_confirmed: Option<bool>,

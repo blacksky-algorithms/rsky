@@ -262,6 +262,14 @@ impl Fixture {
         self.manifest["secrets"][name].as_str().unwrap().to_owned()
     }
 
+    /// An OAuth session the reference PDS issued, as recorded by the builder.
+    pub fn oauth(&self, name: &str) -> serde_json::Value {
+        serde_json::from_slice(
+            &std::fs::read(self.source.join("oauth").join(format!("{name}.json"))).unwrap(),
+        )
+        .unwrap()
+    }
+
     pub fn expected(&self, name: &str) -> Vec<u8> {
         std::fs::read(self.source.join("expected").join(name)).expect("expected fixture output")
     }

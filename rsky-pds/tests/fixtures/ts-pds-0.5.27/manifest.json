@@ -2,39 +2,39 @@
   "accounts": {
     "alice": {
       "app_password": {
-        "createdAt": "2026-09-11T13:09:37.759Z",
+        "createdAt": "2026-09-11T13:52:33.712Z",
         "name": "phone",
-        "password": "cako-lig4-cgf7-xfnm",
+        "password": "bwvs-lury-qdvj-vmaa",
         "privileged": false
       },
       "app_password_privileged": {
-        "createdAt": "2026-09-11T13:09:37.789Z",
+        "createdAt": "2026-09-11T13:52:33.745Z",
         "name": "chat",
-        "password": "g4j5-om5k-ywp2-52dc",
+        "password": "pze6-42tv-3iit-uigp",
         "privileged": true
       },
       "blob_cid": "bafkreihl6t3dlil5cdlowrv2nafxafbedgvdeihsfaabua3ngencf3u5fi",
-      "did": "did:plc:xnu5z7akmky27sltgn7hbneu",
+      "did": "did:plc:hvzovzmwacgwcqovxqxnvl7j",
       "email": "alice@fixture.invalid",
       "handle": "alice.fixture.test",
       "password": "fixture-password-123",
-      "repo_rev": "3mvan7ylpmc2w",
+      "repo_rev": "3mvapmr7hrs22",
       "state": "active"
     },
     "bob": {
-      "did": "did:plc:p2jidewytiik24tsb37m4ktc",
+      "did": "did:plc:mz7zx7sh53fjl3xq6wpvh4ds",
       "handle": "bob.fixture.test",
       "password": "fixture-password-123",
       "state": "deactivated"
     },
     "carol": {
-      "did": "did:plc:e56xi43bwhhrzjgntitmqt64",
+      "did": "did:plc:eel7xpaysy4e3e6fhvjyp5kw",
       "handle": "carol.fixture.test",
       "password": "fixture-password-123",
       "state": "takendown"
     },
     "dave": {
-      "did": "did:plc:4jga5jladekhy5csoe62kfkm",
+      "did": "did:plc:qy46fiiwvsmul7cnbg66g6fb",
       "handle": "dave.fixture.test",
       "note": "DID document deliberately absent from plc/ and did_cache.sqlite",
       "password": "fixture-password-123",
@@ -43,9 +43,9 @@
   },
   "expected_sha256": {
     "getBlob.png": "ebf4f635a17d10d6eb46ba680b70142419aa3220f228001a036d311a22ee9d2a",
-    "getRepo.car": "17462bbc5a10b0c5770951fb5820eae9ac2fb34f5c6d235c1de94868f559ff61",
-    "syncGetRecord_missing.car": "9984c1aa65bca8e0eb90a673d6b284824f1d8eab349a0266c1b284f261202988",
-    "syncGetRecord_profile.car": "83523e809bb14060499bcf4e70b190f2b4461a2d354536387c7e1608ed065b8d"
+    "getRepo.car": "a1228d5db59273e44a7e160ce95535a1e2958783fac82b3639bc9ed6eac358da",
+    "syncGetRecord_missing.car": "7024169aecb5cf6eaa75e7a13f55ea00835b539a2b14fdacae1a1404d01eed56",
+    "syncGetRecord_profile.car": "94606ef228b11c56b0b41d35a0bf59faece2bad1a794caba773dd65f23b79576"
   },
   "expected_status": {
     "alice_listRecords_limit101.json": "400",
@@ -103,7 +103,7 @@
     "syncGetRecord_profile.car": "200"
   },
   "image": "blacksky/pds:0.5.27-bsky.2-local",
-  "pds_image_commit": "8a1f544a77f6c757247fdc8275c802b1ba102406",
+  "pds_image_commit": "c52276bdb7094184ff93400f43da8333355f5ba4",
   "secrets": {
     "PDS_ADMIN_PASSWORD": "fixture-admin-password",
     "PDS_DPOP_SECRET": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
@@ -115,17 +115,17 @@
     "PDS_SERVICE_HANDLE_DOMAINS": ".fixture.test"
   },
   "tokens": {
-    "alice_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzp4bnU1ejdha21reTI3c2x0Z243aGJuZXUiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.e_cLInZ5IqPR-RmKFz7saEGX3hn8nb986hOFW7_VaRc",
-    "alice_access_typ_jwt": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzp4bnU1ejdha21reTI3c2x0Z243aGJuZXUiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.Wo4_CIkZsPNo5pWgu1IkvkkWIPoVYJOaMFz0buNgG9E",
-    "alice_app_password_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFwcFBhc3MiLCJhdWQiOiJkaWQ6d2ViOmZpeHR1cmUudGVzdCIsInN1YiI6ImRpZDpwbGM6eG51NXo3YWtta3kyN3NsdGduN2hibmV1IiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjIxMDAwMDAwMDB9.2pD9FPIbZCrlMWw9CUJZOhzvhw81OJRiLTCnZMUSI8Y",
-    "alice_app_password_privileged_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFwcFBhc3NQcml2aWxlZ2VkIiwiYXVkIjoiZGlkOndlYjpmaXh0dXJlLnRlc3QiLCJzdWIiOiJkaWQ6cGxjOnhudTV6N2FrbWt5MjdzbHRnbjdoYm5ldSIsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoyMTAwMDAwMDAwfQ.KFqLCqEiu6xPnOOJZ36hjbwoXhiEBmp2N7Aa-chR4oY",
-    "alice_expired_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzp4bnU1ejdha21reTI3c2x0Z243aGJuZXUiLCJpYXQiOjE3MDAwMDAwMDAsImV4cCI6MTcwMDAwMDA2MH0.1otq6vb6KCantHdwtiOrbHvdK_aVR48MuFNJpQrvgdA",
-    "alice_refresh": "eyJ0eXAiOiJyZWZyZXNoK2p3dCIsImFsZyI6IkhTMjU2In0.eyJzY29wZSI6ImNvbS5hdHByb3RvLnJlZnJlc2giLCJqdGkiOiJ5WGVtNWFiQk9hdEczanNwRnBaNkMxUVArZHhxTnRKMFZ5N0NGUFdibkJ3PSIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzp4bnU1ejdha21reTI3c2x0Z243aGJuZXUiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.pSInJy5Zuh0D73SO15fGLUS6hy8ek4HYE84Fzz4k13o",
-    "alice_refresh_2": "eyJ0eXAiOiJyZWZyZXNoK2p3dCIsImFsZyI6IkhTMjU2In0.eyJzY29wZSI6ImNvbS5hdHByb3RvLnJlZnJlc2giLCJqdGkiOiJqaGFwWENsWW16QWhLTGVnZVZveEdOK2FZUXR2L1FUUk1pOGFZSzBQTzBzPSIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzp4bnU1ejdha21reTI3c2x0Z243aGJuZXUiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0._DdJzPxR3-FlatSrqBISNDcUYFfVfErqFDH5s0V47Gc",
-    "alice_refresh_2_jti": "jhapXClYmzAhKLegeVoxGN+aYQtv/QTRMi8aYK0PO0s=",
-    "alice_refresh_jti": "yXem5abBOatG3jspFpZ6C1QP+dxqNtJ0Vy7CFPWbnBw=",
-    "alice_signup_queued_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLnNpZ251cFF1ZXVlZCIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzp4bnU1ejdha21reTI3c2x0Z243aGJuZXUiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.EATuzQxMh7BJMwv9ebo1e7vi8bJBAZ6BYJlyIYCkwzc",
-    "bob_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpwMmppZGV3eXRpaWsyNHRzYjM3bTRrdGMiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.USRsizo8zKKjpJNILsTrkqWeCVw_IqrpGv9NbKJU3lo",
+    "alice_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpodnpvdnptd2FjZ3djcW92eHF4bnZsN2oiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.RjMrY2QP_9R28A2b5j47Ih8YksTIGuklDIHW45d4P7Q",
+    "alice_access_typ_jwt": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpodnpvdnptd2FjZ3djcW92eHF4bnZsN2oiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.RbzMFldSw-_RCGJZr-VedjM-ZXG-AeuLUY3vv8MpM_w",
+    "alice_app_password_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFwcFBhc3MiLCJhdWQiOiJkaWQ6d2ViOmZpeHR1cmUudGVzdCIsInN1YiI6ImRpZDpwbGM6aHZ6b3Z6bXdhY2d3Y3FvdnhxeG52bDdqIiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjIxMDAwMDAwMDB9.RXJUe18e-hsIYF6eCzTI3PL1HalisUxlDERMjew2iNE",
+    "alice_app_password_privileged_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFwcFBhc3NQcml2aWxlZ2VkIiwiYXVkIjoiZGlkOndlYjpmaXh0dXJlLnRlc3QiLCJzdWIiOiJkaWQ6cGxjOmh2em92em13YWNnd2Nxb3Z4cXhudmw3aiIsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoyMTAwMDAwMDAwfQ.y-_z04yJONeS43rdPMXYUA4i1hOtXwPAFx9r47V0e2M",
+    "alice_expired_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpodnpvdnptd2FjZ3djcW92eHF4bnZsN2oiLCJpYXQiOjE3MDAwMDAwMDAsImV4cCI6MTcwMDAwMDA2MH0.WSeVWttW62GAnYHq2XBmTsBNHaGo2PEAPrCEGvLiYEg",
+    "alice_refresh": "eyJ0eXAiOiJyZWZyZXNoK2p3dCIsImFsZyI6IkhTMjU2In0.eyJzY29wZSI6ImNvbS5hdHByb3RvLnJlZnJlc2giLCJqdGkiOiIzcW9hK2JRUzZxVVdsMVpBVjdXT01ZKzJqWGxETmNIZEtKcXpzbVJRRzdjPSIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpodnpvdnptd2FjZ3djcW92eHF4bnZsN2oiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.-ft3xQaHLOm606DR49Ijf31IyezVILifByn34R4TogU",
+    "alice_refresh_2": "eyJ0eXAiOiJyZWZyZXNoK2p3dCIsImFsZyI6IkhTMjU2In0.eyJzY29wZSI6ImNvbS5hdHByb3RvLnJlZnJlc2giLCJqdGkiOiJYV1JIZWh3ZFFuZHZnemZGY2FXTFJ4ZFN0MXpNUk5VbnNScDFaV2tXSGpjPSIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpodnpvdnptd2FjZ3djcW92eHF4bnZsN2oiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.SYczgKBXy4LCXYQOZQbthjR7F-gREa3AU_AU2IvcmzE",
+    "alice_refresh_2_jti": "XWRHehwdQndvgzfFcaWLRxdSt1zMRNUnsRp1ZWkWHjc=",
+    "alice_refresh_jti": "3qoa+bQS6qUWl1ZAV7WOMY+2jXlDNcHdKJqzsmRQG7c=",
+    "alice_signup_queued_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLnNpZ251cFF1ZXVlZCIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpodnpvdnptd2FjZ3djcW92eHF4bnZsN2oiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.7UuXjkugDuv8ipe3uNAnIDdmUFf0BPjsy5IBSccinA4",
+    "bob_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzptejd6eDdzaDUzZmpsM3hxNndwdmg0ZHMiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.E2TuPr9qIO5LiyWJxSs5jIlqu3nA4TjyE1rxxPjaU5o",
     "exp": 2100000000,
     "iat": 1800000000
   }

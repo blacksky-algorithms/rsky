@@ -158,6 +158,12 @@ pub enum AuthError {
     ExpiredToken,
     #[error("AuthMissing: `Authentication Required`")]
     AuthMissing,
+    /// A rejected OAuth credential, rendered with its OAuth error code.
+    #[error("{0}: `{1}`")]
+    OAuth(String, String),
+    /// A credential kind the method does not accept.
+    #[error("Forbidden: `{0}`")]
+    Forbidden(String),
     #[error("BadJwt: `{0}`")]
     BadJwt(String),
     #[error("BadJwtAudience: `{0}`")]
@@ -264,6 +270,10 @@ pub async fn access_check(
                 Status::Unauthorized,
                 AuthError::AuthRequired(error.to_string()),
             )),
+            Some(AuthError::OAuth(code, description)) => Outcome::Error((
+                Status::Unauthorized,
+                AuthError::OAuth(code.clone(), description.clone()),
+            )),
             _ => Outcome::Error(bearer_failure(error)),
         },
     }
@@ -363,6 +373,15 @@ impl<'r> FromRequest<'r> for AccessFull {
     type Error = AuthError;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        // full-access methods manage credentials themselves; the reference
+        // PDS does not let an OAuth session reach them at all
+        if dpop_token_from_req(req).is_some() {
+            let error = AuthError::Forbidden(
+                "OAuth credentials are not supported for this endpoint".to_string(),
+            );
+            req.local_cache(|| Some(ApiError::from(&error)));
+            return Outcome::Error((Status::Forbidden, error));
+        }
         match access_check(req, vec![AuthScope::Access], None).await {
             Outcome::Success(access) => Outcome::Success(AccessFull { access }),
             Outcome::Error(error) => {
@@ -1061,8 +1080,9 @@ async fn validate_dpop_access_token(
             );
             // A rejected access token (invalid signature, or revoked/unknown
             // in the token store) is an authentication failure, surfaced as
-            // 401 rather than a 400 client error.
-            return Err(anyhow::Error::new(AuthError::AuthRequired(
+            // 401 with its OAuth error code like the reference PDS.
+            return Err(anyhow::Error::new(AuthError::OAuth(
+                error.error_code().to_string(),
                 error.error_description().to_string(),
             )));
         }

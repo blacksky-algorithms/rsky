@@ -44,6 +44,22 @@ app-password sessions, and rejected credentials answer with the reference
 names: `AuthMissing` (401), `AuthenticationRequired` (401), `InvalidToken`
 (400), `ExpiredToken` (400), `AccountTakedown` (401).
 
+### Added — reference-compatible OAuth sessions
+
+With `PDS_JWT_SECRET` set the OAuth provider signs access tokens with
+HMAC-SHA256 over the shared secret and publishes an empty JWK set, as the
+reference PDS does. Access tokens carry the reference claim set, and
+verification is stateful: the stored session row is authoritative for the
+DPoP key binding, the expiry, and the granted scope (the `token.scope`
+column), so a token superseded by a refresh or revoked elsewhere is refused
+at once and a session granted a narrower scope than its token claims is
+held to the stored grant. DPoP proof replay is tracked in redis under the
+reference key scheme when `PDS_REDIS_SCRATCH_ADDRESS` is set, so a proof
+consumed by one process is refused by every other. Trusted first-party
+clients get the extended session lifetimes. Rejected OAuth credentials
+answer with their OAuth error code (`invalid_token`, `use_dpop_nonce`) and
+a 401. rsky-oauth 0.4.0 carries the signing-key and replay-store changes.
+
 ### Fixed — responses that differed from the reference PDS
 
 - `com.atproto.sync.*` reads of a missing, taken-down, or deactivated

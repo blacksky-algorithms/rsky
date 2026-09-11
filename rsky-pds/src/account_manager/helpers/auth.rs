@@ -183,10 +183,19 @@ impl JwtSigner {
     }
 
     pub fn from_env() -> Result<Self> {
-        if let Some(secret) = env_str("PDS_JWT_SECRET") {
+        Self::from_config(
+            env_str("PDS_JWT_SECRET"),
+            env_str("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX"),
+        )
+    }
+
+    /// The shared secret wins when both are configured, so a deployment
+    /// interoperating with the reference PDS never issues ES256K tokens.
+    pub fn from_config(secret: Option<String>, private_key_hex: Option<String>) -> Result<Self> {
+        if let Some(secret) = secret {
             return Ok(Self::hmac(secret.as_bytes()));
         }
-        match env_str("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX") {
+        match private_key_hex {
             Some(private_key_hex) => Self::k256(&private_key_hex),
             None => bail!("PDS_JWT_SECRET or PDS_JWT_KEY_K256_PRIVATE_KEY_HEX must be set"),
         }
@@ -964,21 +973,18 @@ mod tests {
     }
 
     #[test]
-    fn signer_from_env_prefers_the_shared_secret() {
-        std::env::set_var("PDS_JWT_SECRET", "secret");
+    fn signer_configuration_prefers_the_shared_secret() {
+        let secret = Some("secret".to_owned());
+        let k256 = Some(K256_HEX.to_owned());
         assert!(matches!(
-            JwtSigner::from_env().unwrap(),
+            JwtSigner::from_config(secret.clone(), k256.clone()).unwrap(),
             JwtSigner::Hmac { .. }
         ));
-        std::env::remove_var("PDS_JWT_SECRET");
-        std::env::set_var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX", K256_HEX);
         assert!(matches!(
-            JwtSigner::from_env().unwrap(),
+            JwtSigner::from_config(None, k256).unwrap(),
             JwtSigner::K256 { .. }
         ));
-        std::env::remove_var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX");
-        assert!(JwtSigner::from_env().is_err());
-        std::env::set_var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX", K256_HEX);
+        assert!(JwtSigner::from_config(None, None).is_err());
     }
 
     #[test]

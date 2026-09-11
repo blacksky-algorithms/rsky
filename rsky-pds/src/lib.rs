@@ -235,7 +235,8 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         account_db.clone(),
         cfg.service.public_url.clone(),
         cfg.service.did.clone(),
-    );
+    )
+    .await;
     let account_manager = AccountManager::new(account_db);
 
     let sequencer = SharedSequencer {

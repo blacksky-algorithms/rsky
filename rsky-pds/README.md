@@ -77,6 +77,7 @@ Mount a volume at `PDS_DATA_DIRECTORY` to persist data.
 | `PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX` | K-256 key for signing repo commits |
 | `PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX` | K-256 PLC rotation key |
 | `PDS_DPOP_SECRET` | 32-byte hex secret for OAuth DPoP nonce rotation |
+| `PDS_REDIS_SCRATCH_ADDRESS` | `host:port` of a redis used to track DPoP proof replay across processes (with `PDS_REDIS_SCRATCH_PASSWORD`); in-memory when unset |
 | `PDS_RECOVERY_DID_KEY` | Optional additional PLC rotation key |
 
 ### Identity

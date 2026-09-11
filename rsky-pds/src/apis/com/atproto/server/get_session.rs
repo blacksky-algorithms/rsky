@@ -14,7 +14,15 @@ pub async fn get_session(
     auth: AccessStandard,
     account_manager: AccountManager,
 ) -> Result<Json<GetSessionOutput>, ApiError> {
-    let did = auth.access.credentials.unwrap().did.unwrap();
+    let credentials = auth.access.credentials.unwrap();
+    let did = credentials.did.clone().unwrap();
+    // an OAuth session sees the email only when it was granted access to it
+    let show_email = match (credentials.r#type.as_str(), &credentials.granted_scopes) {
+        ("oauth", Some(scopes)) => scopes
+            .iter()
+            .any(|scope| scope == "transition:email" || scope.starts_with("account:email")),
+        _ => true,
+    };
     let flags = Some(AvailabilityFlags {
         include_deactivated: Some(true),
         include_taken_down: Some(false),
@@ -26,9 +34,9 @@ pub async fn get_session(
             Ok(Json(GetSessionOutput {
                 handle: user.handle.unwrap_or(INVALID_HANDLE.to_string()),
                 did: user.did,
-                email: user.email,
+                email: user.email.filter(|_| show_email),
                 did_doc: None,
-                email_confirmed: Some(user.email_confirmed_at.is_some()),
+                email_confirmed: show_email.then_some(user.email_confirmed_at.is_some()),
                 active: Some(active),
                 status: status.map(|status| status.as_str().to_owned()),
             }))

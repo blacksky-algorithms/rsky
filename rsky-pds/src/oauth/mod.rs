@@ -6,8 +6,10 @@ use rocket::fairing::{Fairing, Info, Kind};
 use rocket::http::{Cookie, CookieJar, Header, SameSite};
 use rocket::{Request, Response};
 use rsky_common::env::{env_list, env_str};
-use rsky_oauth::dpop::{DpopManager, DpopNonce, InMemoryReplayStore, DEFAULT_ROTATION_INTERVAL};
-use rsky_oauth::jwk::{EcCurve, Jwk};
+use rsky_oauth::dpop::{
+    DpopManager, DpopNonce, InMemoryReplayStore, ReplayStore, DEFAULT_ROTATION_INTERVAL,
+};
+use rsky_oauth::jwk::{EcCurve, Jwk, SigningKey};
 use rsky_oauth::store::DeviceData;
 use rsky_oauth::{OAuthError, OAuthProvider, OAuthProviderConfig, ScopeExpander};
 use sha2::{Digest, Sha256};
@@ -15,6 +17,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod fetcher;
+pub mod replay;
 pub mod routes;
 pub mod templates;
 
@@ -47,13 +50,60 @@ pub struct SharedOAuthProvider {
     pub provider: Arc<OAuthProvider>,
 }
 
+/// The access-token signing key: the shared session secret when the server
+/// is configured to interoperate with the reference PDS, otherwise the K-256
+/// JWT key.
+fn signing_key_from_env() -> SigningKey {
+    signing_key_for(
+        env_str("PDS_JWT_SECRET"),
+        env_str("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX"),
+    )
+}
+
+fn signing_key_for(secret: Option<String>, private_key_hex: Option<String>) -> SigningKey {
+    if let Some(secret) = secret {
+        return SigningKey::Symmetric(secret.into_bytes());
+    }
+    let private_key =
+        private_key_hex.expect("PDS_JWT_SECRET or PDS_JWT_KEY_K256_PRIVATE_KEY_HEX must be set");
+    let key_bytes = hex::decode(private_key).expect("invalid provider signing key hex");
+    SigningKey::Ec(
+        Jwk::from_private_key_bytes(EcCurve::K256, &key_bytes)
+            .expect("invalid provider signing key"),
+    )
+}
+
+/// DPoP replay tracking shared through redis when `PDS_REDIS_SCRATCH_ADDRESS`
+/// names one, otherwise kept in memory.
+async fn replay_store_from_env() -> Box<dyn ReplayStore> {
+    replay_store_for(
+        env_str("PDS_REDIS_SCRATCH_ADDRESS"),
+        env_str("PDS_REDIS_SCRATCH_PASSWORD"),
+    )
+    .await
+}
+
+async fn replay_store_for(
+    address: Option<String>,
+    password: Option<String>,
+) -> Box<dyn ReplayStore> {
+    let Some(address) = address else {
+        return Box::new(InMemoryReplayStore::default());
+    };
+    let auth = password
+        .map(|password| format!(":{password}@"))
+        .unwrap_or_default();
+    let url = format!("redis://{auth}{address}");
+    match replay::RedisReplayStore::connect(&url).await {
+        Ok(store) => Box::new(store),
+        Err(error) => panic!("PDS_REDIS_SCRATCH_ADDRESS is set but redis is unreachable: {error}"),
+    }
+}
+
 impl SharedOAuthProvider {
-    pub fn new(account_db: Db, issuer: String, audience: String) -> Self {
-        let private_key = std::env::var("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX")
-            .expect("PDS_JWT_KEY_K256_PRIVATE_KEY_HEX must be set");
-        let key_bytes = hex::decode(private_key).expect("invalid provider signing key hex");
-        let signing_key = Jwk::from_private_key_bytes(EcCurve::K256, &key_bytes)
-            .expect("invalid provider signing key");
+    pub async fn new(account_db: Db, issuer: String, audience: String) -> Self {
+        let signing_key = signing_key_from_env();
+        let replay_store = replay_store_from_env().await;
         let nonce = match env_str("PDS_DPOP_SECRET") {
             Some(secret_hex) => {
                 let secret: [u8; 32] = hex::decode(secret_hex)
@@ -71,7 +121,7 @@ impl SharedOAuthProvider {
             signing_key,
             fetcher: Arc::new(fetcher::HttpClientMetadataFetcher::new()),
             store: Arc::new(PdsOAuthStore::new(account_db)),
-            dpop: DpopManager::new(Some(nonce), Box::new(InMemoryReplayStore::default())),
+            dpop: DpopManager::new(Some(nonce), replay_store),
             trusted_clients: env_list("PDS_OAUTH_TRUSTED_CLIENTS"),
             scope_expander: Some(Arc::new(IncludeExpander::default())),
         });
@@ -189,5 +239,56 @@ impl Fairing for OAuthHeaders {
         if let Some(www_authenticate) = &headers.www_authenticate {
             response.set_header(Header::new("WWW-Authenticate", www_authenticate.clone()));
         }
+    }
+}
+
+#[cfg(test)]
+mod configuration_tests {
+    use super::*;
+
+    const K256_HEX: &str = "9d5907143471e8f0e8df0f8b9512a8c5377878ee767f18fcf961055ecfc071cd";
+
+    #[test]
+    fn signing_key_prefers_the_shared_secret() {
+        assert!(matches!(
+            signing_key_for(Some("secret".to_owned()), Some(K256_HEX.to_owned())),
+            SigningKey::Symmetric(_)
+        ));
+        assert!(matches!(
+            signing_key_for(None, Some(K256_HEX.to_owned())),
+            SigningKey::Ec(_)
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "must be set")]
+    fn signing_key_requires_a_key() {
+        signing_key_for(None, None);
+    }
+
+    #[tokio::test]
+    async fn replay_store_is_in_memory_without_redis() {
+        let store = replay_store_for(None, None).await;
+        assert!(store.unique("DPoP", "a", 1000).await.unwrap());
+        assert!(!store.unique("DPoP", "a", 1000).await.unwrap());
+    }
+
+    /// Runs against the redis named by `TEST_REDIS_URL`, skipped without one.
+    #[tokio::test]
+    async fn replay_store_uses_redis_when_configured() {
+        let Ok(url) = std::env::var("TEST_REDIS_URL") else {
+            return;
+        };
+        let address = url.trim_start_matches("redis://").to_owned();
+        let store = replay_store_for(Some(address), Some(String::new())).await;
+        let nonce = format!("jti-{}", rsky_common::get_random_str());
+        assert!(store.unique("DPoP", &nonce, 60_000).await.unwrap());
+        assert!(!store.unique("DPoP", &nonce, 60_000).await.unwrap());
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "redis is unreachable")]
+    async fn replay_store_refuses_to_start_without_its_redis() {
+        replay_store_for(Some("127.0.0.1:1".to_owned()), None).await;
     }
 }

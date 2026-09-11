@@ -560,7 +560,7 @@ async fn oauth_revocation() {
         .headers()
         .get_one("WWW-Authenticate")
         .unwrap()
-        .contains("revoked"));
+        .contains("error_description=\"Invalid token\""));
 }
 
 #[tokio::test]

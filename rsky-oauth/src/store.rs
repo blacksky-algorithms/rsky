@@ -523,6 +523,7 @@ mod tests {
             did: "did:plc:alice".to_string(),
             parameters,
             code: None,
+            scope: None,
         };
         assert!(store
             .rotate_token("tok-1", "tok-2", "ref-2", 1, 2)

@@ -86,8 +86,10 @@ async fn check_space_proof(
                 dpop_headers: &refs,
                 access_token,
             },
+            None,
             now_secs(),
         )
+        .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     proof.ok_or_else(|| anyhow::anyhow!("missing DPoP proof"))
 }

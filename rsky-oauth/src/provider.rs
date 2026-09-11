@@ -1,7 +1,7 @@
 use crate::client::{Client, ClientManager, ClientMetadataFetcher, ParRequest};
 use crate::dpop::{DpopManager, DpopProof, DpopRequest};
 use crate::error::OAuthError;
-use crate::jwk::{Jwk, JwkSet};
+use crate::jwk::{JwkSet, SigningKey};
 use crate::jwt;
 use crate::jwt::{JwtClaims, JwtHeader};
 use crate::request::{
@@ -84,8 +84,8 @@ pub struct OAuthProviderConfig {
     pub issuer: String,
     /// The `aud` of issued access tokens (the PDS service DID).
     pub audience: String,
-    /// Private EC key used to sign access tokens.
-    pub signing_key: Jwk,
+    /// The key access tokens are signed with.
+    pub signing_key: SigningKey,
     pub fetcher: Arc<dyn ClientMetadataFetcher>,
     pub store: Arc<dyn OAuthStore>,
     pub dpop: DpopManager,
@@ -99,7 +99,7 @@ pub struct OAuthProviderConfig {
 pub struct OAuthProvider {
     issuer: String,
     audience: String,
-    signing_key: Jwk,
+    signing_key: SigningKey,
     clients: ClientManager,
     store: Arc<dyn OAuthStore>,
     dpop: DpopManager,
@@ -163,7 +163,7 @@ impl OAuthProvider {
         now: u64,
     ) -> Result<ParResponse, OAuthError> {
         let (client, client_auth) = self.authenticated_client(credentials, now).await?;
-        let proof = self.dpop.check_proof(dpop, now)?;
+        let proof = self.dpop.check_proof(dpop, Some(&client.id), now).await?;
         let mut parameters = client.validate_request(request)?;
         parameters.dpop_jkt = proof.map(|proof| proof.jkt);
         let request_id = generate_request_id();
@@ -402,7 +402,7 @@ impl OAuthProvider {
         now: u64,
     ) -> Result<TokenResponse, OAuthError> {
         let (client, client_auth) = self.authenticated_client(credentials, now).await?;
-        let Some(proof) = self.dpop.check_proof(dpop, now)? else {
+        let Some(proof) = self.dpop.check_proof(dpop, Some(&client.id), now).await? else {
             return Err(OAuthError::InvalidDpopProof(
                 "DPoP proof is required".to_string(),
             ));
@@ -497,13 +497,15 @@ impl OAuthProvider {
             .then(generate_refresh_token);
         let mut parameters = data.parameters.clone();
         parameters.dpop_jkt = Some(jkt.clone());
-        // The client metadata was validated against the literal granted scope
-        // (with `include:`); the token carries the expanded scope, so a
-        // resource server or client reading the token sees the effective
-        // grants. Stored on the token so refreshes stay consistent.
-        if let Some(expander) = &self.scope_expander {
-            parameters.scope = expander.expand(&parameters.scope).await;
-        }
+        // The client metadata was validated against the literal requested
+        // scope (with `include:`); the granted scope stored with the session
+        // is the expanded form, so a resource server sees the effective
+        // grants and refreshes stay consistent. The requested parameters are
+        // kept as they were, the way the reference PDS stores them.
+        let granted_scope = match &self.scope_expander {
+            Some(expander) => expander.expand(&parameters.scope).await,
+            None => parameters.scope.clone(),
+        };
         let token_data = TokenData {
             created_at: now,
             updated_at: now,
@@ -512,8 +514,9 @@ impl OAuthProvider {
             client_auth,
             device_id: data.device_id.clone(),
             did: account.did.clone(),
-            parameters: parameters.clone(),
+            parameters,
             code: Some(code.to_string()),
+            scope: Some(granted_scope),
         };
         self.store
             .create_token(&token_id, &token_data, refresh_token.as_deref())
@@ -549,7 +552,7 @@ impl OAuthProvider {
         if token.current_refresh_token.as_deref() != Some(refresh_token) {
             self.store.delete_token(&token.token_id).await?;
             return Err(OAuthError::InvalidGrant(
-                "refresh token replayed".to_string(),
+                "Refresh token replayed".to_string(),
             ));
         }
         match self
@@ -595,7 +598,9 @@ impl OAuthProvider {
                 "DPoP key does not match the session key".to_string(),
             ));
         }
-        token.data.validate_refresh_lifetimes(now)?;
+        token
+            .data
+            .validate_refresh_lifetimes(now, self.trusted_clients.contains(&client.id))?;
         let new_token_id = generate_token_id();
         let new_refresh_token = generate_refresh_token();
         self.store
@@ -625,7 +630,9 @@ impl OAuthProvider {
             .dpop_jkt
             .as_deref()
             .ok_or_else(|| OAuthError::ServerError("missing DPoP key binding".to_string()))?;
-        let mut header = JwtHeader::new(self.signing_key.curve()?.alg());
+        // The same claim set as the reference PDS's stateful tokens: the
+        // scope lives with the stored session, not in the token.
+        let mut header = JwtHeader::new(self.signing_key.alg()?);
         header.typ = Some(ACCESS_TOKEN_TYP.to_string());
         let mut claims = JwtClaims {
             iss: Some(self.issuer.clone()),
@@ -636,20 +643,17 @@ impl OAuthProvider {
             jti: Some(token_id.to_string()),
             ..Default::default()
         };
-        claims
-            .extra
-            .insert("scope".to_string(), json!(data.parameters.scope));
+        claims.extra.insert("cnf".to_string(), json!({"jkt": jkt}));
         claims
             .extra
             .insert("client_id".to_string(), json!(data.client_id));
-        claims.extra.insert("cnf".to_string(), json!({"jkt": jkt}));
-        let access_token = jwt::sign(&header, &claims, &self.signing_key)?;
+        let access_token = jwt::sign_with(&header, &claims, &self.signing_key)?;
         Ok(TokenResponse {
             access_token,
             token_type: "DPoP".to_string(),
             expires_in: TOKEN_MAX_AGE,
             refresh_token,
-            scope: data.parameters.scope.clone(),
+            scope: data.granted_scope().to_string(),
             sub: data.did.clone(),
         })
     }
@@ -687,13 +691,18 @@ impl OAuthProvider {
 
     /// Validates a DPoP-bound access token presented to the resource
     /// server, including revocation via the store.
+    /// Verifies a DPoP-bound access token the way the reference PDS does in
+    /// its stateful mode: the signature and standard claims must hold, and
+    /// then the stored session is authoritative for the key binding, the
+    /// expiry, and the granted scope, so revocation and rotation take effect
+    /// immediately.
     pub async fn verify_access_token(
         &self,
         access_token: &str,
         dpop: &DpopRequest<'_>,
         now: u64,
     ) -> Result<VerifiedAccess, OAuthError> {
-        let decoded = jwt::verify(access_token, &self.signing_key.to_public())?;
+        let decoded = jwt::verify_with(access_token, &self.signing_key)?;
         decoded.header.validate_typ(ACCESS_TOKEN_TYP)?;
         decoded.claims.validate_time(now, jwt::DEFAULT_CLOCK_SKEW)?;
         decoded.claims.validate_iss(&self.issuer)?;
@@ -711,18 +720,6 @@ impl OAuthProvider {
                 "malformed access token".to_string(),
             ));
         };
-        let scope = decoded
-            .claims
-            .extra
-            .get("scope")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let scopes: Vec<String> = scope.split_ascii_whitespace().map(String::from).collect();
-        if !scopes.iter().any(|scope| scope == SCOPE_ATPROTO) {
-            return Err(OAuthError::InvalidToken(format!(
-                "access token is missing the \"{SCOPE_ATPROTO}\" scope"
-            )));
-        }
         let Some(jkt) = decoded
             .claims
             .extra
@@ -734,7 +731,29 @@ impl OAuthProvider {
                 "access token is not DPoP-bound".to_string(),
             ));
         };
-        let Some(proof) = self.dpop.check_proof(dpop, now)? else {
+        let Some(stored) = self.store.read_token(&token_id).await? else {
+            return Err(OAuthError::InvalidToken("Invalid token".to_string()));
+        };
+        if stored.data.did != did || stored.data.parameters.dpop_jkt.as_deref() != Some(jkt) {
+            self.store.delete_token(&token_id).await?;
+            return Err(OAuthError::InvalidToken("Invalid token".to_string()));
+        }
+        if stored.data.expires_at <= now {
+            self.store.delete_token(&token_id).await?;
+            return Err(OAuthError::InvalidToken("Token expired".to_string()));
+        }
+        let scopes: Vec<String> = stored
+            .data
+            .granted_scope()
+            .split_ascii_whitespace()
+            .map(String::from)
+            .collect();
+        if !scopes.iter().any(|scope| scope == SCOPE_ATPROTO) {
+            return Err(OAuthError::InvalidToken(format!(
+                "access token is missing the \"{SCOPE_ATPROTO}\" scope"
+            )));
+        }
+        let Some(proof) = self.dpop.check_proof(dpop, None, now).await? else {
             return Err(OAuthError::InvalidDpopProof(
                 "DPoP proof is required".to_string(),
             ));
@@ -742,17 +761,6 @@ impl OAuthProvider {
         if proof.jkt != jkt {
             return Err(OAuthError::InvalidToken(
                 "DPoP key does not match the token binding".to_string(),
-            ));
-        }
-        // Stateful check: honors revocation and rotation.
-        let Some(stored) = self.store.read_token(&token_id).await? else {
-            return Err(OAuthError::InvalidToken(
-                "access token was revoked".to_string(),
-            ));
-        };
-        if stored.data.did != did || stored.data.expires_at <= now {
-            return Err(OAuthError::InvalidToken(
-                "access token has expired".to_string(),
             ));
         }
         Ok(VerifiedAccess {
@@ -764,18 +772,7 @@ impl OAuthProvider {
 
     /// The public JWK set served at /oauth/jwks.
     pub fn jwks(&self) -> JwkSet {
-        let mut key = self.signing_key.to_public();
-        // Advertise `alg` and a stable `kid` so a client can pin the key and
-        // survive rotation (RFC 7517 recommendations).
-        if key.alg.is_none() {
-            if let Ok(curve) = key.curve() {
-                key.alg = Some(curve.alg().to_string());
-            }
-        }
-        if key.kid.is_none() {
-            key.kid = Some(key.thumbprint());
-        }
-        JwkSet { keys: vec![key] }
+        self.signing_key.public_jwks()
     }
 
     /// RFC 8414 authorization server metadata document.
@@ -861,7 +858,7 @@ mod tests {
     use super::*;
     use crate::client::ClientMetadataFetcher;
     use crate::dpop::{DpopManager, DpopNonce, InMemoryReplayStore};
-    use crate::jwk::EcCurve;
+    use crate::jwk::{EcCurve, Jwk};
     use crate::store::MemoryOAuthStore;
     use crate::types::{
         AUTH_METHOD_PRIVATE_KEY_JWT, CLIENT_ASSERTION_TYPE_JWT_BEARER, CODE_CHALLENGE_METHOD_S256,
@@ -879,8 +876,12 @@ mod tests {
 
     static JTI: AtomicU64 = AtomicU64::new(0);
 
-    fn signing_key() -> Jwk {
+    fn signing_jwk() -> Jwk {
         Jwk::from_private_key_bytes(EcCurve::K256, &[0x42u8; 32]).unwrap()
+    }
+
+    fn signing_key() -> SigningKey {
+        SigningKey::Ec(signing_jwk())
     }
 
     fn dpop_key() -> Jwk {
@@ -1226,7 +1227,7 @@ mod tests {
         let err = run_verify(&setup, &key, &tokens.access_token, NOW + 110)
             .await
             .unwrap_err();
-        assert!(err.error_description().contains("revoked"));
+        assert_eq!(err.error_description(), "Invalid token");
         run_verify(&setup, &key, &rotated.access_token, NOW + 110)
             .await
             .unwrap();
@@ -1239,7 +1240,7 @@ mod tests {
         let err = run_verify(&setup, &key, &rotated.access_token, NOW + 130)
             .await
             .unwrap_err();
-        assert!(err.error_description().contains("revoked"));
+        assert_eq!(err.error_description(), "Invalid token");
     }
 
     #[tokio::test]
@@ -1966,7 +1967,7 @@ mod tests {
         let err = run_verify(&setup, &key, &tokens.access_token, NOW)
             .await
             .unwrap_err();
-        assert!(err.error_description().contains("revoked"));
+        assert_eq!(err.error_description(), "Invalid token");
         assert!(setup
             .store
             .get_device_account(DEVICE, "did:plc:alice")
@@ -2118,7 +2119,7 @@ mod tests {
         let no_jti = jwt::sign(
             &JwtHeader::new("ES256K"),
             &JwtClaims::default(),
-            &signing_key(),
+            &signing_jwk(),
         )
         .unwrap();
         setup
@@ -2191,7 +2192,7 @@ mod tests {
                 json!({"jkt": dpop_key().to_public().thumbprint()}),
             );
             mutate(&mut header, &mut claims);
-            jwt::sign(&header, &claims, &signing_key()).unwrap()
+            jwt::sign(&header, &claims, &signing_jwk()).unwrap()
         };
 
         let cases: Vec<(TokenMutation, &str)> = vec![
@@ -2217,14 +2218,6 @@ mod tests {
             ),
             (
                 Box::new(|_: &mut JwtHeader, claims: &mut JwtClaims| {
-                    claims
-                        .extra
-                        .insert("scope".to_string(), json!("transition:generic"));
-                }),
-                "missing the \"atproto\" scope",
-            ),
-            (
-                Box::new(|_: &mut JwtHeader, claims: &mut JwtClaims| {
                     claims.extra.remove("cnf");
                 }),
                 "not DPoP-bound",
@@ -2246,7 +2239,49 @@ mod tests {
         // valid claims but no stored token: revoked
         let token = mint(Box::new(|_, _| {}));
         let err = run_verify(&setup, &key, &token, NOW).await.unwrap_err();
-        assert!(err.error_description().contains("revoked"));
+        assert_eq!(err.error_description(), "Invalid token");
+
+        // the granted scope lives with the stored session, so a session
+        // granted without "atproto" is refused whatever the token says
+        let stored = setup
+            .store
+            .read_token(&tokens_jti(&tokens.access_token))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut narrow = stored.data.clone();
+        narrow.scope = Some("transition:generic".to_string());
+        setup
+            .store
+            .create_token("tok-00000000000000000000000000000000", &narrow, None)
+            .await
+            .unwrap();
+        let err = run_verify(&setup, &key, &token, NOW).await.unwrap_err();
+        assert!(err
+            .error_description()
+            .contains("missing the \"atproto\" scope"));
+        // and a stored session whose access has lapsed is reported expired
+        // and dropped, even while the token's own exp is in the future
+        let mut lapsed = stored.data.clone();
+        lapsed.expires_at = NOW - 1;
+        setup
+            .store
+            .delete_token("tok-00000000000000000000000000000000")
+            .await
+            .unwrap();
+        setup
+            .store
+            .create_token("tok-00000000000000000000000000000000", &lapsed, None)
+            .await
+            .unwrap();
+        let err = run_verify(&setup, &key, &token, NOW).await.unwrap_err();
+        assert_eq!(err.error_description(), "Token expired");
+        assert!(setup
+            .store
+            .read_token("tok-00000000000000000000000000000000")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -2327,6 +2362,7 @@ mod tests {
             did: "did:plc:alice".to_string(),
             parameters: data.parameters.clone(),
             code: None,
+            scope: None,
         };
         restricted
             .store
@@ -2363,9 +2399,85 @@ mod tests {
             "cnf".to_string(),
             json!({"jkt": key.to_public().thumbprint()}),
         );
-        let token = jwt::sign(&header, &claims, &signing_key()).unwrap();
+        let token = jwt::sign(&header, &claims, &signing_jwk()).unwrap();
         let err = run_verify(&setup, &key, &token, NOW).await.unwrap_err();
-        assert!(err.error_description().contains("expired"));
+        assert_eq!(err.error_description(), "Invalid token");
+        assert!(setup
+            .store
+            .read_token("tok-00000000000000000000000000000000")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    fn tokens_jti(access_token: &str) -> String {
+        jwt::decode(access_token).unwrap().claims.jti.unwrap()
+    }
+
+    /// With a shared secret the provider mints HS256 tokens the reference
+    /// PDS verifies, publishes no keys, and rejects tokens under another key.
+    #[tokio::test]
+    async fn symmetric_signing_key_issues_hs256_tokens() {
+        let clients = vec![public_metadata(CLIENT_ID)];
+        let store = Arc::new(MemoryOAuthStore::new());
+        store.add_account(
+            AccountInfo {
+                did: "did:plc:alice".to_string(),
+                handle: Some("alice.example.com".to_string()),
+                email: None,
+                deactivated: false,
+            },
+            "correct-password",
+        );
+        let provider = OAuthProvider::new(OAuthProviderConfig {
+            issuer: ISSUER.to_string(),
+            audience: AUDIENCE.to_string(),
+            signing_key: SigningKey::Symmetric(b"a shared secret".to_vec()),
+            fetcher: Arc::new(StubFetcher { clients }),
+            store: store.clone(),
+            dpop: DpopManager::new(None, Box::new(InMemoryReplayStore::default())),
+            trusted_clients: vec![CLIENT_ID.to_string()],
+            scope_expander: None,
+        });
+        let setup = Setup { provider, store };
+        assert!(setup.provider.jwks().keys.is_empty());
+        let key = dpop_key();
+        let code = run_authorization(&setup, CLIENT_ID, &key, NOW).await;
+        let tokens = run_token(&setup, CLIENT_ID, &key, &code, NOW)
+            .await
+            .unwrap();
+        let decoded = jwt::decode(&tokens.access_token).unwrap();
+        assert_eq!(decoded.header.alg, "HS256");
+        assert_eq!(decoded.header.typ.as_deref(), Some(ACCESS_TOKEN_TYP));
+        assert!(decoded.claims.extra.get("scope").is_none());
+        assert_eq!(decoded.claims.extra["client_id"], json!(CLIENT_ID));
+        assert_eq!(tokens.scope, "atproto transition:generic");
+        let verified = run_verify(&setup, &key, &tokens.access_token, NOW + 10)
+            .await
+            .unwrap();
+        assert_eq!(verified.did, "did:plc:alice");
+        assert_eq!(verified.scopes, ["atproto", "transition:generic"]);
+        // a trusted first-party client gets the extended refresh window
+        let refreshed = run_refresh(
+            &setup,
+            CLIENT_ID,
+            &key,
+            tokens.refresh_token.as_deref().unwrap(),
+            NOW + crate::token::PUBLIC_CLIENT_REFRESH_LIFETIME + 1,
+        )
+        .await
+        .unwrap();
+        let secret = SigningKey::Symmetric(b"a shared secret".to_vec());
+        assert!(jwt::verify_with(&refreshed.access_token, &secret).is_ok());
+        let other = SigningKey::Symmetric(b"another secret".to_vec());
+        assert!(jwt::verify_with(&refreshed.access_token, &other).is_err());
+        let ec = jwt::verify_with(&refreshed.access_token, &signing_key()).unwrap_err();
+        assert!(ec.error_description().contains("alg"));
+        let mut header = JwtHeader::new("ES256K");
+        header.typ = Some(ACCESS_TOKEN_TYP.to_string());
+        let mismatch = jwt::sign_with(&header, &JwtClaims::default(), &secret).unwrap_err();
+        assert!(mismatch.error_description().contains("alg"));
+        assert_eq!(secret.alg().unwrap(), "HS256");
     }
 
     #[tokio::test]
@@ -2396,6 +2508,7 @@ mod tests {
                 dpop_jkt: Some(jkt),
             },
             code: Some(code.clone()),
+            scope: None,
         };
         setup
             .store

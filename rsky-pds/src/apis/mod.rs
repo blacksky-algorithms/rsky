@@ -156,6 +156,8 @@ pub enum ApiError {
     InvalidToken(String),
     /// No credentials were presented.
     AuthMissing,
+    /// The credentials are valid but not accepted by this method.
+    Forbidden(String),
     /// A scope-limited token that does not cover the requested write.
     InsufficientScope(String),
     RecordNotFound,
@@ -257,6 +259,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 "Authentication Required".to_string(),
                 __req,
             ),
+            ApiError::Forbidden(message) => json_error(403, "Forbidden", message, __req),
             ApiError::InsufficientScope(message) => {
                 let body = Json(ErrorBody {
                     error: "InsufficientScope".to_string(),
@@ -588,6 +591,10 @@ impl From<&AuthError> for ApiError {
         match error {
             AuthError::ExpiredToken => ApiError::ExpiredToken,
             AuthError::AuthMissing => ApiError::AuthMissing,
+            AuthError::OAuth(code, description) => {
+                ApiError::UpstreamResponse(401, code.clone(), description.clone())
+            }
+            AuthError::Forbidden(message) => ApiError::Forbidden(message.clone()),
             AuthError::BadJwt(message) => ApiError::InvalidToken(message.clone()),
             // A revoked credential, or one from an untrusted issuer or for
             // the wrong audience, is an authentication failure and surfaces

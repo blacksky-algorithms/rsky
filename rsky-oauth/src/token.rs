@@ -79,6 +79,10 @@ pub struct TokenData {
     pub did: String,
     pub parameters: AuthorizationRequestParameters,
     pub code: Option<String>,
+    /// The scope actually granted, when it differs from the requested
+    /// `parameters.scope` (the `token.scope` column).
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 impl TokenData {
@@ -86,10 +90,17 @@ impl TokenData {
         !matches!(self.client_auth, ClientAuth::None)
     }
 
+    /// The scope the session was granted.
+    pub fn granted_scope(&self) -> &str {
+        self.scope.as_deref().unwrap_or(&self.parameters.scope)
+    }
+
     /// Enforces the refresh-grant lifetimes: total session age from
-    /// `created_at` and inactivity age from `updated_at`.
-    pub fn validate_refresh_lifetimes(&self, now: u64) -> Result<(), OAuthError> {
-        let (session_lifetime, refresh_lifetime) = if self.is_confidential() {
+    /// `created_at` and inactivity age from `updated_at`. `trusted` marks a
+    /// first-party client the server trusts, which gets the confidential
+    /// client's extended lifetimes like the reference PDS grants.
+    pub fn validate_refresh_lifetimes(&self, now: u64, trusted: bool) -> Result<(), OAuthError> {
+        let (session_lifetime, refresh_lifetime) = if self.is_confidential() || trusted {
             (
                 CONFIDENTIAL_CLIENT_SESSION_LIFETIME,
                 CONFIDENTIAL_CLIENT_REFRESH_LIFETIME,
@@ -136,6 +147,7 @@ mod tests {
             client_auth,
             device_id: None,
             did: "did:plc:alice".to_string(),
+            scope: None,
             parameters: AuthorizationRequestParameters {
                 client_id: "https://app.example.com/client".to_string(),
                 response_type: "code".to_string(),
@@ -188,11 +200,11 @@ mod tests {
     #[test]
     fn refresh_lifetimes_public_client() {
         let mut data = token_data(ClientAuth::None);
-        data.validate_refresh_lifetimes(NOW).unwrap();
-        data.validate_refresh_lifetimes(NOW + PUBLIC_CLIENT_REFRESH_LIFETIME)
+        data.validate_refresh_lifetimes(NOW, false).unwrap();
+        data.validate_refresh_lifetimes(NOW + PUBLIC_CLIENT_REFRESH_LIFETIME, false)
             .unwrap();
         assert_eq!(
-            data.validate_refresh_lifetimes(NOW + PUBLIC_CLIENT_SESSION_LIFETIME + 1)
+            data.validate_refresh_lifetimes(NOW + PUBLIC_CLIENT_SESSION_LIFETIME + 1, false)
                 .unwrap_err(),
             OAuthError::InvalidGrant("session expired".to_string())
         );
@@ -200,7 +212,7 @@ mod tests {
         // is still within its total lifetime
         data.updated_at = NOW - 1000;
         assert_eq!(
-            data.validate_refresh_lifetimes(NOW + PUBLIC_CLIENT_REFRESH_LIFETIME)
+            data.validate_refresh_lifetimes(NOW + PUBLIC_CLIENT_REFRESH_LIFETIME, false)
                 .unwrap_err(),
             OAuthError::InvalidGrant("refresh token expired".to_string())
         );
@@ -213,10 +225,10 @@ mod tests {
             kid: "key-1".to_string(),
             jkt: "thumb".to_string(),
         });
-        data.validate_refresh_lifetimes(NOW + PUBLIC_CLIENT_SESSION_LIFETIME + 1)
+        data.validate_refresh_lifetimes(NOW + PUBLIC_CLIENT_SESSION_LIFETIME + 1, false)
             .unwrap();
         assert_eq!(
-            data.validate_refresh_lifetimes(NOW + CONFIDENTIAL_CLIENT_REFRESH_LIFETIME + 1)
+            data.validate_refresh_lifetimes(NOW + CONFIDENTIAL_CLIENT_REFRESH_LIFETIME + 1, false)
                 .unwrap_err(),
             OAuthError::InvalidGrant("refresh token expired".to_string())
         );
@@ -224,7 +236,7 @@ mod tests {
         fresh.updated_at = NOW + CONFIDENTIAL_CLIENT_SESSION_LIFETIME;
         assert_eq!(
             fresh
-                .validate_refresh_lifetimes(NOW + CONFIDENTIAL_CLIENT_SESSION_LIFETIME + 1)
+                .validate_refresh_lifetimes(NOW + CONFIDENTIAL_CLIENT_SESSION_LIFETIME + 1, false)
                 .unwrap_err(),
             OAuthError::InvalidGrant("session expired".to_string())
         );
