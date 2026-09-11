@@ -428,7 +428,7 @@ async fn manages_sessions_and_refresh_tokens() {
 
     // create_session with and without an app password
     let (_, session_refresh) = am
-        .create_session("did:plc:frank".to_owned(), None)
+        .create_session("did:plc:frank".to_owned(), None, false)
         .await
         .unwrap();
     let session_payload = auth::decode_refresh_token(session_refresh).unwrap();
@@ -436,9 +436,16 @@ async fn manages_sessions_and_refresh_tokens() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(stored.app_password_name, None);
+    assert_eq!(stored.app_password, None);
     let (_, app_refresh) = am
-        .create_session("did:plc:frank".to_owned(), Some("test app".to_owned()))
+        .create_session(
+            "did:plc:frank".to_owned(),
+            Some(AppPassDescript {
+                name: "test app".to_owned(),
+                privileged: false,
+            }),
+            false,
+        )
         .await
         .unwrap();
     let app_payload = auth::decode_refresh_token(app_refresh).unwrap();
@@ -446,7 +453,14 @@ async fn manages_sessions_and_refresh_tokens() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(stored.app_password_name, Some("test app".to_owned()));
+    // the row names a password that does not exist, so no privilege is attached
+    assert_eq!(
+        stored.app_password,
+        Some(AppPassDescript {
+            name: "test app".to_owned(),
+            privileged: false,
+        })
+    );
 
     // revocation
     assert!(am
@@ -471,7 +485,7 @@ async fn auth_helper_edge_cases() {
     let payload = auth::RefreshToken {
         scope: crate::auth_verifier::AuthScope::Refresh,
         sub: "did:plc:x".to_owned(),
-        exp: jwt_simple::prelude::Duration::from_days(90),
+        exp: auth::now_secs() + 90 * 24 * 60 * 60,
         jti: "token-1".to_owned(),
     };
     auth::store_refresh_token(payload, None, &am.db)
@@ -693,7 +707,10 @@ async fn manages_passwords() {
         am.verify_app_password("did:plc:grace", &created.password)
             .await
             .unwrap(),
-        Some("My App".to_owned())
+        Some(AppPassDescript {
+            name: "My App".to_owned(),
+            privileged: false,
+        })
     );
     assert_eq!(
         am.verify_app_password("did:plc:grace", "1111-2222-3333-4444")
@@ -703,9 +720,16 @@ async fn manages_passwords() {
     );
 
     // an app password session gets revoked along with the password
-    am.create_session("did:plc:grace".to_owned(), Some("My App".to_owned()))
-        .await
-        .unwrap();
+    am.create_session(
+        "did:plc:grace".to_owned(),
+        Some(AppPassDescript {
+            name: "My App".to_owned(),
+            privileged: false,
+        }),
+        false,
+    )
+    .await
+    .unwrap();
     am.revoke_app_password("did:plc:grace".to_owned(), "My App".to_owned())
         .await
         .unwrap();
@@ -901,7 +925,14 @@ async fn rotates_app_password_refresh_tokens() {
         .await
         .unwrap();
     let (_, refresh_jwt) = am
-        .create_session("did:plc:apppw".to_owned(), Some("rotator".to_owned()))
+        .create_session(
+            "did:plc:apppw".to_owned(),
+            Some(AppPassDescript {
+                name: "rotator".to_owned(),
+                privileged: false,
+            }),
+            false,
+        )
         .await
         .unwrap();
     let payload = auth::decode_refresh_token(refresh_jwt).unwrap();
@@ -915,7 +946,23 @@ async fn rotates_app_password_refresh_tokens() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(stored.app_password_name, Some("rotator".to_owned()));
+    assert_eq!(
+        stored.app_password,
+        Some(AppPassDescript {
+            name: "rotator".to_owned(),
+            privileged: false,
+        })
+    );
+    let rotated_access = crate::auth_verifier::verify_jwt(
+        &rotated.0,
+        auth::ACCESS_TOKEN_TYP,
+        &auth::SessionVerifyOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        rotated_access.scope,
+        crate::auth_verifier::AuthScope::AppPass
+    );
 }
 
 #[tokio::test]

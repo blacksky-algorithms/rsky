@@ -72,7 +72,8 @@ Mount a volume at `PDS_DATA_DIRECTORY` to persist data.
 
 | Variable | Description |
 |---|---|
-| `PDS_JWT_KEY_K256_PRIVATE_KEY_HEX` | K-256 key for signing access/refresh tokens |
+| `PDS_JWT_SECRET` | Shared secret for HMAC-SHA256 access/refresh tokens, interchangeable with the reference PDS; takes precedence over the K-256 key |
+| `PDS_JWT_KEY_K256_PRIVATE_KEY_HEX` | K-256 key for signing access/refresh tokens when no `PDS_JWT_SECRET` is set |
 | `PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX` | K-256 key for signing repo commits |
 | `PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX` | K-256 PLC rotation key |
 | `PDS_DPOP_SECRET` | 32-byte hex secret for OAuth DPoP nonce rotation |

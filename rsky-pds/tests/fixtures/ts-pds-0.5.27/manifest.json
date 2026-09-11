@@ -2,38 +2,39 @@
   "accounts": {
     "alice": {
       "app_password": {
-        "createdAt": "2026-09-11T00:58:30.792Z",
+        "createdAt": "2026-09-11T13:09:37.759Z",
         "name": "phone",
-        "password": "3khc-kb3v-b2zd-mzz5",
+        "password": "cako-lig4-cgf7-xfnm",
         "privileged": false
       },
       "app_password_privileged": {
-        "createdAt": "2026-09-11T00:58:30.823Z",
+        "createdAt": "2026-09-11T13:09:37.789Z",
         "name": "chat",
-        "password": "ctfs-a4uo-uhzk-mgqw",
+        "password": "g4j5-om5k-ywp2-52dc",
         "privileged": true
       },
       "blob_cid": "bafkreihl6t3dlil5cdlowrv2nafxafbedgvdeihsfaabua3ngencf3u5fi",
-      "did": "did:plc:hsgrgt5c4qggj7yg2mwh7dh7",
+      "did": "did:plc:xnu5z7akmky27sltgn7hbneu",
+      "email": "alice@fixture.invalid",
       "handle": "alice.fixture.test",
       "password": "fixture-password-123",
-      "repo_rev": "3mv7eenrzps2a",
+      "repo_rev": "3mvan7ylpmc2w",
       "state": "active"
     },
     "bob": {
-      "did": "did:plc:rglvbbkwetxftzingxhcoer7",
+      "did": "did:plc:p2jidewytiik24tsb37m4ktc",
       "handle": "bob.fixture.test",
       "password": "fixture-password-123",
       "state": "deactivated"
     },
     "carol": {
-      "did": "did:plc:qk2bfqcdi2fcipm3xknqyzmf",
+      "did": "did:plc:e56xi43bwhhrzjgntitmqt64",
       "handle": "carol.fixture.test",
       "password": "fixture-password-123",
       "state": "takendown"
     },
     "dave": {
-      "did": "did:plc:vlpnzvnd4ca6za5bqaodittd",
+      "did": "did:plc:4jga5jladekhy5csoe62kfkm",
       "handle": "dave.fixture.test",
       "note": "DID document deliberately absent from plc/ and did_cache.sqlite",
       "password": "fixture-password-123",
@@ -42,9 +43,9 @@
   },
   "expected_sha256": {
     "getBlob.png": "ebf4f635a17d10d6eb46ba680b70142419aa3220f228001a036d311a22ee9d2a",
-    "getRepo.car": "3ef549675031fead23e586a31a94a8bb10dc169f46e955d15df40a1424610e23",
-    "syncGetRecord_missing.car": "28b70543226fa9d094b27bc7d1bf7d09ad7611b0e3d38f1f3111257922732704",
-    "syncGetRecord_profile.car": "db22f14dd1f681392b19199a41fde0a9ed3112c656e70661de65cf4b544aba8d"
+    "getRepo.car": "17462bbc5a10b0c5770951fb5820eae9ac2fb34f5c6d235c1de94868f559ff61",
+    "syncGetRecord_missing.car": "9984c1aa65bca8e0eb90a673d6b284824f1d8eab349a0266c1b284f261202988",
+    "syncGetRecord_profile.car": "83523e809bb14060499bcf4e70b190f2b4461a2d354536387c7e1608ed065b8d"
   },
   "expected_status": {
     "alice_listRecords_limit101.json": "400",
@@ -55,6 +56,16 @@
     "carol_getLatestCommit.json": "400",
     "carol_getRepo.json": "400",
     "carol_listRecords.json": "400",
+    "createSession_alice.json": "200",
+    "createSession_alice_app_password.json": "200",
+    "createSession_alice_email.json": "200",
+    "createSession_bob.json": "200",
+    "createSession_carol.json": "401",
+    "createSession_carol_allow_takendown.json": "200",
+    "createSession_carol_wrong_password.json": "401",
+    "createSession_long_password.json": "401",
+    "createSession_unknown.json": "401",
+    "createSession_wrong_password.json": "401",
     "dave_describeRepo.json": "400",
     "describeRepo.json": "200",
     "describeServer.json": "200",
@@ -64,8 +75,15 @@
     "getRepo.car": "200",
     "getRepoStatus.json": "200",
     "getSession_alice.json": "200",
+    "getSession_app_password.json": "200",
+    "getSession_app_password_privileged.json": "200",
     "getSession_bob.json": "200",
     "getSession_expired.json": "400",
+    "getSession_typ_jwt.json": "400",
+    "getSession_with_refresh.json": "400",
+    "listAppPasswords_access.json": "200",
+    "listAppPasswords_app_password.json": "200",
+    "listAppPasswords_signup_queued.json": "400",
     "listBlobs.json": "200",
     "listRecords.json": "200",
     "listRecords_page2.json": "200",
@@ -74,12 +92,18 @@
     "missing_describeRepo.json": "400",
     "missing_getLatestCommit.json": "400",
     "missing_getRepo.json": "400",
+    "oauth_authorization_server.json": "200",
+    "oauth_jwks.json": "200",
     "oauth_protected_resource.json": "200",
+    "refreshSession_alice.json": "200",
+    "refreshSession_alice_again.json": "200",
+    "refreshSession_unknown_jti.json": "400",
+    "refreshSession_with_access.json": "400",
     "syncGetRecord_missing.car": "200",
     "syncGetRecord_profile.car": "200"
   },
   "image": "blacksky/pds:0.5.27-bsky.2-local",
-  "pds_image_commit": "1adea15d494bb7b6169ced1304caa27c364ec31b",
+  "pds_image_commit": "8a1f544a77f6c757247fdc8275c802b1ba102406",
   "secrets": {
     "PDS_ADMIN_PASSWORD": "fixture-admin-password",
     "PDS_DPOP_SECRET": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
@@ -91,13 +115,17 @@
     "PDS_SERVICE_HANDLE_DOMAINS": ".fixture.test"
   },
   "tokens": {
-    "alice_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpoc2dyZ3Q1YzRxZ2dqN3lnMm13aDdkaDciLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.dq26xqNLO9cnjF2fmeibMOhZhXHTMw6jcl4E72KuRh4",
-    "alice_app_password_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFwcFBhc3MiLCJhdWQiOiJkaWQ6d2ViOmZpeHR1cmUudGVzdCIsInN1YiI6ImRpZDpwbGM6aHNncmd0NWM0cWdnajd5ZzJtd2g3ZGg3IiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjIxMDAwMDAwMDB9.U1xwx-cW7Ic4sJJVeRMV8lIfFvrCE7S72zF5KOUkm2Y",
-    "alice_app_password_privileged_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFwcFBhc3NQcml2aWxlZ2VkIiwiYXVkIjoiZGlkOndlYjpmaXh0dXJlLnRlc3QiLCJzdWIiOiJkaWQ6cGxjOmhzZ3JndDVjNHFnZ2o3eWcybXdoN2RoNyIsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoyMTAwMDAwMDAwfQ.TI7V-Cdu519l5w-Ge2I6bNy004q11EkHlvt3pTFqGSA",
-    "alice_expired_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpoc2dyZ3Q1YzRxZ2dqN3lnMm13aDdkaDciLCJpYXQiOjE3MDAwMDAwMDAsImV4cCI6MTcwMDAwMDA2MH0.Jpae2VmuHytdBOTMh87yzsK815yf1Rhp-RQVdR0B1-0",
-    "alice_refresh": "eyJ0eXAiOiJyZWZyZXNoK2p3dCIsImFsZyI6IkhTMjU2In0.eyJzY29wZSI6ImNvbS5hdHByb3RvLnJlZnJlc2giLCJqdGkiOiJ5WjRTR3RxcFA3UVc3MkJSeDErVnl6a2t5alNQbTM0aGM4SFZ3NGR5VHNzPSIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpoc2dyZ3Q1YzRxZ2dqN3lnMm13aDdkaDciLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.zMXy37i4kK70thSaN8KeuiinmFHA7bA69r3ZH9WPA8Y",
-    "alice_refresh_jti": "yZ4SGtqpP7QW72BRx1+VyzkkyjSPm34hc8HVw4dyTss=",
-    "bob_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpyZ2x2YmJrd2V0eGZ0emluZ3hoY29lcjciLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.MsmBYc9ycKF2Fka1dKrp3kLDF0WUOGS0LaUYQ0Vimk8",
+    "alice_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzp4bnU1ejdha21reTI3c2x0Z243aGJuZXUiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.e_cLInZ5IqPR-RmKFz7saEGX3hn8nb986hOFW7_VaRc",
+    "alice_access_typ_jwt": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzp4bnU1ejdha21reTI3c2x0Z243aGJuZXUiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.Wo4_CIkZsPNo5pWgu1IkvkkWIPoVYJOaMFz0buNgG9E",
+    "alice_app_password_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFwcFBhc3MiLCJhdWQiOiJkaWQ6d2ViOmZpeHR1cmUudGVzdCIsInN1YiI6ImRpZDpwbGM6eG51NXo3YWtta3kyN3NsdGduN2hibmV1IiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjIxMDAwMDAwMDB9.2pD9FPIbZCrlMWw9CUJZOhzvhw81OJRiLTCnZMUSI8Y",
+    "alice_app_password_privileged_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFwcFBhc3NQcml2aWxlZ2VkIiwiYXVkIjoiZGlkOndlYjpmaXh0dXJlLnRlc3QiLCJzdWIiOiJkaWQ6cGxjOnhudTV6N2FrbWt5MjdzbHRnbjdoYm5ldSIsImlhdCI6MTgwMDAwMDAwMCwiZXhwIjoyMTAwMDAwMDAwfQ.KFqLCqEiu6xPnOOJZ36hjbwoXhiEBmp2N7Aa-chR4oY",
+    "alice_expired_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzp4bnU1ejdha21reTI3c2x0Z243aGJuZXUiLCJpYXQiOjE3MDAwMDAwMDAsImV4cCI6MTcwMDAwMDA2MH0.1otq6vb6KCantHdwtiOrbHvdK_aVR48MuFNJpQrvgdA",
+    "alice_refresh": "eyJ0eXAiOiJyZWZyZXNoK2p3dCIsImFsZyI6IkhTMjU2In0.eyJzY29wZSI6ImNvbS5hdHByb3RvLnJlZnJlc2giLCJqdGkiOiJ5WGVtNWFiQk9hdEczanNwRnBaNkMxUVArZHhxTnRKMFZ5N0NGUFdibkJ3PSIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzp4bnU1ejdha21reTI3c2x0Z243aGJuZXUiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.pSInJy5Zuh0D73SO15fGLUS6hy8ek4HYE84Fzz4k13o",
+    "alice_refresh_2": "eyJ0eXAiOiJyZWZyZXNoK2p3dCIsImFsZyI6IkhTMjU2In0.eyJzY29wZSI6ImNvbS5hdHByb3RvLnJlZnJlc2giLCJqdGkiOiJqaGFwWENsWW16QWhLTGVnZVZveEdOK2FZUXR2L1FUUk1pOGFZSzBQTzBzPSIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzp4bnU1ejdha21reTI3c2x0Z243aGJuZXUiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0._DdJzPxR3-FlatSrqBISNDcUYFfVfErqFDH5s0V47Gc",
+    "alice_refresh_2_jti": "jhapXClYmzAhKLegeVoxGN+aYQtv/QTRMi8aYK0PO0s=",
+    "alice_refresh_jti": "yXem5abBOatG3jspFpZ6C1QP+dxqNtJ0Vy7CFPWbnBw=",
+    "alice_signup_queued_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLnNpZ251cFF1ZXVlZCIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzp4bnU1ejdha21reTI3c2x0Z243aGJuZXUiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.EATuzQxMh7BJMwv9ebo1e7vi8bJBAZ6BYJlyIYCkwzc",
+    "bob_access": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6ImNvbS5hdHByb3RvLmFjY2VzcyIsImF1ZCI6ImRpZDp3ZWI6Zml4dHVyZS50ZXN0Iiwic3ViIjoiZGlkOnBsYzpwMmppZGV3eXRpaWsyNHRzYjM3bTRrdGMiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MjEwMDAwMDAwMH0.USRsizo8zKKjpJNILsTrkqWeCVw_IqrpGv9NbKJU3lo",
     "exp": 2100000000,
     "iat": 1800000000
   }

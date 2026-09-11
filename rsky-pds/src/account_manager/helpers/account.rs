@@ -32,6 +32,21 @@ pub enum AccountStatus {
     Throttled,
 }
 
+impl AccountStatus {
+    /// The wire value the reference PDS reports in session and repo status outputs.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AccountStatus::Active => "active",
+            AccountStatus::Takendown => "takendown",
+            AccountStatus::Suspended => "suspended",
+            AccountStatus::Deleted => "deleted",
+            AccountStatus::Deactivated => "deactivated",
+            AccountStatus::Desynchronized => "desynchronized",
+            AccountStatus::Throttled => "throttled",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct FormattedAccountStatus {
     pub active: bool,
@@ -397,5 +412,26 @@ pub fn format_account_status(account: Option<ActorAccount>) -> FormattedAccountS
             active: true,
             status: None,
         },
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::AccountStatus;
+
+    #[test]
+    fn account_status_wire_names() {
+        let statuses = [
+            (AccountStatus::Active, "active"),
+            (AccountStatus::Takendown, "takendown"),
+            (AccountStatus::Suspended, "suspended"),
+            (AccountStatus::Deleted, "deleted"),
+            (AccountStatus::Deactivated, "deactivated"),
+            (AccountStatus::Desynchronized, "desynchronized"),
+            (AccountStatus::Throttled, "throttled"),
+        ];
+        for (status, name) in statuses {
+            assert_eq!(status.as_str(), name);
+        }
     }
 }

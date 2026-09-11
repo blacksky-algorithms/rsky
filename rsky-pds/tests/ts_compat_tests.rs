@@ -6,9 +6,12 @@
 
 mod common;
 
-use common::{get_client_with_fixture, Fixture};
-use rocket::http::Status;
+use common::{get_client_with_fixture, get_client_with_fixture_copy, Fixture};
+use rocket::http::{ContentType, Header, Status};
 use rocket::local::asynchronous::Client;
+use rsky_pds::account_manager::helpers::auth::{
+    create_refresh_token_with, CreateTokensOpts, JwtSigner,
+};
 use rsky_repo::car::read_car;
 use rsky_repo::sync::consumer::verify_proofs;
 use rsky_repo::types::RecordCidClaim;
@@ -408,4 +411,354 @@ async fn describe_server_matches_the_reference() {
         "/xrpc/com.atproto.server.describeServer",
     )
     .await;
+}
+
+async fn get_json_with(client: &Client, path: &str, token: &str) -> (Status, Value) {
+    let response = client
+        .get(path)
+        .header(Header::new("Authorization", format!("Bearer {token}")))
+        .dispatch()
+        .await;
+    let status = response.status();
+    let body = response.into_string().await.unwrap_or_default();
+    let json = serde_json::from_str(&body).unwrap_or_else(|_| panic!("non-json body: {body}"));
+    (status, json)
+}
+
+async fn post_json_with(
+    client: &Client,
+    path: &str,
+    token: Option<&str>,
+    body: Option<Value>,
+) -> (Status, Value) {
+    let mut request = client.post(path);
+    if let Some(token) = token {
+        request = request.header(Header::new("Authorization", format!("Bearer {token}")));
+    }
+    if let Some(body) = body {
+        request = request.header(ContentType::JSON).body(body.to_string());
+    }
+    let response = request.dispatch().await;
+    let status = response.status();
+    let body = response.into_string().await.unwrap_or_default();
+    let json = if body.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&body).unwrap_or_else(|_| panic!("non-json body: {body}"))
+    };
+    (status, json)
+}
+
+async fn assert_auth_json_matches(
+    client: &Client,
+    fixture: &Fixture,
+    name: &str,
+    path: &str,
+    token: &str,
+) {
+    let (status, json) = get_json_with(client, path, token).await;
+    assert_eq!(status.code, fixture.expected_status(name), "{name}: {json}");
+    assert_eq!(json, fixture.expected_json(name), "{name}");
+}
+
+/// Session tokens minted by the reference PDS authenticate on rsky-pds and
+/// produce the same session outputs.
+#[tokio::test]
+async fn reference_session_tokens_authenticate() {
+    let (fixture, client) = get_client_with_fixture().await;
+    let session = "/xrpc/com.atproto.server.getSession";
+    for (name, token) in [
+        ("getSession_alice.json", "alice_access"),
+        ("getSession_app_password.json", "alice_app_password_access"),
+        (
+            "getSession_app_password_privileged.json",
+            "alice_app_password_privileged_access",
+        ),
+        ("getSession_bob.json", "bob_access"),
+    ] {
+        assert_auth_json_matches(&client, fixture, name, session, &fixture.token(token)).await;
+    }
+    let passwords = "/xrpc/com.atproto.server.listAppPasswords";
+    assert_auth_json_matches(
+        &client,
+        fixture,
+        "listAppPasswords_access.json",
+        passwords,
+        &fixture.token("alice_access"),
+    )
+    .await;
+    assert_auth_json_matches(
+        &client,
+        fixture,
+        "listAppPasswords_app_password.json",
+        passwords,
+        &fixture.token("alice_app_password_access"),
+    )
+    .await;
+}
+
+/// Every rejection carries the reference error name and message.
+#[tokio::test]
+async fn reference_token_rejections_match() {
+    let (fixture, client) = get_client_with_fixture().await;
+    let session = "/xrpc/com.atproto.server.getSession";
+    for (name, token) in [
+        ("getSession_expired.json", "alice_expired_access"),
+        ("getSession_typ_jwt.json", "alice_access_typ_jwt"),
+        ("getSession_with_refresh.json", "alice_refresh"),
+    ] {
+        assert_auth_json_matches(&client, fixture, name, session, &fixture.token(token)).await;
+    }
+    let refresh = "/xrpc/com.atproto.server.refreshSession";
+    let (status, json) =
+        post_json_with(&client, refresh, Some(&fixture.token("alice_access")), None).await;
+    assert_eq!(
+        status.code,
+        fixture.expected_status("refreshSession_with_access.json")
+    );
+    assert_eq!(
+        json,
+        fixture.expected_json("refreshSession_with_access.json")
+    );
+
+    let signer = JwtSigner::hmac(fixture.secret("PDS_JWT_SECRET").as_bytes());
+    let unknown = create_refresh_token_with(
+        &signer,
+        CreateTokensOpts {
+            did: fixture.did("alice"),
+            service_did: "did:web:fixture.test".to_owned(),
+            scope: None,
+            jti: Some("unknown-jti".to_owned()),
+            expires_in_secs: None,
+            issued_at: None,
+        },
+    )
+    .unwrap();
+    let (status, json) = post_json_with(&client, refresh, Some(&unknown), None).await;
+    assert_eq!(
+        status.code,
+        fixture.expected_status("refreshSession_unknown_jti.json")
+    );
+    assert_eq!(
+        json,
+        fixture.expected_json("refreshSession_unknown_jti.json")
+    );
+
+    let response = client.get(session).dispatch().await;
+    assert_eq!(response.status(), Status::Unauthorized);
+    let json: Value = serde_json::from_str(&response.into_string().await.unwrap()).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"error": "AuthMissing", "message": "Authentication Required"})
+    );
+
+    // a session token whose scope the route does not accept
+    assert_auth_json_matches(
+        &client,
+        fixture,
+        "listAppPasswords_signup_queued.json",
+        "/xrpc/com.atproto.server.listAppPasswords",
+        &fixture.token("alice_signup_queued_access"),
+    )
+    .await;
+
+    // reference-signed tokens with a malformed or missing subject
+    let mint = |claims: Value| signer.sign("at+jwt", &claims).unwrap();
+    let now = rsky_pds::account_manager::helpers::auth::now_secs();
+    for token in [
+        mint(
+            serde_json::json!({"scope": "com.atproto.access", "aud": "did:web:fixture.test", "sub": "alice", "iat": now, "exp": now + 60}),
+        ),
+        mint(
+            serde_json::json!({"scope": "com.atproto.access", "aud": "did:web:fixture.test", "iat": now, "exp": now + 60}),
+        ),
+    ] {
+        let (status, json) = get_json_with(&client, session, &token).await;
+        assert_eq!(status, Status::BadRequest);
+        assert_eq!(
+            json,
+            serde_json::json!({"error": "InvalidToken", "message": "Malformed token"})
+        );
+    }
+
+    // refresh tokens for accounts the server cannot serve
+    let refresh_for = |did: &str| {
+        create_refresh_token_with(
+            &signer,
+            CreateTokensOpts {
+                did: did.to_owned(),
+                service_did: "did:web:fixture.test".to_owned(),
+                scope: None,
+                jti: Some(format!("jti-{did}")),
+                expires_in_secs: None,
+                issued_at: None,
+            },
+        )
+        .unwrap()
+    };
+    let missing = "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa";
+    let (status, json) = post_json_with(&client, refresh, Some(&refresh_for(missing)), None).await;
+    assert_eq!(status, Status::BadRequest);
+    assert_eq!(
+        json,
+        serde_json::json!({"error": "InvalidRequest", "message": format!("Could not find user info for account: {missing}")})
+    );
+    let carol = fixture.did("carol");
+    let (status, json) = post_json_with(&client, refresh, Some(&refresh_for(&carol)), None).await;
+    assert_eq!(status, Status::Unauthorized);
+    assert_eq!(
+        json,
+        serde_json::json!({"error": "AccountTakedown", "message": "Account has been taken down"})
+    );
+}
+
+fn without_tokens(mut value: Value) -> Value {
+    let object = value.as_object_mut().unwrap();
+    object.remove("accessJwt");
+    object.remove("refreshJwt");
+    value
+}
+
+fn jwt_part(token: &str, index: usize) -> Value {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    let part = token.split('.').nth(index).unwrap();
+    serde_json::from_slice(&URL_SAFE_NO_PAD.decode(part).unwrap()).unwrap()
+}
+
+/// A refresh token minted by the reference PDS rotates on rsky-pds with the
+/// reference grace semantics, and the tokens rsky-pds mints back are
+/// reference-shaped.
+#[tokio::test]
+async fn reference_refresh_tokens_rotate() {
+    let (fixture, _dir, client) = get_client_with_fixture_copy().await;
+    let refresh = "/xrpc/com.atproto.server.refreshSession";
+    let old = fixture.token("alice_refresh_2");
+    let (status, first) = post_json_with(&client, refresh, Some(&old), None).await;
+    assert_eq!(status, Status::Ok, "{first}");
+    assert_eq!(
+        without_tokens(first.clone()),
+        without_tokens(fixture.expected_json("refreshSession_alice.json"))
+    );
+    let access = first["accessJwt"].as_str().unwrap();
+    let next = first["refreshJwt"].as_str().unwrap();
+    assert_eq!(
+        jwt_part(access, 0),
+        serde_json::json!({"typ": "at+jwt", "alg": "HS256"})
+    );
+    assert_eq!(
+        jwt_part(next, 0),
+        serde_json::json!({"typ": "refresh+jwt", "alg": "HS256"})
+    );
+    assert_eq!(jwt_part(access, 1)["scope"], "com.atproto.access");
+    assert_eq!(jwt_part(next, 1)["scope"], "com.atproto.refresh");
+    assert_eq!(jwt_part(next, 1)["sub"], fixture.did("alice"));
+
+    // the new access token works, and the old refresh token keeps yielding
+    // the same successor during its grace period
+    let (status, session) =
+        get_json_with(&client, "/xrpc/com.atproto.server.getSession", access).await;
+    assert_eq!(status, Status::Ok);
+    assert_eq!(session, fixture.expected_json("getSession_alice.json"));
+    let (status, again) = post_json_with(&client, refresh, Some(&old), None).await;
+    assert_eq!(status, Status::Ok);
+    assert_eq!(
+        jwt_part(again["refreshJwt"].as_str().unwrap(), 1)["jti"],
+        jwt_part(next, 1)["jti"]
+    );
+
+    // deleting the session with the successor revokes it
+    let (status, _) = post_json_with(
+        &client,
+        "/xrpc/com.atproto.server.deleteSession",
+        Some(next),
+        None,
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    let (status, revoked) = post_json_with(&client, refresh, Some(next), None).await;
+    assert_eq!(
+        status.code,
+        fixture.expected_status("refreshSession_unknown_jti.json")
+    );
+    assert_eq!(
+        revoked,
+        fixture.expected_json("refreshSession_unknown_jti.json")
+    );
+}
+
+/// Logging in with the reference PDS's stored password hashes gives the
+/// reference outputs for every account state.
+#[tokio::test]
+async fn create_session_matches_the_reference() {
+    let (fixture, _dir, client) = get_client_with_fixture_copy().await;
+    let create = "/xrpc/com.atproto.server.createSession";
+    let password = fixture.account("alice")["password"].as_str().unwrap();
+    let app_password = fixture.account("alice")["app_password"]["password"]
+        .as_str()
+        .unwrap();
+    let cases = [
+        (
+            "createSession_alice.json",
+            serde_json::json!({"identifier": "alice.fixture.test", "password": password}),
+        ),
+        (
+            "createSession_alice_email.json",
+            serde_json::json!({"identifier": "ALICE@fixture.invalid", "password": password}),
+        ),
+        (
+            "createSession_alice_app_password.json",
+            serde_json::json!({"identifier": fixture.did("alice"), "password": app_password}),
+        ),
+        (
+            "createSession_wrong_password.json",
+            serde_json::json!({"identifier": "alice.fixture.test", "password": "nope"}),
+        ),
+        (
+            "createSession_unknown.json",
+            serde_json::json!({"identifier": "nobody.fixture.test", "password": password}),
+        ),
+        (
+            "createSession_bob.json",
+            serde_json::json!({"identifier": "bob.fixture.test", "password": password}),
+        ),
+        (
+            "createSession_carol.json",
+            serde_json::json!({"identifier": "carol.fixture.test", "password": password}),
+        ),
+        (
+            "createSession_carol_wrong_password.json",
+            serde_json::json!({"identifier": "carol.fixture.test", "password": "nope", "allowTakendown": true}),
+        ),
+        (
+            "createSession_carol_allow_takendown.json",
+            serde_json::json!({"identifier": "carol.fixture.test", "password": password, "allowTakendown": true}),
+        ),
+        (
+            "createSession_long_password.json",
+            serde_json::json!({"identifier": "alice.fixture.test", "password": "x".repeat(513)}),
+        ),
+    ];
+    for (name, body) in cases {
+        let (status, json) = post_json_with(&client, create, None, Some(body)).await;
+        assert_eq!(status.code, fixture.expected_status(name), "{name}: {json}");
+        assert_eq!(
+            without_tokens(json.clone()),
+            without_tokens(fixture.expected_json(name)),
+            "{name}"
+        );
+        if let Some(access) = json["accessJwt"].as_str() {
+            assert_eq!(
+                jwt_part(access, 0),
+                serde_json::json!({"typ": "at+jwt", "alg": "HS256"}),
+                "{name}"
+            );
+            let expected_scope = match name {
+                "createSession_alice_app_password.json" => "com.atproto.appPass",
+                "createSession_carol_allow_takendown.json" => "com.atproto.takendown",
+                _ => "com.atproto.access",
+            };
+            assert_eq!(jwt_part(access, 1)["scope"], expected_scope, "{name}");
+        }
+    }
 }

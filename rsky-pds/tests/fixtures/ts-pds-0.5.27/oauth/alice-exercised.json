@@ -1,0 +1,69 @@
+{
+  "did": "did:plc:xnu5z7akmky27sltgn7hbneu",
+  "client_id": "http://localhost?redirect_uri=http%3A%2F%2F127.0.0.1%2Fcb&scope=atproto+transition%3Ageneric",
+  "redirect_uri": "http://127.0.0.1/cb",
+  "scope": "atproto transition:generic",
+  "dpop": {
+    "private_jwk": {
+      "kty": "EC",
+      "x": "Djw64FydR41TtDg3mr2wyBRDRpnhKB8Yt58-_0Ns7F0",
+      "y": "dJirQvvuia0YBJfr8HlXw9UZdffh9rgQNWXn9xwKQCE",
+      "crv": "P-256",
+      "d": "mU8gkCKcHiys8nnXUgMCtp0dJMM0BTUsiCGwf68uP4I"
+    },
+    "public_jwk": {
+      "kty": "EC",
+      "x": "Djw64FydR41TtDg3mr2wyBRDRpnhKB8Yt58-_0Ns7F0",
+      "y": "dJirQvvuia0YBJfr8HlXw9UZdffh9rgQNWXn9xwKQCE",
+      "crv": "P-256"
+    },
+    "jkt": "X-16UGwcvioWWVieLZIjHU3vRSOyKEC3oyiSCEjDpb0"
+  },
+  "cookies": {
+    "dev-id": "dev-63a49dc4d1ffcc75f57437cdc7887f00",
+    "ses-id": "ses-9d62fbffdfa3884ecdd05146fdd7964e",
+    "csrf-token": "5cc823d09cc71cfcdb457037"
+  },
+  "token": {
+    "access_token": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJqdGkiOiJ0b2stNThjYTRjYTgwZjM4NGIyMDkxODgwZDE1MmJmOTk4MjMiLCJzdWIiOiJkaWQ6cGxjOnhudTV6N2FrbWt5MjdzbHRnbjdoYm5ldSIsImlhdCI6MTc4OTEzMjE3OSwiZXhwIjoxNzg5MTM1Nzc5LCJhdWQiOiJkaWQ6d2ViOmZpeHR1cmUudGVzdCIsImNuZiI6eyJqa3QiOiJYLTE2VUd3Y3Zpb1dXVmllTFpJakhVM3ZSU095S0VDM295aVNDRWpEcGIwIn0sImNsaWVudF9pZCI6Imh0dHA6Ly9sb2NhbGhvc3Q_cmVkaXJlY3RfdXJpPWh0dHAlM0ElMkYlMkYxMjcuMC4wLjElMkZjYiZzY29wZT1hdHByb3RvK3RyYW5zaXRpb24lM0FnZW5lcmljIiwiaXNzIjoiaHR0cHM6Ly9maXh0dXJlLnRlc3QifQ.V0PaUXK_CE8Vx_7H-P3ZLOhynBR2aZofmNLpN-c4PVg",
+    "token_type": "DPoP",
+    "refresh_token": "ref-e1f0954581738b52ed4028536142a879ce730b9303665c120ec17bfde71dec49",
+    "scope": "atproto transition:generic",
+    "expires_in": 3599,
+    "sub": "did:plc:xnu5z7akmky27sltgn7hbneu"
+  },
+  "session": {
+    "status": 200,
+    "body": {
+      "did": "did:plc:xnu5z7akmky27sltgn7hbneu",
+      "handle": "alice.fixture.test",
+      "active": true
+    }
+  },
+  "refreshed": {
+    "status": 200,
+    "body": {
+      "access_token": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJqdGkiOiJ0b2stOWYzZWFkNzQyYTkxZWYxOTk2ODM3YmU4MjZjMGZmYTIiLCJzdWIiOiJkaWQ6cGxjOnhudTV6N2FrbWt5MjdzbHRnbjdoYm5ldSIsImlhdCI6MTc4OTEzMjE3OSwiZXhwIjoxNzg5MTM1Nzc5LCJhdWQiOiJkaWQ6d2ViOmZpeHR1cmUudGVzdCIsImNuZiI6eyJqa3QiOiJYLTE2VUd3Y3Zpb1dXVmllTFpJakhVM3ZSU095S0VDM295aVNDRWpEcGIwIn0sImNsaWVudF9pZCI6Imh0dHA6Ly9sb2NhbGhvc3Q_cmVkaXJlY3RfdXJpPWh0dHAlM0ElMkYlMkYxMjcuMC4wLjElMkZjYiZzY29wZT1hdHByb3RvK3RyYW5zaXRpb24lM0FnZW5lcmljIiwiaXNzIjoiaHR0cHM6Ly9maXh0dXJlLnRlc3QifQ.w0etvkBP5EmDWkXx8tDMLORaJKfocnjvfUcURiJFsLY",
+      "token_type": "DPoP",
+      "refresh_token": "ref-283115bcf05e86e459affcd0fe68372feb81c3127e1f27b9a8239f623997e935",
+      "scope": "atproto transition:generic",
+      "expires_in": 3599,
+      "sub": "did:plc:xnu5z7akmky27sltgn7hbneu"
+    }
+  },
+  "session_after_refresh": {
+    "status": 401,
+    "body": {
+      "error": "invalid_token",
+      "message": "Invalid token"
+    },
+    "www_authenticate": "DPoP algs=\"RS256 RS384 RS512 PS256 PS384 PS512 ES256 ES256K ES384 ES512\", error=\"invalid_token\", error_description=\"Invalid token\""
+  },
+  "refresh_replayed": {
+    "status": 400,
+    "body": {
+      "error": "invalid_grant",
+      "error_description": "Refresh token replayed"
+    }
+  }
+}

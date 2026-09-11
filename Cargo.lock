@@ -8289,6 +8289,7 @@ dependencies = [
  "futures",
  "hex",
  "hickory-resolver 0.24.4",
+ "hmac 0.12.1",
  "http-auth-basic",
  "image",
  "indexmap 1.9.3",

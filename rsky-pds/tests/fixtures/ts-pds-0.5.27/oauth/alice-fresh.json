@@ -1,0 +1,35 @@
+{
+  "did": "did:plc:xnu5z7akmky27sltgn7hbneu",
+  "client_id": "http://localhost?redirect_uri=http%3A%2F%2F127.0.0.1%2Fcb&scope=atproto+transition%3Ageneric",
+  "redirect_uri": "http://127.0.0.1/cb",
+  "scope": "atproto transition:generic",
+  "dpop": {
+    "private_jwk": {
+      "kty": "EC",
+      "x": "fqmUoX94_03vsGM4zOYZMOK_Ytb3KX4VMPeGDNBe55M",
+      "y": "WQ1WLsBPUj1rUcOyM0EpIPf6o8mNLV3UH4nUsJnhuzk",
+      "crv": "P-256",
+      "d": "Aov6ZEi4ZXRmfkoCG33xNHpW7etgGjtaT9uSLqlCQ_k"
+    },
+    "public_jwk": {
+      "kty": "EC",
+      "x": "fqmUoX94_03vsGM4zOYZMOK_Ytb3KX4VMPeGDNBe55M",
+      "y": "WQ1WLsBPUj1rUcOyM0EpIPf6o8mNLV3UH4nUsJnhuzk",
+      "crv": "P-256"
+    },
+    "jkt": "4_epEyYBzsJa_jOisbKpeGeZZUnGkZxwa-D1Bi8io4c"
+  },
+  "cookies": {
+    "dev-id": "dev-069762f0ea30595d2ef5ae6ec6b01e7f",
+    "ses-id": "ses-dccfa104c0c53aba742205c27c76fcae",
+    "csrf-token": "9ee03e2c9869377d16dd18ec"
+  },
+  "token": {
+    "access_token": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJqdGkiOiJ0b2stOGJiZTdjMTZiMzc0ZjljODQ0YmQ2NmE5ZGFiZmExMjkiLCJzdWIiOiJkaWQ6cGxjOnhudTV6N2FrbWt5MjdzbHRnbjdoYm5ldSIsImlhdCI6MTc4OTEzMjE3OSwiZXhwIjoxNzg5MTM1Nzc5LCJhdWQiOiJkaWQ6d2ViOmZpeHR1cmUudGVzdCIsImNuZiI6eyJqa3QiOiI0X2VwRXlZQnpzSmFfak9pc2JLcGVHZVpaVW5Ha1p4d2EtRDFCaThpbzRjIn0sImNsaWVudF9pZCI6Imh0dHA6Ly9sb2NhbGhvc3Q_cmVkaXJlY3RfdXJpPWh0dHAlM0ElMkYlMkYxMjcuMC4wLjElMkZjYiZzY29wZT1hdHByb3RvK3RyYW5zaXRpb24lM0FnZW5lcmljIiwiaXNzIjoiaHR0cHM6Ly9maXh0dXJlLnRlc3QifQ.1SGI9dOgcnj4fgUh2bjTNYu4Yr74bd51AaqtpqAY4j0",
+    "token_type": "DPoP",
+    "refresh_token": "ref-3aee07f52213705fb1e3f85aa46851309a659f9d200af57bed2e0b2fcaf71849",
+    "scope": "atproto transition:generic",
+    "expires_in": 3599,
+    "sub": "did:plc:xnu5z7akmky27sltgn7hbneu"
+  }
+}

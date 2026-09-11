@@ -1,13 +1,13 @@
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessFull;
+use crate::auth_verifier::AccessStandard;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::{AppPassword, ListAppPasswordsOutput};
 
 #[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.server.listAppPasswords")]
 pub async fn list_app_passwords(
-    auth: AccessFull,
+    auth: AccessStandard,
     account_manager: AccountManager,
 ) -> Result<Json<ListAppPasswordsOutput>, ApiError> {
     let did = auth.access.credentials.unwrap().did.unwrap();
@@ -18,6 +18,7 @@ pub async fn list_app_passwords(
                 .map(|password| AppPassword {
                     name: password.0,
                     created_at: password.1,
+                    privileged: Some(password.2),
                 })
                 .collect();
             Ok(Json(ListAppPasswordsOutput { passwords }))

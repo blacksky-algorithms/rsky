@@ -151,7 +151,11 @@ pub enum ApiError {
     AccountTakendown,
     InvalidRequest(String),
     ExpiredToken,
-    InvalidToken,
+    /// A refresh token that was revoked or already rotated past its grace period.
+    RefreshTokenRevoked,
+    InvalidToken(String),
+    /// No credentials were presented.
+    AuthMissing,
     /// A scope-limited token that does not cover the requested write.
     InsufficientScope(String),
     RecordNotFound,
@@ -205,36 +209,18 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 res.set_status(Status { code: 500u16 });
                 Ok(res)
             }
-            ApiError::InvalidLogin => {
-                let body = Json(ErrorBody {
-                    error: "InvalidLogin".to_string(),
-                    message: "Invalid identifier or password".to_string(),
-                });
-                let mut res =
-                    <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(::rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
-                res.set_status(Status { code: 400u16 });
-                Ok(res)
-            }
-            ApiError::AccountTakendown => {
-                let body = Json(ErrorBody {
-                    error: "AccountTakendown".to_string(),
-                    message: "Account has been taken down".to_string(),
-                });
-                let mut res =
-                    <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(::rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
-                res.set_status(Status { code: 400u16 });
-                Ok(res)
-            }
+            ApiError::InvalidLogin => json_error(
+                401,
+                "AuthenticationRequired",
+                "Invalid identifier or password".to_string(),
+                __req,
+            ),
+            ApiError::AccountTakendown => json_error(
+                401,
+                "AccountTakedown",
+                "Account has been taken down".to_string(),
+                __req,
+            ),
             ApiError::RepoNotFound(message) => json_error(400, "RepoNotFound", message, __req),
             ApiError::RepoTakendown(message) => json_error(400, "RepoTakendown", message, __req),
             ApiError::RepoDeactivated(message) => {
@@ -256,35 +242,21 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 Ok(res)
             }
             ApiError::ExpiredToken => {
-                let body = Json(ErrorBody {
-                    error: "ExpiredToken".to_string(),
-                    message: "Token is expired".to_string(),
-                });
-                let mut res =
-                    <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
-                res.set_status(Status { code: 400u16 });
-                Ok(res)
+                json_error(400, "ExpiredToken", "Token has expired".to_string(), __req)
             }
-            ApiError::InvalidToken => {
-                let body = Json(ErrorBody {
-                    error: "InvalidToken".to_string(),
-                    message: "Token is invalid".to_string(),
-                });
-                let mut res =
-                    <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
-                res.set_status(Status { code: 400u16 });
-                Ok(res)
-            }
+            ApiError::RefreshTokenRevoked => json_error(
+                400,
+                "ExpiredToken",
+                "Token has been revoked".to_string(),
+                __req,
+            ),
+            ApiError::InvalidToken(message) => json_error(400, "InvalidToken", message, __req),
+            ApiError::AuthMissing => json_error(
+                401,
+                "AuthMissing",
+                "Authentication Required".to_string(),
+                __req,
+            ),
             ApiError::InsufficientScope(message) => {
                 let body = Json(ErrorBody {
                     error: "InsufficientScope".to_string(),
@@ -508,19 +480,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 Ok(res)
             }
             ApiError::AuthRequiredError(message) => {
-                let body = Json(ErrorBody {
-                    error: "AuthRequiredError".to_string(),
-                    message,
-                });
-                let mut res =
-                    <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(::rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
-                res.set_status(Status { code: 401u16 });
-                Ok(res)
+                json_error(401, "AuthenticationRequired", message, __req)
             }
             ApiError::UpstreamResponse(status, error, message) => {
                 let body = Json(ErrorBody { error, message });
@@ -620,18 +580,18 @@ mod tests {
 /// Renders an [`AuthError`] as its wire-facing [`ApiError`].
 ///
 /// This is the single place auth guards translate a verification failure into
-/// the rendered error body. Previously every guard hardcoded `InvalidRequest`,
-/// which made an expired token indistinguishable from a malformed one; routing
-/// through here surfaces `ExpiredToken` so clients know to refresh, while every
-/// other case keeps its historical `InvalidRequest` rendering unchanged.
+/// the rendered error body, using the reference PDS's names: an expired
+/// session is `ExpiredToken` so clients know to refresh, a token that fails
+/// verification or scope is `InvalidToken`, and no credentials is `AuthMissing`.
 impl From<&AuthError> for ApiError {
     fn from(error: &AuthError) -> Self {
         match error {
             AuthError::ExpiredToken => ApiError::ExpiredToken,
-            // A missing or revoked credential, or one from an untrusted
-            // issuer or for the wrong audience, is an authentication failure
-            // and surfaces as 401. A malformed token (`BadJwt`) stays a 400
-            // client error so the two remain distinguishable.
+            AuthError::AuthMissing => ApiError::AuthMissing,
+            AuthError::BadJwt(message) => ApiError::InvalidToken(message.clone()),
+            // A revoked credential, or one from an untrusted issuer or for
+            // the wrong audience, is an authentication failure and surfaces
+            // as 401.
             AuthError::AuthRequired(_)
             | AuthError::BadJwtAudience(_)
             | AuthError::UntrustedIss(_) => ApiError::AuthRequiredError(error.to_string()),

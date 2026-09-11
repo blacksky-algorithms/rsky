@@ -80,7 +80,7 @@ pub async fn space_register_notify(
     } = body.into_inner();
     let space_id = parse_space_uri(&space)?;
     if auth.space_uri != space_id.uri() {
-        return Err(ApiError::InvalidToken);
+        return Err(ApiError::InvalidToken("Token is invalid".to_string()));
     }
     let subscriber = match (&service, &endpoint) {
         (Some(service), _) => Subscriber {

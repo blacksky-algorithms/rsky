@@ -1,0 +1,35 @@
+{
+  "did": "did:plc:p2jidewytiik24tsb37m4ktc",
+  "client_id": "http://localhost?redirect_uri=http%3A%2F%2F127.0.0.1%2Fcb&scope=atproto+transition%3Ageneric",
+  "redirect_uri": "http://127.0.0.1/cb",
+  "scope": "atproto transition:generic",
+  "dpop": {
+    "private_jwk": {
+      "kty": "EC",
+      "x": "LJ6tw6C-jf8sT4W2teuu1seBAJ0eOR-wPhOvbv-PuZc",
+      "y": "D4N5I6DnrtIx5a4RVbuSRIqb4F-JFJk5Xy85pJHo_wU",
+      "crv": "P-256",
+      "d": "FLOCqYQFI1ETLlKk3iWWXp2M8ZGDWDS4LQJt9ZZ-FZ0"
+    },
+    "public_jwk": {
+      "kty": "EC",
+      "x": "LJ6tw6C-jf8sT4W2teuu1seBAJ0eOR-wPhOvbv-PuZc",
+      "y": "D4N5I6DnrtIx5a4RVbuSRIqb4F-JFJk5Xy85pJHo_wU",
+      "crv": "P-256"
+    },
+    "jkt": "sLlSvlTk5CFOcDteKgd3OFR4VPLBVDAjTSAUE-8zwUY"
+  },
+  "cookies": {
+    "dev-id": "dev-08738e8c9669090e23e0f3d623882e46",
+    "ses-id": "ses-73e2e6af40ce296dadaa79b3011fc1a3",
+    "csrf-token": "f3617ebf0bd6dc7ab07ce15b"
+  },
+  "consent_error": {
+    "redirect_mode": "query",
+    "redirect_uri": "http://127.0.0.1/cb",
+    "iss": "https://fixture.test",
+    "state": "OCMPWb8tz6EQ8HjetvZ3ig",
+    "error": "access_denied",
+    "error_description": "This account has been deactivated"
+  }
+}

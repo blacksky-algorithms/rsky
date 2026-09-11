@@ -26,6 +26,24 @@ unused `recoveryKey`, `createdAt`, and `inviteNote` columns are dropped).
 `account.sqlite` before upgrading if a rollback to 1.1.x must remain possible.
 
 
+### Added — reference-compatible session tokens
+
+When `PDS_JWT_SECRET` is set, access and refresh tokens are signed with
+HMAC-SHA256 over that secret exactly as the reference PDS signs them (same
+header, claim order, and lifetimes), so sessions created by either
+implementation are valid on the other. Without it, tokens are signed with
+ES256K over `PDS_JWT_KEY_K256_PRIVATE_KEY_HEX` as before, and tokens rsky-pds
+1.1 issued with the default `JWT` header type stay valid. Tokens now carry
+and require the `at+jwt` / `refresh+jwt` types, a taken-down account can log
+in with `allowTakendown` and receives the `com.atproto.takendown` scope,
+app-password sessions keep their `privileged` flag across refreshes, and
+refresh rotation writes the grace period and the successor in one
+transaction. Session outputs carry `active` and `status`, `getSession` works
+for deactivated accounts, `listAppPasswords` reports `privileged` and accepts
+app-password sessions, and rejected credentials answer with the reference
+names: `AuthMissing` (401), `AuthenticationRequired` (401), `InvalidToken`
+(400), `ExpiredToken` (400), `AccountTakedown` (401).
+
 ### Fixed — responses that differed from the reference PDS
 
 - `com.atproto.sync.*` reads of a missing, taken-down, or deactivated

@@ -245,7 +245,7 @@ impl<'r> FromRequest<'r> for SpaceCredentialAuth {
             Ok(auth) => Outcome::Success(auth),
             Err(error) => {
                 tracing::debug!(%error, "space credential rejected");
-                let error = ApiError::InvalidToken;
+                let error = ApiError::InvalidToken("Token is invalid".to_string());
                 req.local_cache(|| Some(error.clone()));
                 Outcome::Error((Status::Unauthorized, error))
             }
@@ -281,7 +281,7 @@ impl<'r> FromRequest<'r> for SpaceReadAuth {
                 Ok(auth) => Outcome::Success(SpaceReadAuth::Credential(auth)),
                 Err(error) => {
                     tracing::debug!(%error, "space credential rejected");
-                    let error = ApiError::InvalidToken;
+                    let error = ApiError::InvalidToken("Token is invalid".to_string());
                     req.local_cache(|| Some(error.clone()));
                     Outcome::Error((Status::Unauthorized, error))
                 }
@@ -384,7 +384,7 @@ pub fn authorize_space_read(
             if credential.space_uri == space.uri() {
                 Ok(())
             } else {
-                Err(ApiError::InvalidToken)
+                Err(ApiError::InvalidToken("Token is invalid".to_string()))
             }
         }
         SpaceReadAuth::Session { did, credentials } => {

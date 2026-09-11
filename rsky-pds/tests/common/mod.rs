@@ -254,6 +254,14 @@ impl Fixture {
         self.account(name)["did"].as_str().unwrap().to_owned()
     }
 
+    pub fn token(&self, name: &str) -> String {
+        self.manifest["tokens"][name].as_str().unwrap().to_owned()
+    }
+
+    pub fn secret(&self, name: &str) -> String {
+        self.manifest["secrets"][name].as_str().unwrap().to_owned()
+    }
+
     pub fn expected(&self, name: &str) -> Vec<u8> {
         std::fs::read(self.source.join("expected").join(name)).expect("expected fixture output")
     }
@@ -432,4 +440,34 @@ pub async fn get_client_with_fixture() -> (&'static Fixture, Client) {
         .await
         .expect("Valid Rocket instance");
     (fixture, client)
+}
+
+/// Start a client over a fresh, private copy of the fixture's data
+/// directory, for tests that change session or account rows.
+#[allow(dead_code)]
+pub async fn get_client_with_fixture_copy() -> (&'static Fixture, TempDir, Client) {
+    let fixture = fixture();
+    init_env();
+    let dir = tempfile::tempdir().expect("Valid temporary directory");
+    copy_dir(&fixture.source.join("data"), &dir.path().join("data"));
+    let path = |name: &str| {
+        dir.path()
+            .join("data")
+            .join(name)
+            .to_str()
+            .unwrap()
+            .to_owned()
+    };
+    let rocket_cfg = RocketConfig {
+        service_db: Some(ServiceDbConfig {
+            account_db_location: path("account.sqlite"),
+            sequencer_db_location: path("sequencer.sqlite"),
+            did_cache_db_location: path("did_cache.sqlite"),
+        }),
+        actor_store_directory: Some(path("actors")),
+    };
+    let client = Client::untracked(build_rocket(Some(rocket_cfg)).await)
+        .await
+        .expect("Valid Rocket instance");
+    (fixture, dir, client)
 }

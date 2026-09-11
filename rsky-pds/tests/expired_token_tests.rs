@@ -1,46 +1,39 @@
 //! Regression tests for expired-token error surfacing.
 //!
 //! An expired access or refresh token must render as
-//! `400 {"error":"ExpiredToken","message":"Token is expired"}` so clients can
+//! `400 {"error":"ExpiredToken","message":"Token has expired"}` so clients can
 //! distinguish an expired session (call refreshSession / re-login) from a
 //! genuinely malformed token (`InvalidRequest`). Historically every auth guard
 //! collapsed both cases into `InvalidRequest`, leaving clients unable to tell
 //! the two apart.
 
-use jwt_simple::prelude::*;
 use rocket::http::{ContentType, Header, Status};
 use rocket::local::asynchronous::Client;
 use rocket::serde::json::json;
-use rsky_pds::account_manager::helpers::auth::CustomClaimObj;
-use rsky_pds::auth_verifier::{AuthScope, PDS_JWT_KEYPAIR};
+use rsky_pds::account_manager::helpers::auth::{
+    create_access_token_with, create_refresh_token_with, now_secs, CreateTokensOpts, PDS_JWT_SIGNER,
+};
+use rsky_pds::auth_verifier::AuthScope;
 
 mod common;
 
 /// Signs an already-EXPIRED JWT with the PDS's own signing key so it passes
-/// signature verification and fails purely on the expiry claim.
-///
-/// jwt-simple's default time tolerance is 900s, so the token is backdated to
-/// have expired a full hour ago -- well beyond the tolerance -- otherwise the
-/// "expired" token would still verify and the test would be vacuous.
+/// signature verification and fails purely on the expiry claim: issued three
+/// hours ago with the standard two-hour lifetime, so it expired an hour ago.
 fn sign_expired_token(scope: AuthScope, did: &str, aud: &str, jti: Option<String>) -> String {
-    let mut claims = Claims::with_custom_claims(
-        CustomClaimObj {
-            scope: scope.as_str().to_owned(),
-        },
-        Duration::from_hours(2),
-    )
-    .with_audience(aud.to_owned())
-    .with_subject(did.to_owned());
-    if let Some(jti) = jti {
-        claims = claims.with_jwt_id(jti);
+    let opts = CreateTokensOpts {
+        did: did.to_owned(),
+        service_did: aud.to_owned(),
+        scope: Some(scope.clone()),
+        jti,
+        expires_in_secs: Some(2 * 60 * 60),
+        issued_at: Some(now_secs() - 3 * 60 * 60),
+    };
+    match scope {
+        AuthScope::Refresh => create_refresh_token_with(&PDS_JWT_SIGNER, opts),
+        _ => create_access_token_with(&PDS_JWT_SIGNER, opts),
     }
-    let now = Clock::now_since_epoch();
-    // Issued three hours ago, expired one hour ago.
-    claims.issued_at = Some(now - Duration::from_hours(3));
-    claims.expires_at = Some(now - Duration::from_hours(1));
-    PDS_JWT_KEYPAIR
-        .sign(claims)
-        .expect("sign token with PDS keypair")
+    .expect("sign token with the PDS signer")
 }
 
 fn service_did() -> String {
@@ -81,7 +74,7 @@ async fn expired_access_token_returns_expired_token() {
     let body: serde_json::Value = response.into_json().await.expect("json error body");
     assert_eq!(status, Status::BadRequest, "body was {body}");
     assert_eq!(body["error"], "ExpiredToken", "body was {body}");
-    assert_eq!(body["message"], "Token is expired", "body was {body}");
+    assert_eq!(body["message"], "Token has expired", "body was {body}");
 }
 
 /// DoD 2: an expired REFRESH token on refreshSession yields 400 ExpiredToken.
@@ -106,13 +99,13 @@ async fn expired_refresh_token_returns_expired_token() {
     let body: serde_json::Value = response.into_json().await.expect("json error body");
     assert_eq!(status, Status::BadRequest, "body was {body}");
     assert_eq!(body["error"], "ExpiredToken", "body was {body}");
-    assert_eq!(body["message"], "Token is expired", "body was {body}");
+    assert_eq!(body["message"], "Token has expired", "body was {body}");
 }
 
-/// DoD 3: a malformed token must NOT be reported as ExpiredToken -- it stays
-/// InvalidRequest so the two failure modes remain distinguishable.
+/// DoD 3: a malformed token must NOT be reported as ExpiredToken -- it is
+/// InvalidToken so the two failure modes remain distinguishable.
 #[tokio::test]
-async fn malformed_token_returns_invalid_request_not_expired() {
+async fn malformed_token_returns_invalid_token_not_expired() {
     let (_dir, client) = common::get_client().await;
 
     let response = client
@@ -125,7 +118,11 @@ async fn malformed_token_returns_invalid_request_not_expired() {
     let body: serde_json::Value = response.into_json().await.expect("json error body");
     assert_eq!(status, Status::BadRequest, "body was {body}");
     assert_ne!(body["error"], "ExpiredToken", "body was {body}");
-    assert_eq!(body["error"], "InvalidRequest", "body was {body}");
+    assert_eq!(body["error"], "InvalidToken", "body was {body}");
+    assert_eq!(
+        body["message"], "Token could not be verified",
+        "body was {body}"
+    );
 }
 
 /// DoD 4: a valid, unexpired access token for an existing account still

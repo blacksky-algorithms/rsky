@@ -137,8 +137,10 @@ async fn test_create_session() {
         .body(session_input.to_string())
         .dispatch()
         .await;
-    let response_status = response.status();
-    assert_eq!(response_status, Status::BadRequest);
+    assert_eq!(response.status(), Status::Unauthorized);
+    let body: serde_json::Value = response.into_json().await.unwrap();
+    assert_eq!(body["error"], "AuthenticationRequired");
+    assert_eq!(body["message"], "Invalid identifier or password");
 }
 
 #[tokio::test]

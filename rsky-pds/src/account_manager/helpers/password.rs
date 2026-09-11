@@ -13,6 +13,14 @@ use scrypt::{scrypt, Params as ScryptParams};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
+/// An app password a session was created with, and whether it may reach
+/// privileged methods.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppPassDescript {
+    pub name: String,
+    pub privileged: bool,
+}
+
 pub struct UpdateUserPasswordOpts {
     pub did: String,
     pub password_encrypted: String,
@@ -57,16 +65,26 @@ pub async fn verify_account_password(did: &str, password: &String, db: &Db) -> R
     }
 }
 
-pub async fn verify_app_password(did: &str, password: &str, db: &Db) -> Result<Option<String>> {
+pub async fn verify_app_password(
+    did: &str,
+    password: &str,
+    db: &Db,
+) -> Result<Option<AppPassDescript>> {
     let did = did.to_owned();
     let password = password.to_owned();
     let password_encrypted = hash_app_password(&did, &password).await?;
     db.run(move |conn| {
         Ok(conn
             .query_row(
-                "SELECT name FROM app_password WHERE did = ?1 AND \"passwordScrypt\" = ?2",
+                "SELECT name, privileged FROM app_password \
+                 WHERE did = ?1 AND \"passwordScrypt\" = ?2",
                 params![did, password_encrypted],
-                |row| row.get(0),
+                |row| {
+                    Ok(AppPassDescript {
+                        name: row.get(0)?,
+                        privileged: row.get::<_, i64>(1)? == 1,
+                    })
+                },
             )
             .optional()?)
     })
@@ -195,14 +213,17 @@ pub async fn create_app_password(
     .await
 }
 
-pub async fn list_app_passwords(did: &str, db: &Db) -> Result<Vec<(String, String)>> {
+/// Every app password of `did` as `(name, created_at, privileged)`.
+pub async fn list_app_passwords(did: &str, db: &Db) -> Result<Vec<(String, String, bool)>> {
     let did = did.to_owned();
     db.run(move |conn| {
-        let mut stmt =
-            conn.prepare("SELECT name, \"createdAt\" FROM app_password WHERE did = ?1")?;
+        let mut stmt = conn
+            .prepare("SELECT name, \"createdAt\", privileged FROM app_password WHERE did = ?1")?;
         let rows = stmt
-            .query_map(params![did], |row| Ok((row.get(0)?, row.get(1)?)))?
-            .collect::<Result<Vec<(String, String)>, rusqlite::Error>>()?;
+            .query_map(params![did], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? == 1))
+            })?
+            .collect::<Result<Vec<(String, String, bool)>, rusqlite::Error>>()?;
         Ok(rows)
     })
     .await

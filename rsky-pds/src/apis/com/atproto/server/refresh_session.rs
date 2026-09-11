@@ -1,4 +1,6 @@
-use crate::account_manager::helpers::account::AvailabilityFlags;
+use crate::account_manager::helpers::account::{
+    format_account_status, AvailabilityFlags, FormattedAccountStatus,
+};
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
 use crate::auth_verifier::{Credentials, Refresh};
@@ -23,26 +25,30 @@ async fn inner_refresh_session(
             }),
         )
         .await?;
-
-    if let Some(user) = user {
-        if user.takedown_ref.is_some() {
-            return Err(ApiError::AccountTakendown);
-        }
-        let rotated = account_manager.rotate_refresh_token(&token_id).await?;
-        if let Some(rotated) = rotated {
-            Ok(RefreshSessionOutput {
-                handle: user.handle.unwrap_or(INVALID_HANDLE.to_string()),
-                did,
-                did_doc: None,
-                access_jwt: rotated.0,
-                refresh_jwt: rotated.1,
-            })
-        } else {
-            Err(ApiError::ExpiredToken)
-        }
-    } else {
-        Err(ApiError::AccountNotFound)
+    let Some(user) = user else {
+        return Err(ApiError::InvalidRequest(format!(
+            "Could not find user info for account: {did}"
+        )));
+    };
+    if user.takedown_ref.is_some() {
+        return Err(ApiError::AccountTakendown);
     }
+    let Some((access_jwt, refresh_jwt)) = account_manager.rotate_refresh_token(&token_id).await?
+    else {
+        return Err(ApiError::RefreshTokenRevoked);
+    };
+    let FormattedAccountStatus { active, status } = format_account_status(Some(user.clone()));
+    Ok(RefreshSessionOutput {
+        handle: user.handle.unwrap_or(INVALID_HANDLE.to_string()),
+        did,
+        did_doc: None,
+        access_jwt,
+        refresh_jwt,
+        email: user.email,
+        email_confirmed: Some(user.email_confirmed_at.is_some()),
+        active: Some(active),
+        status: status.map(|status| status.as_str().to_owned()),
+    })
 }
 
 #[tracing::instrument(skip_all)]
