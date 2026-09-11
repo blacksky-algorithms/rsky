@@ -204,3 +204,42 @@ async fn update_email_follows_the_reference_rules() {
     .await;
     assert_eq!(status, Status::Ok, "{json}");
 }
+
+/// Without a mail transport the deletion request still mints the token the
+/// deletion needs and logs the message the reference would have sent.
+#[tokio::test]
+async fn request_account_delete_mints_a_token() {
+    let (dir, client) = get_client().await;
+    let (identifier, password) = create_account(&client).await;
+    let token = format!(
+        "Bearer {}",
+        session_token(&client, &identifier, &password).await
+    );
+    let request = "/xrpc/com.atproto.server.requestAccountDelete";
+    let response = client
+        .post(request)
+        .header(Header::new("Authorization", token.clone()))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let db = account_db(dir.path());
+    let minted: i64 = db
+        .query_row(
+            "SELECT count(*) FROM email_token WHERE did = ?1 AND purpose = 'delete_account'",
+            [DID],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(minted, 1);
+    // an account whose row is gone but whose actor remains has no email to mail
+    db.execute("DELETE FROM account WHERE did = ?1", [DID])
+        .unwrap();
+    let response = client
+        .post(request)
+        .header(Header::new("Authorization", token))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::BadRequest);
+    let body: Value = response.into_json().await.unwrap();
+    assert_eq!(body["message"], "account does not have an email address");
+}

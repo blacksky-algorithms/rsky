@@ -25,6 +25,9 @@ pub struct TokenParam {
     pub token: String,
 }
 
+/// Sends through Mailgun when it is configured. Without a transport the
+/// message is logged instead, the way the reference PDS's development
+/// transport does, so token flows still complete.
 pub async fn send_template(opts: MailOpts) -> Result<()> {
     let MailOpts {
         to,
@@ -32,6 +35,17 @@ pub async fn send_template(opts: MailOpts) -> Result<()> {
         template,
         template_vars,
     } = opts;
+    let configured = env::var("PDS_MAILGUN_API_KEY").is_ok_and(|key| !key.is_empty());
+    if !configured {
+        tracing::info!(
+            %to,
+            %subject,
+            %template,
+            ?template_vars,
+            "no mail transport is configured; message logged"
+        );
+        return Ok(());
+    }
 
     let recipient = EmailAddress::address(&to);
     let message = Message {

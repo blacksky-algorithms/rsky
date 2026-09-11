@@ -545,6 +545,7 @@ fn json_error<'r, 'o: 'r>(
 
 impl From<Error> for ApiError {
     fn from(value: Error) -> Self {
+        use crate::account_manager::helpers::account::AccountHelperError;
         use crate::account_manager::helpers::email_token::EmailTokenError;
         use crate::apis::com::atproto::repo::RepoUnavailable;
         use crate::lifecycle::AccountDeleting;
@@ -563,6 +564,11 @@ impl From<Error> for ApiError {
         }
         if value.downcast_ref::<AccountDeleting>().is_some() {
             return ApiError::InvalidRequest(value.to_string());
+        }
+        if let Some(AccountHelperError::UserAlreadyExistsError) = value.downcast_ref() {
+            return ApiError::InvalidRequest(
+                "This email address is already in use, please use a different email.".to_string(),
+            );
         }
         tracing::error!(error = ?value, "request failed with an internal error");
         ApiError::RuntimeError

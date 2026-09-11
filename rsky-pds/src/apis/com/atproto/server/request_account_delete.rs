@@ -24,9 +24,7 @@ pub async fn request_account_delete(
             }),
         )
         .await?;
-    let Some(account) = account else {
-        return Err(ApiError::InvalidRequest("account not found".to_string()));
-    };
+    let account = account.ok_or(ApiError::InvalidRequest("account not found".to_string()))?;
     let Some(email) = account.email else {
         return Err(ApiError::InvalidRequest(
             "account does not have an email address".to_string(),

@@ -91,6 +91,8 @@ but not yet referenced by a record is not served.
   `com.atproto.repo.listRecords` answers `InvalidRequest` for a repository it
   does not serve, instead of internal errors.
 - `com.atproto.server.describeServer` includes `blobUploadLimit`.
+- Outgoing mail is logged and skipped when `PDS_MAILGUN_API_KEY` is unset or
+  empty instead of aborting the request.
 
 ### Added — reference-PDS compatibility fixture
 

@@ -110,6 +110,8 @@ fn init_env() {
             ("PDS_SERVICE_DID", "did:web:localho.st"),
             ("PDS_SERVICE_HANDLE_DOMAINS", ".rsky.com"),
             ("PDS_ADMIN_PASS", "3ed1c7b568d3328c44430add531a099f"),
+            // no mail transport: messages are logged, never sent
+            ("PDS_MAILGUN_API_KEY", ""),
             // pin the proxy targets so a developer's .env cannot leak real
             // services into the tests; localhost is rejected by is_safe_url
             ("PDS_MOD_SERVICE_URL", "http://localhost:1"),

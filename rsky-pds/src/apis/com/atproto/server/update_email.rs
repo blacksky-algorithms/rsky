@@ -1,4 +1,4 @@
-use crate::account_manager::helpers::account::{AccountHelperError, AvailabilityFlags};
+use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::{AccountManager, UpdateEmailOpts};
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessFull;
@@ -28,35 +28,26 @@ async fn inner_update_email(
         )
         .await?;
 
-    if let Some(account) = account {
-        // require valid token if account email is confirmed
-        if account.email_confirmed_at.is_some() {
-            if let Some(token) = token {
+    let account = account.ok_or(ApiError::InvalidRequest("account not found".to_string()))?;
+    // require valid token if account email is confirmed
+    if account.email_confirmed_at.is_some() {
+        match token {
+            Some(token) => {
                 account_manager
                     .assert_valid_email_token(&did, EmailTokenPurpose::UpdateEmail, &token)
-                    .await?;
-            } else {
+                    .await?
+            }
+            None => {
                 return Err(ApiError::InvalidRequest(
                     "Confirmation token required".to_string(),
-                ));
+                ))
             }
         }
-        match account_manager
-            .update_email(UpdateEmailOpts { did, email })
-            .await
-        {
-            Ok(_) => Ok(()),
-            Err(e) => match e.downcast_ref() {
-                Some(AccountHelperError::UserAlreadyExistsError) => Err(ApiError::InvalidRequest(
-                    "This email address is already in use, please use a different email."
-                        .to_string(),
-                )),
-                _ => Err(e.into()),
-            },
-        }
-    } else {
-        Err(ApiError::InvalidRequest("account not found".to_string()))
     }
+    account_manager
+        .update_email(UpdateEmailOpts { did, email })
+        .await?;
+    Ok(())
 }
 
 #[tracing::instrument(skip_all)]
