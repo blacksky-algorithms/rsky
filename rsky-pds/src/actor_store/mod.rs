@@ -9,9 +9,11 @@ use crate::actor_store::record::{delete_record_in, index_record_in, RecordReader
 use crate::actor_store::repo::sql_repo::{apply_commit_in, SqlRepoReader};
 use crate::actor_store::repo::types::SyncEvtData;
 use crate::actor_store::space::SpaceStore;
+use crate::admission::Admission;
 use crate::background::BackgroundQueue;
 use crate::config::ActorStoreConfig;
 use crate::lifecycle::LifecycleStore;
+use crate::locks::{FileLock, LockDir};
 use crate::publication::settle_pending_work;
 use crate::sequencer::events::{format_seq_commit, format_seq_sync_evt, sync_evt_data_from_commit};
 use anyhow::{anyhow, bail, Result};
@@ -261,14 +263,50 @@ pub struct ActorStore {
     pub reserved_key_dir: PathBuf,
     pub background_queue: BackgroundQueue,
     pub lifecycle: LifecycleStore,
+    pub admission: Arc<Admission>,
     /// Another implementation shares the stores and may still serve their
     /// objects, so nothing is deleted from object storage.
     pub coexistence: bool,
     cache: Mutex<LruCache<String, CachedDb>>,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     publish_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Cross-process locks, when a directory for them is configured.
+    lock_dir: Option<LockDir>,
+    inflight: Arc<Mutex<HashMap<String, usize>>>,
     /// DIDs whose deletion is in progress; no write is admitted for them.
     tombstones: crate::lifecycle::Tombstones,
+}
+
+/// Counts a write for its actor while the transactor lives.
+struct InflightGuard {
+    did: String,
+    inflight: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+impl InflightGuard {
+    fn new(did: &str, inflight: &Arc<Mutex<HashMap<String, usize>>>) -> Self {
+        *inflight
+            .lock()
+            .expect("inflight counts poisoned")
+            .entry(did.to_owned())
+            .or_insert(0) += 1;
+        InflightGuard {
+            did: did.to_owned(),
+            inflight: inflight.clone(),
+        }
+    }
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        let mut inflight = self.inflight.lock().expect("inflight counts poisoned");
+        match inflight.get_mut(&self.did) {
+            Some(count) if *count > 1 => *count -= 1,
+            _ => {
+                inflight.remove(&self.did);
+            }
+        }
+    }
 }
 
 /// How an actor store is being opened. Reads never modify the store's
@@ -301,16 +339,39 @@ impl ActorStore {
             background_queue,
             tombstones: lifecycle.tombstones(),
             lifecycle,
+            admission: Arc::new(Admission::unrestricted()),
             coexistence: false,
             cache: Mutex::new(LruCache::new(cache_size)),
             locks: Mutex::new(HashMap::new()),
             publish_locks: Mutex::new(HashMap::new()),
+            lock_dir: None,
+            inflight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn with_coexistence(mut self, coexistence: bool) -> Self {
         self.coexistence = coexistence;
         self
+    }
+
+    pub fn with_admission(mut self, admission: Arc<Admission>) -> Self {
+        self.admission = admission;
+        self
+    }
+
+    pub fn with_lock_dir(mut self, lock_dir: LockDir) -> Self {
+        self.lock_dir = Some(lock_dir);
+        self
+    }
+
+    /// Client writes on `did` that have started and not finished.
+    pub fn inflight_mutations(&self, did: &str) -> usize {
+        self.inflight
+            .lock()
+            .expect("inflight counts poisoned")
+            .get(did)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// The CIDs of every blob the store registers, from the store alone.
@@ -381,6 +442,10 @@ impl ActorStore {
     /// Runs the store's journaled blob work in the background and clears
     /// the actor's pending mark once nothing is outstanding.
     pub fn queue_blob_work(&self, did: &str, blobstore: Arc<dyn BlobStore>) {
+        if let Err(refused) = self.admission.admit_worker(did) {
+            tracing::warn!(%refused, "blob work not run");
+            return;
+        }
         let did = did.to_owned();
         let db = self.write_db_cached(&did);
         let lifecycle = self.lifecycle.clone();
@@ -465,7 +530,13 @@ impl ActorStore {
         blobstore: Arc<dyn BlobStore>,
     ) -> Result<ActorStoreTransactor> {
         crate::lifecycle::assert_not_deleting(&self.tombstones, &did)?;
+        self.admission.admit_mutation(&did)?;
         let guard = self.did_lock(&did).lock_owned().await;
+        let file_lock = match &self.lock_dir {
+            Some(lock_dir) => Some(lock_dir.shared(&did).await?),
+            None => None,
+        };
+        let inflight = InflightGuard::new(&did, &self.inflight);
         let db = self.open_db(&did, OpenMode::Write).await?;
         let key_location = self.get_location(&did)?.key_location;
         let reader = ActorStoreReader::new(
@@ -481,12 +552,15 @@ impl ActorStore {
             reader,
             keypair,
             lifecycle: self.lifecycle.clone(),
+            _inflight: inflight,
+            _file_lock: file_lock,
             _guard: guard,
         })
     }
 
     pub async fn create(&self, did: &str, keypair: &Keypair) -> Result<()> {
         crate::lifecycle::assert_not_deleting(&self.tombstones, did)?;
+        self.admission.admit_mutation(did)?;
         let location = self.get_location(did)?;
         tokio::fs::create_dir_all(&location.directory).await?;
         if tokio::fs::try_exists(&location.db_location).await? {
@@ -516,6 +590,7 @@ impl ActorStore {
     /// Deletes the account's objects from blob storage; failures are logged
     /// because the store is going away regardless.
     pub async fn delete_blobs(&self, did: &str, blobstore: Arc<dyn BlobStore>) -> Result<()> {
+        self.admission.admit_worker(did)?;
         if let Some(delete_all) = blobstore.delete_all() {
             if let Err(err) = delete_all.await {
                 tracing::error!(?err, did, "failed to delete blobs from blobstore");
@@ -535,6 +610,7 @@ impl ActorStore {
     /// Removes the actor directory and forgets the store, touching nothing
     /// in blob storage.
     pub async fn unlink(&self, did: &str) -> Result<()> {
+        self.admission.admit_worker(did)?;
         {
             let mut cache = self.cache.lock().expect("actor store cache poisoned");
             cache.pop(did);
@@ -672,6 +748,8 @@ pub struct ActorStoreTransactor {
     reader: ActorStoreReader,
     pub keypair: Keypair,
     lifecycle: LifecycleStore,
+    _inflight: InflightGuard,
+    _file_lock: Option<FileLock>,
     _guard: OwnedMutexGuard<()>,
 }
 

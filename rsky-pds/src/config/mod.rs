@@ -64,31 +64,50 @@ pub struct ServiceDbConfig {
     pub did_cache_db_location: String,
     /// The deletion and purge journal, kept outside every actor store.
     pub lifecycle_db_location: String,
+    /// Per-actor advisory locks shared with maintenance tooling.
+    pub lock_dir: String,
+}
+
+/// Per-location overrides of the layout under the data directory.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StorageOverrides {
+    pub actor_store_directory: Option<String>,
+    pub actor_store_cache_size: Option<usize>,
+    pub account_db_location: Option<String>,
+    pub sequencer_db_location: Option<String>,
+    pub did_cache_db_location: Option<String>,
+    pub lifecycle_db_location: Option<String>,
+    pub lock_dir: Option<String>,
 }
 
 pub fn storage_cfg_from(
     data_directory: Option<String>,
-    actor_store_directory: Option<String>,
-    actor_store_cache_size: Option<usize>,
-    account_db_location: Option<String>,
-    sequencer_db_location: Option<String>,
-    did_cache_db_location: Option<String>,
-    lifecycle_db_location: Option<String>,
+    overrides: StorageOverrides,
 ) -> (ActorStoreConfig, ServiceDbConfig) {
     let db_loc = |name: &str| match &data_directory {
         Some(data_directory) => format!("{data_directory}/{name}"),
         None => name.to_string(),
     };
     let actor_store = ActorStoreConfig {
-        directory: actor_store_directory.unwrap_or_else(|| db_loc("actors")),
-        cache_size: actor_store_cache_size.unwrap_or(100),
+        directory: overrides
+            .actor_store_directory
+            .unwrap_or_else(|| db_loc("actors")),
+        cache_size: overrides.actor_store_cache_size.unwrap_or(100),
     };
     let service_db = ServiceDbConfig {
-        account_db_location: account_db_location.unwrap_or_else(|| db_loc("account.sqlite")),
-        sequencer_db_location: sequencer_db_location.unwrap_or_else(|| db_loc("sequencer.sqlite")),
-        did_cache_db_location: did_cache_db_location.unwrap_or_else(|| db_loc("did_cache.sqlite")),
-        lifecycle_db_location: lifecycle_db_location
+        account_db_location: overrides
+            .account_db_location
+            .unwrap_or_else(|| db_loc("account.sqlite")),
+        sequencer_db_location: overrides
+            .sequencer_db_location
+            .unwrap_or_else(|| db_loc("sequencer.sqlite")),
+        did_cache_db_location: overrides
+            .did_cache_db_location
+            .unwrap_or_else(|| db_loc("did_cache.sqlite")),
+        lifecycle_db_location: overrides
+            .lifecycle_db_location
             .unwrap_or_else(|| db_loc("rsky/lifecycle.sqlite")),
+        lock_dir: overrides.lock_dir.unwrap_or_else(|| db_loc("rsky/locks")),
     };
     (actor_store, service_db)
 }
@@ -142,6 +161,9 @@ pub struct CoreConfig {
     /// Another implementation shares this data directory and may still
     /// serve its objects, so nothing in blob storage is deleted here.
     pub coexistence: bool,
+    /// The write allowlist naming the actors this process may write; every
+    /// actor is admitted when unset.
+    pub write_allowlist_file: Option<String>,
 }
 
 pub fn env_to_cfg() -> ServerConfig {
@@ -166,6 +188,7 @@ pub fn env_to_cfg() -> ServerConfig {
         contact_email_address: env_str("PDS_CONTACT_EMAIL_ADDRESS"),
         dev_mode: env_bool("PDS_DEV_MODE").unwrap_or(false),
         coexistence: env_bool("PDS_COEXISTENCE").unwrap_or(false),
+        write_allowlist_file: env_str("PDS_WRITE_ALLOWLIST_FILE"),
     };
     let service_handle_domains: Vec<String>;
     if !env_list("PDS_SERVICE_HANDLE_DOMAINS").is_empty() {
@@ -234,12 +257,15 @@ pub fn env_to_cfg() -> ServerConfig {
     let crawlers_cfg = env_list("PDS_CRAWLERS");
     let (actor_store_cfg, service_db_cfg) = storage_cfg_from(
         env_str("PDS_DATA_DIRECTORY"),
-        env_str("PDS_ACTOR_STORE_DIRECTORY"),
-        env_int("PDS_ACTOR_STORE_CACHE_SIZE"),
-        env_str("PDS_ACCOUNT_DB_LOCATION"),
-        env_str("PDS_SEQUENCER_DB_LOCATION"),
-        env_str("PDS_DID_CACHE_DB_LOCATION"),
-        env_str("PDS_LIFECYCLE_DB"),
+        StorageOverrides {
+            actor_store_directory: env_str("PDS_ACTOR_STORE_DIRECTORY"),
+            actor_store_cache_size: env_int("PDS_ACTOR_STORE_CACHE_SIZE"),
+            account_db_location: env_str("PDS_ACCOUNT_DB_LOCATION"),
+            sequencer_db_location: env_str("PDS_SEQUENCER_DB_LOCATION"),
+            did_cache_db_location: env_str("PDS_DID_CACHE_DB_LOCATION"),
+            lifecycle_db_location: env_str("PDS_LIFECYCLE_DB"),
+            lock_dir: env_str("PDS_LOCK_DIR"),
+        },
     );
     let blobstore_cfg = blobstore_cfg_from(
         env_str("PDS_BLOBSTORE_DISK_LOCATION"),
@@ -470,19 +496,20 @@ mod tests {
 
     #[test]
     fn storage_cfg_defaults_without_data_directory() {
-        let (actor_store, service_db) = storage_cfg_from(None, None, None, None, None, None, None);
+        let (actor_store, service_db) = storage_cfg_from(None, StorageOverrides::default());
         assert_eq!(actor_store.directory, "actors");
         assert_eq!(actor_store.cache_size, 100);
         assert_eq!(service_db.account_db_location, "account.sqlite");
         assert_eq!(service_db.sequencer_db_location, "sequencer.sqlite");
         assert_eq!(service_db.did_cache_db_location, "did_cache.sqlite");
         assert_eq!(service_db.lifecycle_db_location, "rsky/lifecycle.sqlite");
+        assert_eq!(service_db.lock_dir, "rsky/locks");
     }
 
     #[test]
     fn storage_cfg_defaults_under_data_directory() {
         let (actor_store, service_db) =
-            storage_cfg_from(Some("/data".to_owned()), None, None, None, None, None, None);
+            storage_cfg_from(Some("/data".to_owned()), StorageOverrides::default());
         assert_eq!(actor_store.directory, "/data/actors");
         assert_eq!(service_db.account_db_location, "/data/account.sqlite");
         assert_eq!(service_db.sequencer_db_location, "/data/sequencer.sqlite");
@@ -491,18 +518,22 @@ mod tests {
             service_db.lifecycle_db_location,
             "/data/rsky/lifecycle.sqlite"
         );
+        assert_eq!(service_db.lock_dir, "/data/rsky/locks");
     }
 
     #[test]
     fn storage_cfg_explicit_values_win() {
         let (actor_store, service_db) = storage_cfg_from(
             Some("/data".to_owned()),
-            Some("/elsewhere/actors".to_owned()),
-            Some(5),
-            Some("/dbs/account.sqlite".to_owned()),
-            Some("/dbs/sequencer.sqlite".to_owned()),
-            Some("/dbs/did_cache.sqlite".to_owned()),
-            Some("/dbs/lifecycle.sqlite".to_owned()),
+            StorageOverrides {
+                actor_store_directory: Some("/elsewhere/actors".to_owned()),
+                actor_store_cache_size: Some(5),
+                account_db_location: Some("/dbs/account.sqlite".to_owned()),
+                sequencer_db_location: Some("/dbs/sequencer.sqlite".to_owned()),
+                did_cache_db_location: Some("/dbs/did_cache.sqlite".to_owned()),
+                lifecycle_db_location: Some("/dbs/lifecycle.sqlite".to_owned()),
+                lock_dir: Some("/dbs/locks".to_owned()),
+            },
         );
         assert_eq!(actor_store.directory, "/elsewhere/actors");
         assert_eq!(actor_store.cache_size, 5);
@@ -510,5 +541,6 @@ mod tests {
         assert_eq!(service_db.sequencer_db_location, "/dbs/sequencer.sqlite");
         assert_eq!(service_db.did_cache_db_location, "/dbs/did_cache.sqlite");
         assert_eq!(service_db.lifecycle_db_location, "/dbs/lifecycle.sqlite");
+        assert_eq!(service_db.lock_dir, "/dbs/locks");
     }
 }

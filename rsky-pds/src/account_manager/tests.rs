@@ -1016,3 +1016,100 @@ async fn invite_helper_direct_queries() {
         .unwrap()
         .is_empty());
 }
+
+#[tokio::test]
+async fn account_mutations_follow_the_allowlist() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = crate::account_manager::db::get_migrated_db(dir.path().join("account.sqlite"))
+        .await
+        .unwrap();
+    let allowlist = dir.path().join("write-allowlist.toml");
+    std::fs::write(
+        &allowlist,
+        "version = 1\ndefault = \"absent\"\n[entries]\n\"did:plc:admitted\" = \"active\"\n",
+    )
+    .unwrap();
+    let manager = AccountManager::new(db).with_admission(std::sync::Arc::new(
+        crate::admission::Admission::from_file(&allowlist).unwrap(),
+    ));
+    assert!(format!("{manager:?}").contains("AccountManager"));
+    let refused = manager
+        .update_handle("did:plc:other", "other.test")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused
+            .downcast_ref::<crate::admission::NotAdmitted>()
+            .unwrap()
+            .state,
+        "absent"
+    );
+    for result in [
+        manager.delete_account("did:plc:other").await,
+        manager.deactivate_account("did:plc:other", None).await,
+        manager.activate_account("did:plc:other").await,
+        manager
+            .set_account_invites_disabled("did:plc:other", true)
+            .await,
+        manager
+            .revoke_app_password("did:plc:other".to_owned(), "x".to_owned())
+            .await,
+        manager
+            .update_email(UpdateEmailOpts {
+                did: "did:plc:other".to_owned(),
+                email: "x@example.com".to_owned(),
+            })
+            .await,
+        manager
+            .update_account_password(UpdateAccountPasswordOpts {
+                did: "did:plc:other".to_owned(),
+                password: "p".to_owned(),
+            })
+            .await,
+        manager
+            .confirm_email(ConfirmEmailOpts {
+                did: &"did:plc:other".to_owned(),
+                token: &"t".to_owned(),
+            })
+            .await,
+        manager
+            .create_app_password("did:plc:other".to_owned(), "x".to_owned())
+            .await
+            .map(drop),
+        manager
+            .takedown_account(
+                "did:plc:other",
+                rsky_lexicon::com::atproto::admin::StatusAttr {
+                    applied: true,
+                    r#ref: None,
+                },
+            )
+            .await,
+        manager
+            .update_repo_root(
+                "did:plc:other".to_owned(),
+                lexicon_cid::Cid::from_str(
+                    "bafkreibjfgx2gprinfvicegelk5kosd6y2frmqpqzwqkg7usac74l3t2v4",
+                )
+                .unwrap(),
+                "rev".to_owned(),
+            )
+            .await,
+    ] {
+        let err = result.unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::admission::NotAdmitted>()
+                .is_some(),
+            "{err}"
+        );
+    }
+    // an admitted actor passes the gate
+    if let Err(err) = manager
+        .update_handle("did:plc:admitted", "admitted.test")
+        .await
+    {
+        assert!(err
+            .downcast_ref::<crate::admission::NotAdmitted>()
+            .is_none());
+    }
+}

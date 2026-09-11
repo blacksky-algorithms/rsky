@@ -10,6 +10,7 @@ use event_emitter_rs::EventEmitter;
 use lazy_static::lazy_static;
 pub mod account_manager;
 pub mod actor_store;
+pub mod admission;
 pub mod apis;
 pub mod auth_verifier;
 pub mod background;
@@ -18,10 +19,12 @@ pub mod context;
 pub mod crawlers;
 pub mod db;
 pub mod did_cache;
+pub mod drain;
 pub mod handle;
 pub mod image;
 pub mod lexicon;
 pub mod lifecycle;
+pub mod locks;
 pub mod mailer;
 pub mod models;
 pub mod oauth;
@@ -91,7 +94,7 @@ use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::shield::{NoSniff, Shield};
-use rocket::{Request, Response};
+use rocket::{Request, Response, State};
 use rsky_identity::types::IdentityResolverOpts;
 use rsky_identity::IdResolver;
 use std::env;
@@ -161,6 +164,18 @@ async fn health(
 #[get("/xrpc/_health/live")]
 async fn health_live() -> &'static str {
     "ok"
+}
+
+/// What an actor still owes this process; the router and the hand-back
+/// tooling read it before moving the actor to another writer.
+#[tracing::instrument(skip_all)]
+#[get("/xrpc/_drain_status?<did>")]
+async fn drain_status(
+    _admin: auth_verifier::AdminToken,
+    did: String,
+    actor_store: &State<ActorStore>,
+) -> Result<Json<drain::DrainStatus>, ApiError> {
+    Ok(Json(drain::drain_status(actor_store, &did).await?))
 }
 
 #[tracing::instrument(skip_all)]
@@ -313,8 +328,20 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
             },
         })),
     };
+    let admission = Arc::new(match &cfg.service.write_allowlist_file {
+        Some(path) => {
+            admission::Admission::from_file(path).expect("Failed to load the write allowlist")
+        }
+        None => admission::Admission::unrestricted(),
+    });
+    admission.spawn_reloader(std::time::Duration::from_secs(2));
+    let lock_dir =
+        locks::LockDir::new(&cfg.service_db.lock_dir).expect("Failed to create the lock directory");
+    let account_manager = account_manager.with_admission(admission.clone());
     let actor_store = ActorStore::new(&cfg.actor_store, background_queue, lifecycle.clone())
-        .with_coexistence(cfg.service.coexistence);
+        .with_coexistence(cfg.service.coexistence)
+        .with_admission(admission.clone())
+        .with_lock_dir(lock_dir);
     let resumed = lifecycle::resume_deletions(&lifecycle::DeletionContext {
         lifecycle: &lifecycle,
         account_manager: &account_manager,
@@ -349,6 +376,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 robots,
                 health,
                 health_live,
+                drain_status,
                 com::atproto::admin::delete_account::delete_account,
                 com::atproto::admin::disable_account_invites::disable_account_invites,
                 com::atproto::admin::disable_invite_codes::disable_invite_codes,
@@ -491,4 +519,5 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(crate::permission_set::SharedPermissionSets::default())
         .manage(actor_store)
         .manage(lifecycle)
+        .manage(admission)
 }

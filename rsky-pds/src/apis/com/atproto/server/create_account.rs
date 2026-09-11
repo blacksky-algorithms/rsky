@@ -84,7 +84,7 @@ pub async fn server_create_account(
     let blobstore = blobstore_factory.blobstore(did.clone());
     if let Err(error) = actor_store.create(&did, &signing_key).await {
         tracing::error!("Failed to create actor store\n{:?}", error);
-        return Err(ApiError::RuntimeError);
+        return Err(ApiError::from(error));
     }
     let commit = {
         let actor_txn = match actor_store.transact(did.clone(), blobstore.clone()).await {

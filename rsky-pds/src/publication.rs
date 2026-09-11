@@ -84,6 +84,7 @@ pub async fn publish_pending(
     stop_after: Option<PublishStep>,
 ) -> Result<Vec<i64>> {
     let _guard = actor_store.publish_lock(did).lock_owned().await;
+    actor_store.admission.admit_worker(did)?;
     if !actor_store.exists(did).await? {
         actor_store.lifecycle.clear_pending_work(did).await?;
         return Ok(vec![]);
@@ -168,6 +169,10 @@ pub async fn resume_pending_work(
     let mut resumed = Vec::new();
     for did in actor_store.lifecycle.pending_work().await? {
         tracing::warn!(%did, "resuming publication left by a previous process");
+        if let Err(refused) = actor_store.admission.admit_worker(&did) {
+            tracing::warn!(%refused, "publication left for the actor's writer");
+            continue;
+        }
         publish_pending(actor_store, sequencer, &did, None).await?;
         if actor_store.exists(&did).await? {
             actor_store.queue_blob_work(&did, blobstore_for(&did));
@@ -436,6 +441,43 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_absent_actor_is_left_to_its_writer() {
+        let world = world().await;
+        init_repo(&world).await;
+        let allowlist = world._dir.path().join("write-allowlist.toml");
+        std::fs::write(&allowlist, "version = 1\ndefault = \"absent\"\n").unwrap();
+        let admission = Arc::new(crate::admission::Admission::from_file(&allowlist).unwrap());
+        let restricted = ActorStore::new(
+            &ActorStoreConfig {
+                directory: world
+                    ._dir
+                    .path()
+                    .join("actors")
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+                cache_size: 10,
+            },
+            BackgroundQueue::default(),
+            world.actor_store.lifecycle.clone(),
+        )
+        .with_admission(admission);
+        let refused = publish_pending(&restricted, &world.sequencer, DID, None)
+            .await
+            .unwrap_err();
+        assert!(refused
+            .downcast_ref::<crate::admission::NotAdmitted>()
+            .is_some());
+        let blobstore = world.blobstore.clone();
+        let resumed = resume_pending_work(&restricted, &world.sequencer, |_| blobstore.clone())
+            .await
+            .unwrap();
+        assert!(resumed.is_empty());
+        assert_eq!(restricted.lifecycle.pending_work().await.unwrap(), [DID]);
+        assert!(event_types(&world).await.is_empty());
     }
 
     #[test]

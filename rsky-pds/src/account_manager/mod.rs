@@ -71,14 +71,39 @@ pub struct DisableInviteCodesOpts {
     pub accounts: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AccountManager {
     pub db: Db,
+    admission: std::sync::Arc<crate::admission::Admission>,
+}
+
+impl std::fmt::Debug for AccountManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccountManager").finish_non_exhaustive()
+    }
 }
 
 impl AccountManager {
     pub fn new(db: Db) -> Self {
-        Self { db }
+        Self {
+            db,
+            admission: std::sync::Arc::new(crate::admission::Admission::unrestricted()),
+        }
+    }
+
+    pub fn with_admission(
+        mut self,
+        admission: std::sync::Arc<crate::admission::Admission>,
+    ) -> Self {
+        self.admission = admission;
+        self
+    }
+
+    /// Account-state mutations are admitted per actor like repository
+    /// writes; session and token operations are not gated, since a session
+    /// is served wherever the account's reads are.
+    fn admit(&self, did: &str) -> Result<()> {
+        Ok(self.admission.admit_mutation(did)?)
     }
 
     pub async fn get_account(
@@ -126,6 +151,7 @@ impl AccountManager {
     }
 
     pub async fn create_account(&self, opts: CreateAccountOpts) -> Result<(String, String)> {
+        self.admit(&opts.did)?;
         let CreateAccountOpts {
             did,
             handle,
@@ -173,14 +199,17 @@ impl AccountManager {
     }
 
     pub async fn update_repo_root(&self, did: String, cid: Cid, rev: String) -> Result<()> {
+        self.admit(&did)?;
         repo::update_root(did, cid, rev, &self.db).await
     }
 
     pub async fn delete_account(&self, did: &str) -> Result<()> {
+        self.admit(did)?;
         account::delete_account(did, &self.db).await
     }
 
     pub async fn takedown_account(&self, did: &str, takedown: StatusAttr) -> Result<()> {
+        self.admit(did)?;
         (_, _) = try_join!(
             account::update_account_takedown_status(did, takedown, &self.db),
             auth::revoke_refresh_tokens_by_did(did, &self.db)
@@ -190,14 +219,17 @@ impl AccountManager {
 
     // @NOTE should always be paired with a sequenceHandle().
     pub async fn update_handle(&self, did: &str, handle: &str) -> Result<()> {
+        self.admit(did)?;
         account::update_handle(did, handle, &self.db).await
     }
 
     pub async fn deactivate_account(&self, did: &str, delete_after: Option<String>) -> Result<()> {
+        self.admit(did)?;
         account::deactivate_account(did, delete_after, &self.db).await
     }
 
     pub async fn activate_account(&self, did: &str) -> Result<()> {
+        self.admit(did)?;
         account::activate_account(did, &self.db).await
     }
 
@@ -347,6 +379,7 @@ impl AccountManager {
     }
 
     pub async fn set_account_invites_disabled(&self, did: &str, disabled: bool) -> Result<()> {
+        self.admit(did)?;
         invite::set_account_invites_disabled(did, disabled, &self.db).await
     }
 
@@ -362,6 +395,7 @@ impl AccountManager {
         did: String,
         name: String,
     ) -> Result<CreateAppPasswordOutput> {
+        self.admit(&did)?;
         password::create_app_password(did, name, &self.db).await
     }
 
@@ -397,6 +431,7 @@ impl AccountManager {
     }
 
     pub async fn update_account_password(&self, opts: UpdateAccountPasswordOpts) -> Result<()> {
+        self.admit(&opts.did)?;
         let UpdateAccountPasswordOpts { did, .. } = opts;
         let password_encrypted = password::gen_salt_and_hash(opts.password)?;
         try_join!(
@@ -414,6 +449,7 @@ impl AccountManager {
     }
 
     pub async fn revoke_app_password(&self, did: String, name: String) -> Result<()> {
+        self.admit(&did)?;
         try_join!(
             password::delete_app_password(&did, &name, &self.db),
             auth::revoke_app_password_refresh_token(&did, &name, &self.db)
@@ -424,6 +460,7 @@ impl AccountManager {
     // Email Tokens
     // ----------
     pub async fn confirm_email(&self, opts: ConfirmEmailOpts<'_>) -> Result<()> {
+        self.admit(opts.did)?;
         let ConfirmEmailOpts { did, token } = opts;
         email_token::assert_valid_token(
             did,
@@ -442,6 +479,7 @@ impl AccountManager {
     }
 
     pub async fn update_email(&self, opts: UpdateEmailOpts) -> Result<()> {
+        self.admit(&opts.did)?;
         let UpdateEmailOpts { did, email } = opts;
         try_join!(
             account::update_email(&did, &email, &self.db),

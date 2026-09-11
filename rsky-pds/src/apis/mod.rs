@@ -187,6 +187,8 @@ pub enum ApiError {
     RepoDeactivated(String),
     /// Error passed through from an upstream service: status code, error, message
     UpstreamResponse(u16, String, String),
+    /// This server does not admit writes for the actor right now.
+    NotAdmitted(String),
 }
 
 #[derive(Serialize)]
@@ -265,6 +267,11 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 __req,
             ),
             ApiError::Forbidden(message) => json_error(403, "Forbidden", message, __req),
+            ApiError::NotAdmitted(message) => {
+                let mut res = json_error(503, "NotAdmitted", message, __req)?;
+                res.set_header(Header::new("Retry-After", "1"));
+                Ok(res)
+            }
             ApiError::InsufficientScope(message) => {
                 let body = Json(ErrorBody {
                     error: "InsufficientScope".to_string(),
@@ -564,6 +571,9 @@ impl From<Error> for ApiError {
         }
         if value.downcast_ref::<AccountDeleting>().is_some() {
             return ApiError::InvalidRequest(value.to_string());
+        }
+        if let Some(refused) = value.downcast_ref::<crate::admission::NotAdmitted>() {
+            return ApiError::NotAdmitted(refused.to_string());
         }
         if let Some(limit) = value.downcast_ref::<crate::actor_store::WriteLimitError>() {
             return ApiError::InvalidRequest(limit.to_string());

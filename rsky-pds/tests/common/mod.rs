@@ -186,6 +186,7 @@ pub async fn get_client_in(dir: &std::path::Path) -> Client {
             sequencer_db_location: path("sequencer.sqlite"),
             did_cache_db_location: path("did_cache.sqlite"),
             lifecycle_db_location: path("rsky/lifecycle.sqlite"),
+            lock_dir: path("rsky/locks"),
         }),
         actor_store_directory: Some(path("actors")),
     };
@@ -471,6 +472,7 @@ pub async fn get_client_with_fixture() -> (&'static Fixture, Client) {
             sequencer_db_location: path("sequencer.sqlite"),
             did_cache_db_location: path("did_cache.sqlite"),
             lifecycle_db_location: path("rsky/lifecycle.sqlite"),
+            lock_dir: path("rsky/locks"),
         }),
         actor_store_directory: Some(path("actors")),
     };
@@ -503,6 +505,7 @@ pub async fn get_client_with_fixture_copy() -> (&'static Fixture, TempDir, Clien
             sequencer_db_location: path("sequencer.sqlite"),
             did_cache_db_location: path("did_cache.sqlite"),
             lifecycle_db_location: path("rsky/lifecycle.sqlite"),
+            lock_dir: path("rsky/locks"),
         }),
         actor_store_directory: Some(path("actors")),
     };

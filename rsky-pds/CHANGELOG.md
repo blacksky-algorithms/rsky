@@ -106,6 +106,19 @@ Writes are subject to the reference limits of 200 operations and a 2 MB
 event per commit, answered with `InvalidRequest`. Repository exports read
 from a single snapshot on a dedicated connection, bounded to ten minutes.
 
+### Added — write admission and the maintenance drain
+
+`PDS_WRITE_ALLOWLIST_FILE` names the accounts this process may write while
+another implementation shares the data directory. Each entry is `active`,
+`draining` (new mutations refused, workers finish), or `maintenance` with a
+workflow id; an account the file does not name is refused everywhere. The
+file is re-read when it changes and a broken file leaves the previous
+allowlist in force. A refused write answers `503 NotAdmitted` with
+`Retry-After: 1`. Every write holds a shared `flock` under `PDS_LOCK_DIR`;
+`rsky-pds --drain-did <did>` takes it exclusively, finishes the account's
+publication and blob work, and reports the same counters that
+`GET /xrpc/_drain_status?did=<did>` (admin auth) serves.
+
 ### Fixed — responses that differed from the reference PDS
 
 - `com.atproto.sync.*` reads of a missing, taken-down, or deactivated

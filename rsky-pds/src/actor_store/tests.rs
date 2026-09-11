@@ -1061,3 +1061,85 @@ async fn a_failed_transaction_leaves_no_trace() {
     assert_eq!(txn.all_intents().await.unwrap().len(), 2);
     assert_eq!(txn.record.record_count().await.unwrap(), 0);
 }
+
+const ALLOWLIST: &str = r#"
+version = 1
+default = "absent"
+
+[entries]
+"did:example:alice" = "active"
+"did:example:draining" = "draining"
+"#;
+
+async fn admitted_store() -> (tempfile::TempDir, ActorStore) {
+    let (dir, store) = test_store(10).await;
+    let allowlist = dir.path().join("write-allowlist.toml");
+    std::fs::write(&allowlist, ALLOWLIST).unwrap();
+    let admission = Arc::new(crate::admission::Admission::from_file(&allowlist).unwrap());
+    let lock_dir = crate::locks::LockDir::new(dir.path().join("locks")).unwrap();
+    let store = store.with_admission(admission).with_lock_dir(lock_dir);
+    (dir, store)
+}
+
+fn not_admitted(err: &anyhow::Error) -> Option<&crate::admission::NotAdmitted> {
+    err.downcast_ref::<crate::admission::NotAdmitted>()
+}
+
+#[tokio::test]
+async fn writes_follow_the_allowlist_and_hold_the_actor_lock() {
+    let (dir, store) = admitted_store().await;
+    let keypair = test_keypair();
+    let refused = store
+        .create("did:example:draining", &keypair)
+        .await
+        .unwrap_err();
+    assert_eq!(not_admitted(&refused).unwrap().state, "draining");
+    let refused = store
+        .create("did:example:nobody", &keypair)
+        .await
+        .unwrap_err();
+    assert_eq!(not_admitted(&refused).unwrap().state, "absent");
+    store.create(TEST_DID, &keypair).await.unwrap();
+
+    let locks = crate::locks::LockDir::new(dir.path().join("locks")).unwrap();
+    assert_eq!(store.inflight_mutations(TEST_DID), 0);
+    let txn = store
+        .transact(TEST_DID.to_owned(), blobstore())
+        .await
+        .unwrap();
+    assert_eq!(store.inflight_mutations(TEST_DID), 1);
+    assert!(locks.try_exclusive(TEST_DID).unwrap().is_none());
+    drop(txn);
+    assert_eq!(store.inflight_mutations(TEST_DID), 0);
+    assert!(locks.try_exclusive(TEST_DID).unwrap().is_some());
+
+    // a draining actor accepts no new write; an absent one nothing at all
+    reference_store(&store, "did:example:draining").await;
+    let refused = store
+        .transact("did:example:draining".to_owned(), blobstore())
+        .await
+        .map(drop)
+        .unwrap_err();
+    assert_eq!(not_admitted(&refused).unwrap().state, "draining");
+    reference_store(&store, "did:example:nobody").await;
+    let refused = store.unlink("did:example:nobody").await.unwrap_err();
+    assert_eq!(not_admitted(&refused).unwrap().state, "absent");
+    let refused = store
+        .delete_blobs("did:example:nobody", blobstore())
+        .await
+        .unwrap_err();
+    assert_eq!(not_admitted(&refused).unwrap().state, "absent");
+    store
+        .lifecycle
+        .mark_pending_work("did:example:nobody")
+        .await
+        .unwrap();
+    store.queue_blob_work("did:example:nobody", blobstore());
+    store.background_queue.process_all().await;
+    assert_eq!(
+        store.lifecycle.pending_work().await.unwrap(),
+        ["did:example:nobody"]
+    );
+    // a worker still runs for a draining actor
+    assert!(store.unlink("did:example:draining").await.is_ok());
+}

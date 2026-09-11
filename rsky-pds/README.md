@@ -79,6 +79,8 @@ Mount a volume at `PDS_DATA_DIRECTORY` to persist data.
 | `PDS_DPOP_SECRET` | 32-byte hex secret for OAuth DPoP nonce rotation |
 | `PDS_LIFECYCLE_DB` | The account deletion and purge journal (default `<PDS_DATA_DIRECTORY>/rsky/lifecycle.sqlite`), kept outside every actor store |
 | `PDS_COEXISTENCE` | `true` when another implementation shares the data directory: nothing is deleted from blob storage, deleted accounts leave a purge obligation for later |
+| `PDS_WRITE_ALLOWLIST_FILE` | The write allowlist naming the accounts this process may write (see below); every account is admitted when unset |
+| `PDS_LOCK_DIR` | Per-account advisory locks shared with the maintenance drain (default `<PDS_DATA_DIRECTORY>/rsky/locks`) |
 | `PDS_REDIS_SCRATCH_ADDRESS` | `host:port` of a redis used to track DPoP proof replay across processes (with `PDS_REDIS_SCRATCH_PASSWORD`); in-memory when unset |
 | `PDS_RECOVERY_DID_KEY` | Optional additional PLC rotation key |
 
@@ -122,6 +124,36 @@ Mount a volume at `PDS_DATA_DIRECTORY` to persist data.
 |---|---|
 | `PDS_OAUTH_SIGNUP_URL` | Signup URL shown on the authorization page |
 | `PDS_OAUTH_TRUSTED_CLIENTS` | Comma-separated client IDs shown by name on the consent page |
+
+## Sharing a data directory
+
+When another PDS implementation writes the same data directory, every
+account has exactly one writer at a time. `PDS_WRITE_ALLOWLIST_FILE` names
+the accounts this process writes; the file is re-read within seconds of a
+change, and a file that fails to parse leaves the previous allowlist in
+force:
+
+```toml
+version = 1
+default = "absent"                 # "active" | "absent"
+
+[entries]
+"did:plc:aaaa" = "active"          # writes admitted, workers run
+"did:plc:bbbb" = "draining"        # new writes refused (503 NotAdmitted), workers finish
+"did:plc:cccc" = { state = "maintenance", workflow_id = "repair-1" }
+```
+
+An account the file does not name is refused everywhere, workers included.
+Session and token operations are not gated; account and repository
+mutations are, and answer `503 NotAdmitted` with `Retry-After: 1`.
+
+`GET /xrpc/_drain_status?did=<did>` (admin auth) reports what an account
+still owes this process: in-flight writes, undelivered publication intents,
+non-terminal blob work, and an in-progress deletion, with `clientQuiescent`
+and `fullyDrained` derived from them. `rsky-pds --drain-did <did>
+[--timeout-secs <n>]` waits for the account's in-flight writes, delivers its
+intents and runs its blob work under the account's exclusive lock, prints
+the same status, and exits 0 only when the account is fully drained.
 
 ## Upgrading to 1.0
 

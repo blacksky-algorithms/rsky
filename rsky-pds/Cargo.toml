@@ -40,6 +40,7 @@ ipld-core = { workspace = true }
 jwt-simple = { version = "0.12.9", default-features = false, features = ["pure-rust"] }
 lazy_static = "1.4.0"
 lexicon_cid = { workspace = true }
+libc = "0.2"
 lru = "0.14"
 mailchecker = "6.0.1"
 mailgun-rs = "0.1.10"
