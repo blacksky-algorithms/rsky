@@ -18,10 +18,13 @@ async fn get_car_stream(
     since: Option<String>,
     actor_store: &State<ActorStore>,
 ) -> Result<Vec<u8>> {
-    let actor_store = actor_store
+    let reader = actor_store
         .read(did.clone(), blobstore_factory.blobstore(did.clone()))
         .await?;
-    let storage_guard = actor_store.storage.read().await;
+    let storage_guard = reader.storage.read().await;
+    if let Ok(root) = storage_guard.get_root_detailed().await {
+        actor_store.note_exposure(&did, &root.rev).await?;
+    }
     match storage_guard.get_car_stream(since).await {
         Err(_) => bail!("Could not find repo for DID: {did}"),
         Ok(carstream) => Ok(carstream),

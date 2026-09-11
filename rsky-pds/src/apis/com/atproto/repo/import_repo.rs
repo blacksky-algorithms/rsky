@@ -79,7 +79,7 @@ pub async fn import_repo(
     actor_store: &State<ActorStore>,
 ) -> Result<(), ApiError> {
     let requester = auth.access.credentials.unwrap().did.unwrap();
-    let mut actor_store = actor_store
+    let mut actor_txn = actor_store
         .transact(
             requester.clone(),
             blobstore_factory.blobstore(requester.clone()),
@@ -87,10 +87,10 @@ pub async fn import_repo(
         .await?;
 
     // Get current repo if it exists
-    let curr_root: Option<Cid> = actor_store.get_repo_root().await;
+    let curr_root: Option<Cid> = actor_txn.get_repo_root().await;
     let curr_repo: Option<Repo> = match curr_root {
         None => None,
-        Some(_root) => Some(Repo::load(actor_store.storage.clone(), curr_root).await?),
+        Some(_root) => Some(Repo::load(actor_txn.storage.clone(), curr_root).await?),
     };
 
     // Process imported car
@@ -121,9 +121,10 @@ pub async fn import_repo(
     };
 
     let commit_data = diff.commit;
+    let imported_rev = commit_data.rev.clone();
     let prepared_writes: Vec<PreparedWrite> =
-        prepare_import_repo_writes(requester, diff.writes, &imported_blocks).await?;
-    match actor_store
+        prepare_import_repo_writes(requester.clone(), diff.writes, &imported_blocks).await?;
+    match actor_txn
         .process_import_repo(commit_data, prepared_writes)
         .await
     {
@@ -133,6 +134,8 @@ pub async fn import_repo(
             return Err(ApiError::RuntimeError);
         }
     }
+    // an accepted import exposes its revision like a read would
+    actor_store.note_exposure(&requester, &imported_rev).await?;
 
     Ok(())
 }

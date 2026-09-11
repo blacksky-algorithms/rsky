@@ -17,7 +17,7 @@ const ROLES: [&str; 1] = ["pds"];
 /// Held to the mounted routes by `described_methods_match_the_mounted_routes`
 /// in the integration tests: a description that overstates the surface is worse
 /// than none, because a caller can handle silence.
-const METHODS: [&str; 109] = [
+const METHODS: [&str; 110] = [
     "app.bsky.actor.getPreferences",
     "app.bsky.actor.getProfile",
     "app.bsky.actor.getProfiles",
@@ -126,6 +126,7 @@ const METHODS: [&str; 109] = [
     "com.atproto.sync.listRepos",
     "com.atproto.sync.subscribeRepos",
     "com.atproto.temp.checkSignupQueue",
+    "community.blacksky.pds.getPublicationFrontier",
     "community.lexicon.service.describe",
 ];
 

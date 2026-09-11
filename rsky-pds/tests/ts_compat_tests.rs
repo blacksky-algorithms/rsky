@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{get_client_with_fixture, get_client_with_fixture_copy, Fixture};
+use common::{get_admin_token, get_client_with_fixture, get_client_with_fixture_copy, Fixture};
 use rocket::http::{ContentType, Header, Status};
 use rocket::local::asynchronous::Client;
 use rsky_oauth::jwk::Jwk;
@@ -1470,4 +1470,95 @@ async fn account_deletion_matches_the_reference() {
         )
         .unwrap();
     assert!(prefixes.contains(&format!("blocks/{dave}/")));
+}
+
+/// The publication frontier over the reference-created fixture: an account
+/// the reference created and hosted alone is complete, its exposed maximum
+/// follows the reads this server serves, and accounts whose history or
+/// identity cannot be established fail closed.
+#[tokio::test]
+async fn publication_frontier_classifies_the_fixture_accounts() {
+    // the import below writes, so this test takes its own fixture copy
+    let (fixture, _dir, client) = get_client_with_fixture_copy().await;
+    let alice = fixture.did("alice");
+    let frontier = |did: String| {
+        let client = &client;
+        async move {
+            let response = client
+                .get(format!(
+                    "/xrpc/community.blacksky.pds.getPublicationFrontier?did={did}"
+                ))
+                .header(Header::new("Authorization", get_admin_token()))
+                .dispatch()
+                .await;
+            let status = response.status();
+            let json: Value = response.into_json().await.unwrap_or(Value::Null);
+            (status, json)
+        }
+    };
+    let unauthenticated = client
+        .get(format!(
+            "/xrpc/community.blacksky.pds.getPublicationFrontier?did={alice}"
+        ))
+        .dispatch()
+        .await;
+    assert_ne!(unauthenticated.status(), Status::Ok);
+
+    let (status, json) = frontier(alice.clone()).await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(json["complete"], true, "{json}");
+    assert_eq!(json["genesisKind"], "creation");
+    assert_eq!(json["lifetime"], "hostedHereOnly");
+    let (_, latest) = get_json(
+        &client,
+        &format!("/xrpc/com.atproto.sync.getLatestCommit?did={alice}"),
+    )
+    .await;
+    assert_eq!(json["publicationMaxRev"], latest["rev"]);
+    assert_eq!(json["currentCommitCid"], latest["cid"]);
+    assert_eq!(json["signedCommitRev"], latest["rev"]);
+    assert_eq!(json["repoRootRev"], latest["rev"]);
+    // the read above exposed the current revision, as every sync read and
+    // an accepted import do
+    let (_, json) = frontier(alice.clone()).await;
+    assert_eq!(json["exposedMaxRev"], latest["rev"]);
+    let (status, _) = get_bytes(
+        &client,
+        &format!(
+            "/xrpc/com.atproto.sync.getBlocks?did={alice}&cids={}",
+            latest["cid"].as_str().unwrap()
+        ),
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    let (status, car) = get_bytes(
+        &client,
+        &format!("/xrpc/com.atproto.sync.getRepo?did={alice}"),
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    let import = client
+        .post("/xrpc/com.atproto.repo.importRepo")
+        .header(ContentType::new("application", "vnd.ipld.car"))
+        .header(Header::new("content-length", car.len().to_string()))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", fixture.token("alice_access")),
+        ))
+        .body(car)
+        .dispatch()
+        .await;
+    let status = import.status();
+    let body = import.into_string().await.unwrap_or_default();
+    assert_eq!(status, Status::Ok, "{body}");
+
+    // deleted on the reference: only the deletion event survives
+    let (_, json) = frontier(fixture.did("erin")).await;
+    assert_eq!(json["complete"], false);
+    assert_eq!(json["genesisKind"], "unknown");
+    // no identity history to audit
+    let (_, json) = frontier(fixture.did("dave")).await;
+    assert_eq!(json["complete"], false);
+    assert_eq!(json["lifetime"], "unknown");
+    assert_eq!(json["genesisKind"], "creation");
 }

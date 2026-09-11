@@ -14,6 +14,7 @@ use crate::actor_store::blobstore::BlobStore;
 use crate::actor_store::ActorStore;
 use crate::db::migrator::{migrate_to_latest, Migration, MigrationSet};
 use crate::db::sqlite::Db;
+use crate::sequencer::events::CommitEvt;
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
 use rusqlite::{params, OptionalExtension};
@@ -49,6 +50,31 @@ const LIFECYCLE_MIGRATIONS: &[Migration] = &[
             \"markedAt\" TEXT NOT NULL\
           );",
     },
+    // What this process has published, served, restored, or pruned for an
+    // actor: the evidence a downstream reconciliation needs to know how far
+    // this actor's history reaches, kept outside the stores a restore
+    // rewinds.
+    Migration {
+        name: "003",
+        sql: "CREATE TABLE frontier_watermark (\
+            did TEXT PRIMARY KEY, \
+            \"maxRev\" TEXT, \
+            \"exposedMaxRev\" TEXT, \
+            \"creationSeq\" INTEGER, \
+            \"preDeletionMaxRev\" TEXT\
+          );\
+          CREATE TABLE restore_event (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            did TEXT NOT NULL, \
+            at TEXT NOT NULL, \
+            \"resultingRev\" TEXT NOT NULL\
+          );\
+          CREATE INDEX restore_event_did_idx ON restore_event (did);\
+          CREATE TABLE revision_floor (\
+            did TEXT PRIMARY KEY, \
+            rev TEXT NOT NULL\
+          );",
+    },
 ];
 
 const LIFECYCLE_MIGRATION_SET: MigrationSet = MigrationSet {
@@ -72,6 +98,30 @@ pub struct Tombstone {
     pub requested_at: String,
     pub account_seq: Option<i64>,
     pub logically_deleted_at: Option<String>,
+}
+
+/// The revisions this process has published, served, and pruned for an
+/// actor. Revisions are TIDs, which order as strings.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FrontierWatermark {
+    pub did: String,
+    /// The highest revision of any event this process published.
+    pub max_rev: Option<String>,
+    /// The highest revision this process ever served or accepted by import.
+    pub exposed_max_rev: Option<String>,
+    /// The sequence number of the creation commit, when this process
+    /// created the repository.
+    pub creation_seq: Option<i64>,
+    /// The highest published revision at the moment this process pruned
+    /// the actor's history for a deletion.
+    pub pre_deletion_max_rev: Option<String>,
+}
+
+fn max_rev(current: Option<String>, candidate: &str) -> String {
+    match current {
+        Some(current) if current.as_str() >= candidate => current,
+        _ => candidate.to_owned(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -147,6 +197,189 @@ impl LifecycleStore {
             .run(move |conn| {
                 conn.execute("DELETE FROM pending_work WHERE did = ?1", params![did])?;
                 Ok(())
+            })
+            .await
+    }
+
+    pub async fn frontier_watermark(&self, did: &str) -> Result<Option<FrontierWatermark>> {
+        let did = did.to_owned();
+        self.db
+            .run(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT did, \"maxRev\", \"exposedMaxRev\", \"creationSeq\", \
+                         \"preDeletionMaxRev\" FROM frontier_watermark WHERE did = ?1",
+                        [&did],
+                        |row| {
+                            Ok(FrontierWatermark {
+                                did: row.get(0)?,
+                                max_rev: row.get(1)?,
+                                exposed_max_rev: row.get(2)?,
+                                creation_seq: row.get(3)?,
+                                pre_deletion_max_rev: row.get(4)?,
+                            })
+                        },
+                    )
+                    .optional()?)
+            })
+            .await
+    }
+
+    async fn update_watermark(
+        &self,
+        did: &str,
+        update: impl Fn(FrontierWatermark) -> FrontierWatermark + Send + 'static,
+    ) -> Result<()> {
+        let did = did.to_owned();
+        self.db
+            .tx(move |tx| {
+                let current = tx
+                    .query_row(
+                        "SELECT \"maxRev\", \"exposedMaxRev\", \"creationSeq\", \
+                         \"preDeletionMaxRev\" FROM frontier_watermark WHERE did = ?1",
+                        [&did],
+                        |row| {
+                            Ok(FrontierWatermark {
+                                did: did.clone(),
+                                max_rev: row.get(0)?,
+                                exposed_max_rev: row.get(1)?,
+                                creation_seq: row.get(2)?,
+                                pre_deletion_max_rev: row.get(3)?,
+                            })
+                        },
+                    )
+                    .optional()?
+                    .unwrap_or_else(|| FrontierWatermark {
+                        did: did.clone(),
+                        ..Default::default()
+                    });
+                let next = update(current);
+                tx.execute(
+                    "INSERT INTO frontier_watermark \
+                     (did, \"maxRev\", \"exposedMaxRev\", \"creationSeq\", \"preDeletionMaxRev\") \
+                     VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (did) DO UPDATE SET \
+                     \"maxRev\" = excluded.\"maxRev\", \
+                     \"exposedMaxRev\" = excluded.\"exposedMaxRev\", \
+                     \"creationSeq\" = excluded.\"creationSeq\", \
+                     \"preDeletionMaxRev\" = excluded.\"preDeletionMaxRev\"",
+                    params![
+                        did,
+                        next.max_rev,
+                        next.exposed_max_rev,
+                        next.creation_seq,
+                        next.pre_deletion_max_rev
+                    ],
+                )?;
+                Ok(())
+            })
+            .await
+    }
+
+    /// Records a commit this process published; `creation` marks the
+    /// repository's first commit when this process created it.
+    pub async fn record_publication(
+        &self,
+        did: &str,
+        rev: &str,
+        seq: i64,
+        creation: bool,
+    ) -> Result<()> {
+        let rev = rev.to_owned();
+        self.update_watermark(did, move |mut mark| {
+            mark.max_rev = Some(max_rev(mark.max_rev.take(), &rev));
+            if creation && mark.creation_seq.is_none() {
+                mark.creation_seq = Some(seq);
+            }
+            mark
+        })
+        .await
+    }
+
+    /// Records, before the first response byte, the highest revision a
+    /// read is about to serve or an import has accepted.
+    pub async fn record_exposure(&self, did: &str, rev: &str) -> Result<()> {
+        let rev = rev.to_owned();
+        self.update_watermark(did, move |mut mark| {
+            mark.exposed_max_rev = Some(max_rev(mark.exposed_max_rev.take(), &rev));
+            mark
+        })
+        .await
+    }
+
+    /// Records the highest published revision before a deletion prunes the
+    /// actor's history; a later re-creation is complete only above it.
+    pub async fn record_pre_deletion_max(&self, did: &str, rev: Option<&str>) -> Result<()> {
+        let rev = rev.map(str::to_owned);
+        self.update_watermark(did, move |mut mark| {
+            let candidate = [mark.max_rev.clone(), rev.clone()]
+                .into_iter()
+                .flatten()
+                .max();
+            mark.pre_deletion_max_rev = match (mark.pre_deletion_max_rev.take(), candidate) {
+                (Some(current), Some(candidate)) => Some(max_rev(Some(current), &candidate)),
+                (current, candidate) => current.or(candidate),
+            };
+            mark
+        })
+        .await
+    }
+
+    /// Records that the actor's store was restored or rewritten to
+    /// `resulting_rev` outside the ordinary write path.
+    pub async fn record_restore_event(&self, did: &str, resulting_rev: &str) -> Result<()> {
+        let (did, resulting_rev) = (did.to_owned(), resulting_rev.to_owned());
+        let now = rsky_common::now();
+        self.db
+            .run(move |conn| {
+                conn.execute(
+                    "INSERT INTO restore_event (did, at, \"resultingRev\") VALUES (?1, ?2, ?3)",
+                    params![did, now, resulting_rev],
+                )?;
+                Ok(())
+            })
+            .await
+    }
+
+    pub async fn restore_event_count(&self, did: &str) -> Result<i64> {
+        let did = did.to_owned();
+        self.db
+            .run(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT count(*) FROM restore_event WHERE did = ?1",
+                    [&did],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+    }
+
+    /// Every later commit for the actor must exceed `rev`. The floor only
+    /// ever rises.
+    pub async fn raise_revision_floor(&self, did: &str, rev: &str) -> Result<()> {
+        let (did, rev) = (did.to_owned(), rev.to_owned());
+        self.db
+            .run(move |conn| {
+                conn.execute(
+                    "INSERT INTO revision_floor (did, rev) VALUES (?1, ?2) \
+                     ON CONFLICT (did) DO UPDATE SET rev = max(rev, excluded.rev)",
+                    params![did, rev],
+                )?;
+                Ok(())
+            })
+            .await
+    }
+
+    pub async fn revision_floor(&self, did: &str) -> Result<Option<String>> {
+        let did = did.to_owned();
+        self.db
+            .run(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT rev FROM revision_floor WHERE did = ?1",
+                        [&did],
+                        |row| row.get(0),
+                    )
+                    .optional()?)
             })
             .await
     }
@@ -379,6 +612,19 @@ pub async fn delete_account(
         .and_then(|tombstone| tombstone.account_seq);
     if already_sequenced.is_none() {
         let mut lock = ctx.sequencer.sequencer.write().await;
+        // the highest revision ever published survives the pruning below;
+        // a re-creation of the DID is only complete above it
+        let published_max = lock
+            .rows_for_did_after(did, 0)
+            .await?
+            .into_iter()
+            .filter(|row| row.event_type == "append")
+            .filter_map(|row| rsky_common::cbor_to_struct::<CommitEvt>(row.event).ok())
+            .map(|evt| evt.rev)
+            .max();
+        ctx.lifecycle
+            .record_pre_deletion_max(did, published_max.as_deref())
+            .await?;
         let seq = lock
             .sequence_account_evt(did.to_owned(), AccountStatus::Deleted)
             .await?;
@@ -566,6 +812,171 @@ mod tests {
             &Secp256k1::new(),
             &SecretKey::from_slice(&[7u8; 32]).unwrap(),
         )
+    }
+
+    #[tokio::test]
+    async fn frontier_watermarks_only_ever_rise() {
+        let world = world().await;
+        assert!(world
+            .lifecycle
+            .frontier_watermark(DID)
+            .await
+            .unwrap()
+            .is_none());
+        world
+            .lifecycle
+            .record_publication(DID, "3lfixtureaa2b", 7, true)
+            .await
+            .unwrap();
+        world
+            .lifecycle
+            .record_publication(DID, "3lfixtureaa2a", 8, true)
+            .await
+            .unwrap();
+        let mark = world
+            .lifecycle
+            .frontier_watermark(DID)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mark.max_rev.as_deref(), Some("3lfixtureaa2b"));
+        assert_eq!(mark.creation_seq, Some(7), "the first creation wins");
+        assert_eq!(mark.exposed_max_rev, None);
+
+        world
+            .lifecycle
+            .record_exposure(DID, "3lfixtureaa2c")
+            .await
+            .unwrap();
+        world
+            .lifecycle
+            .record_exposure(DID, "3lfixtureaa2a")
+            .await
+            .unwrap();
+        let mark = world
+            .lifecycle
+            .frontier_watermark(DID)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mark.exposed_max_rev.as_deref(), Some("3lfixtureaa2c"));
+
+        // the pre-deletion maximum takes the published maximum and the
+        // caller's candidate, and never drops on a later call
+        world
+            .lifecycle
+            .record_pre_deletion_max(DID, None)
+            .await
+            .unwrap();
+        let mark = world
+            .lifecycle
+            .frontier_watermark(DID)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mark.pre_deletion_max_rev.as_deref(), Some("3lfixtureaa2b"));
+        world
+            .lifecycle
+            .record_pre_deletion_max(DID, Some("3lfixtureaa2z"))
+            .await
+            .unwrap();
+        world
+            .lifecycle
+            .record_pre_deletion_max(DID, Some("3lfixtureaa2a"))
+            .await
+            .unwrap();
+        let mark = world
+            .lifecycle
+            .frontier_watermark(DID)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mark.pre_deletion_max_rev.as_deref(), Some("3lfixtureaa2z"));
+        world
+            .lifecycle
+            .record_pre_deletion_max("did:plc:fresh", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            world
+                .lifecycle
+                .frontier_watermark("did:plc:fresh")
+                .await
+                .unwrap()
+                .unwrap()
+                .pre_deletion_max_rev,
+            None
+        );
+
+        assert_eq!(world.lifecycle.restore_event_count(DID).await.unwrap(), 0);
+        world
+            .lifecycle
+            .record_restore_event(DID, "3lfixtureaa2a")
+            .await
+            .unwrap();
+        assert_eq!(world.lifecycle.restore_event_count(DID).await.unwrap(), 1);
+
+        assert!(world.lifecycle.revision_floor(DID).await.unwrap().is_none());
+        world
+            .lifecycle
+            .raise_revision_floor(DID, "3lfixtureaa2m")
+            .await
+            .unwrap();
+        world
+            .lifecycle
+            .raise_revision_floor(DID, "3lfixtureaa2c")
+            .await
+            .unwrap();
+        assert_eq!(
+            world
+                .lifecycle
+                .revision_floor(DID)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("3lfixtureaa2m")
+        );
+    }
+
+    #[tokio::test]
+    async fn deletion_records_the_published_maximum_before_pruning() {
+        let world = world().await;
+        create_account(&world).await;
+        {
+            let mut lock = world.sequencer.sequencer.write().await;
+            let mut evt = crate::sequencer::events::TypedCommitEvt::default().evt;
+            evt.repo = DID.to_owned();
+            evt.rev = "3lfixtureaa2q".to_owned();
+            lock.sequence_evt(crate::models::models::RepoSeq::new(
+                DID.to_owned(),
+                "append".to_owned(),
+                rsky_common::struct_to_cbor(&evt).unwrap(),
+                rsky_common::now(),
+            ))
+            .await
+            .unwrap();
+            lock.sequence_evt(crate::models::models::RepoSeq::new(
+                DID.to_owned(),
+                "append".to_owned(),
+                vec![0xff],
+                rsky_common::now(),
+            ))
+            .await
+            .unwrap();
+        }
+        delete_account(&world.ctx(None), DID, None).await.unwrap();
+        let mark = world
+            .lifecycle
+            .frontier_watermark(DID)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mark.pre_deletion_max_rev.as_deref(), Some("3lfixtureaa2q"));
+        assert_eq!(
+            world.seq_rows().await.len(),
+            1,
+            "only the deletion survives"
+        );
     }
 
     #[tokio::test]

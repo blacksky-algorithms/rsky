@@ -19,6 +19,29 @@ pub struct DocumentData {
     pub services: BTreeMap<String, Service>,
 }
 
+/// One entry of a DID's audit log. The operation keeps its wire shape,
+/// since the directory has published two of them over time.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct AuditLogEntry {
+    pub did: String,
+    pub operation: serde_json::Value,
+    pub cid: String,
+    #[serde(default)]
+    pub nullified: bool,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+}
+
+impl AuditLogEntry {
+    /// The PDS endpoint the operation names, in either operation format.
+    pub fn pds_endpoint(&self) -> Option<&str> {
+        self.operation
+            .pointer("/services/atproto_pds/endpoint")
+            .or_else(|| self.operation.get("service"))
+            .and_then(serde_json::Value::as_str)
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CreateOpV1 {
     #[serde(rename = "type")]

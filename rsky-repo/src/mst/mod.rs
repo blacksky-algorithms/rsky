@@ -1545,7 +1545,7 @@ mod tests {
 
         let mut entries = mapping
             .iter()
-            .map(|e| (e.0.clone(), e.1.clone()))
+            .map(|e| (e.0.clone(), *e.1))
             .collect::<Vec<(String, Cid)>>();
         entries.shuffle(&mut rng);
 
@@ -1574,7 +1574,7 @@ mod tests {
 
         let mut entries = mapping
             .iter()
-            .map(|e| (e.0.clone(), e.1.clone()))
+            .map(|e| (e.0.clone(), *e.1))
             .collect::<Vec<(String, Cid)>>();
         entries.shuffle(&mut rng);
 
@@ -1608,7 +1608,7 @@ mod tests {
 
         let mut entries = mapping
             .iter()
-            .map(|e| (e.0.clone(), e.1.clone()))
+            .map(|e| (e.0.clone(), *e.1))
             .collect::<Vec<(String, Cid)>>();
         entries.shuffle(&mut rng);
 
@@ -1648,7 +1648,7 @@ mod tests {
 
         let mut entries = mapping
             .iter()
-            .map(|e| (e.0.clone(), e.1.clone()))
+            .map(|e| (e.0.clone(), *e.1))
             .collect::<Vec<(String, Cid)>>();
         entries.shuffle(&mut rng);
 
@@ -1661,7 +1661,7 @@ mod tests {
 
         let mut reshuffled = mapping
             .iter()
-            .map(|e| (e.0.clone(), e.1.clone()))
+            .map(|e| (e.0.clone(), *e.1))
             .collect::<Vec<(String, Cid)>>();
         reshuffled.shuffle(&mut rng);
 
@@ -1699,7 +1699,7 @@ mod tests {
         let mut mst = MST::create(Arc::new(RwLock::new(storage)), None, None).await?;
         let entries = mapping
             .iter()
-            .map(|e| (e.0.clone(), e.1.clone()))
+            .map(|e| (e.0.clone(), *e.1))
             .collect::<Vec<(String, Cid)>>();
 
         for entry in &entries {

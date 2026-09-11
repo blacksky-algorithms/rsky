@@ -5,7 +5,7 @@ use anyhow::{bail, Result};
 use rsky_common::encode_uri_component;
 use secp256k1::SecretKey;
 use serde::de::DeserializeOwned;
-use types::{CompatibleOpOrTombstone, DocumentData};
+use types::{AuditLogEntry, CompatibleOpOrTombstone, DocumentData};
 
 pub struct Client {
     pub url: String,
@@ -62,6 +62,21 @@ impl Client {
         match self
             .make_get_req(
                 format!("{0}/{1}/data", self.url, encode_uri_component(did)),
+                None,
+            )
+            .await
+        {
+            Ok(res) => Ok(res),
+            Err(error) => bail!(error.to_string()),
+        }
+    }
+
+    /// The directory's full operation history for a DID, nullified
+    /// operations included.
+    pub async fn get_audit_log(&self, did: &String) -> Result<Vec<AuditLogEntry>> {
+        match self
+            .make_get_req(
+                format!("{0}/{1}/log/audit", self.url, encode_uri_component(did)),
                 None,
             )
             .await

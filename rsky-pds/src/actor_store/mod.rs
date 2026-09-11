@@ -364,6 +364,12 @@ impl ActorStore {
         self
     }
 
+    /// Records, before any of it is sent, that a read is about to serve the
+    /// actor's repository at its current revision.
+    pub async fn note_exposure(&self, did: &str, rev: &str) -> Result<()> {
+        self.lifecycle.record_exposure(did, rev).await
+    }
+
     /// Client writes on `did` that have started and not finished.
     pub fn inflight_mutations(&self, did: &str) -> usize {
         self.inflight
@@ -1030,8 +1036,13 @@ impl ActorStoreTransactor {
             .map(write_to_op)
             .collect::<Result<Vec<RecordWriteOp>>>()?;
 
+        let floor = self.lifecycle.revision_floor(&self.did).await?;
         let mut commit = repo
-            .format_commit(RecordWriteEnum::List(write_ops), &self.keypair)
+            .format_commit_above(
+                RecordWriteEnum::List(write_ops),
+                &self.keypair,
+                floor.as_deref(),
+            )
             .await?;
 
         // find blocks that would be deleted but are referenced by another record

@@ -130,6 +130,23 @@ it. The journal lives outside every actor store and must never be restored
 from a backup: an attempt with no outcome is the evidence that an object
 may still appear.
 
+### Added — the publication frontier
+
+`community.blacksky.pds.getPublicationFrontier` (admin auth) reports how far
+an account's publication history on this server reaches: the highest
+revision published, the highest ever served by a sync read or accepted by
+import (recorded durably before the first response byte), the current
+commit and its signed and stored revisions, the number of restore events,
+whether every host the account's PLC audit log ever named is this server,
+the kind of genesis its surviving history starts from, and whether that
+history is provably whole. An account migrated in, deleted and re-created
+below its recorded pre-deletion maximum, deleted on the reference, hosted
+elsewhere at any point, or a `did:web` fails closed. The lifecycle journal
+keeps the watermarks (`frontier_watermark`, `restore_event`) and a
+per-account revision floor that every later commit exceeds, which a
+recovery commit uses to move a restored repository past a boundary
+consumers have already seen. rsky-repo 0.1.0 adds `format_commit_above`.
+
 ### Added — write admission and the maintenance drain
 
 `PDS_WRITE_ALLOWLIST_FILE` names the accounts this process may write while

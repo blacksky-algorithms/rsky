@@ -24,15 +24,18 @@ async fn inner_get_latest_commit(
     };
     let _ = assert_repo_availability(&did, is_user_or_admin, &account_manager).await?;
 
-    let actor_store = actor_store
+    let reader = actor_store
         .read(did.clone(), blobstore_factory.blobstore(did.clone()))
         .await?;
-    let storage_guard = actor_store.storage.read().await;
+    let storage_guard = reader.storage.read().await;
     match storage_guard.get_root_detailed().await {
-        Ok(res) => Ok(GetLatestCommitOutput {
-            cid: res.cid.to_string(),
-            rev: res.rev,
-        }),
+        Ok(res) => {
+            actor_store.note_exposure(&did, &res.rev).await?;
+            Ok(GetLatestCommitOutput {
+                cid: res.cid.to_string(),
+                rev: res.rev,
+            })
+        }
         Err(_) => bail!("Could not find root for DID: {did}"),
     }
 }

@@ -49,7 +49,16 @@ fn start_mock_plc_directory() -> u16 {
             // notification fan-out resolve and deliver hermetically.
             // `/{did}/data` is the PLC document-data shape an account's own
             // DID document is validated against.
-            let body = if let Some(did) = did.strip_suffix("/data") {
+            let body = if let Some(did) = did.strip_suffix("/log/audit") {
+                let hostname =
+                    std::env::var("PDS_HOSTNAME").unwrap_or_else(|_| "localhost".to_string());
+                format!(
+                    "[{{\"did\":\"{did}\",\"cid\":\"op0\",\"nullified\":false,\
+                     \"createdAt\":\"2026-01-01T00:00:00.000Z\",\"operation\":{{\
+                     \"type\":\"plc_operation\",\"services\":{{\"atproto_pds\":{{\
+                     \"type\":\"AtprotoPersonalDataServer\",\"endpoint\":\"https://{hostname}\"}}}}}}}}]"
+                )
+            } else if let Some(did) = did.strip_suffix("/data") {
                 let hostname =
                     std::env::var("PDS_HOSTNAME").unwrap_or_else(|_| "localhost".to_string());
                 let rotation_key = rsky_crypto::utils::encode_did_key(

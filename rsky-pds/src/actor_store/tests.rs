@@ -1205,3 +1205,37 @@ async fn writes_follow_the_allowlist_and_hold_the_actor_lock() {
     // a worker still runs for a draining actor
     assert!(store.unlink("did:example:draining").await.is_ok());
 }
+
+/// A revision floor lifts every later commit above a boundary consumers
+/// have already seen, and an empty write list is a valid recovery commit.
+#[tokio::test]
+async fn commits_rise_above_the_revision_floor() {
+    let (_dir, store) = test_store(10).await;
+    store.create(TEST_DID, &test_keypair()).await.unwrap();
+    let mut txn = store
+        .transact(TEST_DID.to_owned(), blobstore())
+        .await
+        .unwrap();
+    txn.create_repo(vec![], true).await.unwrap();
+    let floor = "3zzzzzzzzzzzz";
+    store
+        .lifecycle
+        .raise_revision_floor(TEST_DID, floor)
+        .await
+        .unwrap();
+    let recovery = txn.process_writes(vec![], None).await.unwrap();
+    assert!(recovery.commit_data.rev.as_str() > floor);
+    assert!(recovery.ops.is_empty());
+    let next = txn
+        .process_writes(
+            vec![PreparedWrite::Create(post_write("3jt5vlkorflr1", "x"))],
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(next.commit_data.rev > recovery.commit_data.rev);
+    assert_eq!(
+        next.commit_data.since.as_deref(),
+        Some(recovery.commit_data.rev.as_str())
+    );
+}

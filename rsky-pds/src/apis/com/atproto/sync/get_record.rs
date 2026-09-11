@@ -33,10 +33,13 @@ async fn inner_get_record(
         false
     };
     let _ = assert_repo_availability(&did, is_user_or_admin, &account_manager).await?;
-    let actor_store = actor_store
+    let reader = actor_store
         .read(did.clone(), blobstore_factory.blobstore(did.clone()))
         .await?;
-    let storage_guard = actor_store.storage.read().await;
+    let storage_guard = reader.storage.read().await;
+    if let Ok(root) = storage_guard.get_root_detailed().await {
+        actor_store.note_exposure(&did, &root.rev).await?;
+    }
     let commit: Option<Cid> = match commit {
         Some(commit) => Some(Cid::from_str(&commit)?),
         None => storage_guard.get_root().await,
@@ -46,7 +49,7 @@ async fn inner_get_record(
         None => bail!("Could not find repo for DID: {did}"),
         Some(commit) => {
             rsky_repo::sync::provider::get_records(
-                actor_store.storage.clone(),
+                reader.storage.clone(),
                 commit,
                 vec![RecordPath { collection, rkey }],
             )

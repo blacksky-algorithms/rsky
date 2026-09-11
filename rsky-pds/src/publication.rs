@@ -133,6 +133,15 @@ pub async fn publish_pending(
             return Ok(seqs);
         }
         acknowledge(&db, intent.id, seq).await?;
+        if intent.event_type == "append" {
+            let creation = cbor_to_struct::<CommitEvt>(intent.event.clone())
+                .map(|evt| evt.since.is_none())
+                .unwrap_or(false);
+            actor_store
+                .lifecycle
+                .record_publication(did, &intent.rev, seq, creation)
+                .await?;
+        }
         seqs.push(seq);
     }
     let blob = BlobReader::new(
@@ -331,6 +340,16 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+
+        let mark = world
+            .actor_store
+            .lifecycle
+            .frontier_watermark(DID)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mark.creation_seq, Some(1));
+        assert_eq!(mark.max_rev.as_deref(), Some(delivered[0].rev.as_str()));
 
         // nothing left to publish
         let again = publish_pending(&world.actor_store, &world.sequencer, DID, None)

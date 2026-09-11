@@ -148,6 +148,11 @@ An account the file does not name is refused everywhere, workers included.
 Session and token operations are not gated; account and repository
 mutations are, and answer `503 NotAdmitted` with `Retry-After: 1`.
 
+`GET /xrpc/community.blacksky.pds.getPublicationFrontier?did=<did>` (admin
+auth) reports how far the account's publication history here reaches and
+whether it is provably whole, for a downstream index that reconciles
+against this server.
+
 `GET /xrpc/_drain_status?did=<did>` (admin auth) reports what an account
 still owes this process: in-flight writes, undelivered publication intents,
 non-terminal blob work, and an in-progress deletion, with `clientQuiescent`

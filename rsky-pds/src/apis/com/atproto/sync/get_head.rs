@@ -27,18 +27,21 @@ async fn inner_get_head(
             tracing::error!("@LOG: ERROR: {error}");
             ApiError::from(error)
         })?;
-    let actor_store = actor_store
+    let reader = actor_store
         .read(did.clone(), blobstore_factory.blobstore(did.clone()))
         .await
         .map_err(|error| {
             tracing::error!("@LOG: ERROR: {error}");
             ApiError::RuntimeError
         })?;
-    let storage_guard = actor_store.storage.read().await;
+    let storage_guard = reader.storage.read().await;
     match storage_guard.get_root_detailed().await {
-        Ok(root) => Ok(GetHeadOutput {
-            root: root.cid.to_string(),
-        }),
+        Ok(root) => {
+            actor_store.note_exposure(&did, &root.rev).await?;
+            Ok(GetHeadOutput {
+                root: root.cid.to_string(),
+            })
+        }
         Err(_) => Err(ApiError::BadRequest(
             "HeadNotFound".to_string(),
             format!("Could not find root for DID: {did}"),

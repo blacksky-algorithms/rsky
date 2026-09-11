@@ -21,6 +21,7 @@ pub mod crawlers;
 pub mod db;
 pub mod did_cache;
 pub mod drain;
+pub mod frontier;
 pub mod handle;
 pub mod image;
 pub mod lexicon;
@@ -495,6 +496,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 app::bsky::notification::unregister_push::unregister_push,
                 bsky_api_get_forwarder,
                 bsky_api_post_forwarder,
+                community::blacksky::pds::get_publication_frontier::get_publication_frontier,
                 community::lexicon::service::describe::service_describe,
                 well_known::well_known,
                 oauth::routes::oauth_par,
