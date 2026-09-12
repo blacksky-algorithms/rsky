@@ -12,6 +12,7 @@ members = [
   "rsky-lexicon",
   "rsky-oauth",
   "rsky-pds",
+  "rsky-pds-router",
   "rsky-relay",
   "rsky-repo",
   "rsky-satnav",
