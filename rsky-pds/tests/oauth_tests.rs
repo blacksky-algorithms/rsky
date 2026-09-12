@@ -178,6 +178,7 @@ async fn open_authorize_page(client: &Client, request_uri: &str) -> AuthorizeSes
     let html = response.into_string().await.unwrap();
     assert!(html.contains("Sign in"));
     assert!(html.contains(request_uri));
+    assert!(!html.contains("name=\"email_otp\""));
     AuthorizeSession {
         cookie,
         csrf: extract_csrf(&html),
@@ -794,4 +795,51 @@ async fn oauth_endpoint_edge_cases() {
     assert_eq!(response.status(), Status::BadRequest);
     let html = response.into_string().await.unwrap();
     assert!(html.contains("invalid CSRF token"));
+}
+
+/// A second-factor gate in front of the sign-in route sends the browser
+/// back with a hint and, after a bad code, an error; the form then carries
+/// the code, which this server accepts and ignores.
+#[tokio::test]
+async fn the_sign_in_page_shows_a_second_factor_field_when_told_to() {
+    let (_dir, client) = get_oauth_client().await;
+    let key = dpop_key();
+    let (request_uri, _nonce) = run_par(&client, &key).await;
+    let response = client
+        .get(format!(
+            "{}&otp_hint=a%2A%2A%2A%40example.test&otp_error=true",
+            authorize_path(&request_uri)
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let cookie = response
+        .cookies()
+        .get("device-id")
+        .expect("device cookie set")
+        .value()
+        .to_string();
+    let html = response.into_string().await.unwrap();
+    assert!(html.contains("name=\"email_otp\""), "{html}");
+    assert!(html.contains("a***@example.test"));
+    assert!(html.contains("The sign-in code was not accepted"));
+    let csrf = extract_csrf(&html);
+    let signed_in = client
+        .post("/oauth/authorize/sign-in")
+        .header(ContentType::Form)
+        .cookie(("device-id", cookie))
+        .body(form_encode(&[
+            ("client_id", LOOPBACK_CLIENT_ID),
+            ("request_uri", request_uri.as_str()),
+            ("csrf", csrf.as_str()),
+            ("identifier", "nobody.rsky.com"),
+            ("password", "wrong"),
+            ("email_otp", "12345"),
+        ]))
+        .dispatch()
+        .await;
+    assert_eq!(signed_in.status(), Status::Ok);
+    let html = signed_in.into_string().await.unwrap();
+    assert!(html.contains("class=\"error\""), "{html}");
+    assert!(!html.contains("name=\"email_otp\""));
 }

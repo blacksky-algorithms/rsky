@@ -35,6 +35,11 @@
       <input type="text" id="identifier" name="identifier" value="{{ login_hint }}" autocomplete="username" required>
       <label for="password">Password</label>
       <input type="password" id="password" name="password" autocomplete="current-password" required>
+      {% if let Some(hint) = otp_hint %}
+      <p class="hint">A sign-in code was sent to {{ hint }}.</p>
+      <label for="email_otp">Sign-in code</label>
+      <input type="text" id="email_otp" name="email_otp" autocomplete="one-time-code" inputmode="text" required>
+      {% endif %}
       <button type="submit" class="primary">Sign in</button>
     </form>
     {% if let Some(signup_url) = signup_url %}

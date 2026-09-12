@@ -26,6 +26,9 @@ pub struct SignInPage {
     pub csrf: String,
     pub login_hint: String,
     pub error: Option<String>,
+    /// Set when a second factor is required: the masked address the code
+    /// went to, shown with the code field.
+    pub otp_hint: Option<String>,
     pub signup_url: Option<String>,
     pub sessions: Vec<SessionOption>,
 }
@@ -84,6 +87,7 @@ mod tests {
             csrf: "csrf-token".to_string(),
             login_hint: "alice.example.com".to_string(),
             error: Some("Invalid identifier or password".to_string()),
+            otp_hint: Some("a***@example.test".to_string()),
             signup_url: Some("https://example.com/signup".to_string()),
             sessions: vec![SessionOption {
                 did: "did:plc:alice".to_string(),
@@ -96,6 +100,8 @@ mod tests {
         assert!(html.contains("csrf-token"));
         assert!(html.contains("alice.example.com"));
         assert!(html.contains("Invalid identifier or password"));
+        assert!(html.contains("name=\"email_otp\""));
+        assert!(html.contains("a***@example.test"));
         assert!(html.contains("https://example.com/signup"));
         assert!(html.contains("did:plc:alice"));
         assert!(html.contains("name=\"password\""));
@@ -110,6 +116,7 @@ mod tests {
             csrf: "csrf".to_string(),
             login_hint: String::new(),
             error: None,
+            otp_hint: None,
             signup_url: None,
             sessions: vec![],
         };
