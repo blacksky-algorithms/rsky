@@ -221,7 +221,8 @@ fn queue_from_csv(
 }
 
 async fn queue_from_pds(storage: &Storage, host: &str, priority: bool) -> Result<()> {
-    let http_client = reqwest::Client::builder()
+    let http_client = rsky_wintermute::outbound::client()?
+        .builder()
         .timeout(Duration::from_secs(30))
         .build()?;
 
@@ -256,6 +257,7 @@ async fn queue_from_pds(storage: &Storage, host: &str, priority: bool) -> Result
 
         println!("Fetching: {url}");
 
+        rsky_wintermute::outbound::client()?.check(&url)?;
         let response = http_client.get(url.as_str()).send().await?;
 
         if !response.status().is_success() {

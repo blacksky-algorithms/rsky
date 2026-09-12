@@ -35,6 +35,7 @@ pub mod metrics;
 pub mod models;
 pub mod oauth;
 pub mod oauth_scope;
+pub mod outbound;
 pub mod permission_set;
 pub mod pipethrough;
 pub mod plc;
@@ -511,22 +512,25 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         .with_attempts(blob_attempts);
 
     let id_resolver = SharedIdResolver {
-        id_resolver: RwLock::new(IdResolver::new(IdentityResolverOpts {
-            timeout: Some(std::time::Duration::from_millis(
-                cfg.identity.resolver_timeout,
-            )),
-            plc_url: Some(cfg.identity.plc_url.clone()),
-            did_cache: Some(Arc::new(
-                DidSqliteCache::new(
-                    did_cache_db,
-                    background_queue.clone(),
-                    std::time::Duration::from_millis(cfg.identity.cache_state_ttl),
-                    std::time::Duration::from_millis(cfg.identity.cache_max_ttl),
-                )
-                .with_read_only(read_only),
-            )),
-            backup_nameservers: cfg.identity.handle_backup_name_servers.clone(),
-        })),
+        id_resolver: RwLock::new(
+            IdResolver::new(IdentityResolverOpts {
+                timeout: Some(std::time::Duration::from_millis(
+                    cfg.identity.resolver_timeout,
+                )),
+                plc_url: Some(cfg.identity.plc_url.clone()),
+                did_cache: Some(Arc::new(
+                    DidSqliteCache::new(
+                        did_cache_db,
+                        background_queue.clone(),
+                        std::time::Duration::from_millis(cfg.identity.cache_state_ttl),
+                        std::time::Duration::from_millis(cfg.identity.cache_max_ttl),
+                    )
+                    .with_read_only(read_only),
+                )),
+                backup_nameservers: cfg.identity.handle_backup_name_servers.clone(),
+            })
+            .with_network(outbound::policy()),
+        ),
     };
 
     // Keeping unused for other config purposes for now.

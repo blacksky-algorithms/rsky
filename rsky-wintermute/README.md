@@ -105,6 +105,7 @@ RUST_LOG=info \
 | `BACKFILLER_TIMEOUT_SECS` | `120` | Timeout for fetching repo CAR from PDS |
 | `INLINE_CONCURRENCY` | `100` | Concurrent inline indexing tasks for firehose events |
 | `DB_POOL_SIZE` | `20` | Connections per pool (4 pools: firehose, labels, indexer, backfiller) |
+| `FETCH_ALLOW_PRIVATE` | (unset) | Let repository and status fetches reach private or plain-http hosts (local development only); otherwise only public https hosts are reachable |
 | `RECONCILE_PDS_URL` | (none) | The PDS `reindex_did` reads frontiers and exports from, as a fixed address |
 | `RECONCILE_PDS_ADMIN_PASSWORD` | (none) | Admin password for the frontier read on that PDS |
 

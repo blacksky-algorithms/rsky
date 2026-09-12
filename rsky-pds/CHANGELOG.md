@@ -259,6 +259,20 @@ create/update/delete), answering `429 RateLimitExceeded` with the
 `RateLimit-*` and `Retry-After` headers the reference sends;
 `PDS_RATE_LIMIT_BYPASS_KEY` and `PDS_RATE_LIMIT_BYPASS_IPS` skip them.
 
+### Changed — outbound requests are bound by a network policy
+
+Every request whose destination someone else chose (a service endpoint
+from a DID document, a subscriber's endpoint, a client's metadata or JWKS
+URL, a handle's or `did:web` well-known document, a permission set's host)
+goes through one transport whose name resolution keeps only public
+addresses, refuses credentials in URLs and plain `http`, never follows a
+redirect on its own, and reads bodies up to a bound. Client metadata and
+JWKS documents accept only a direct `200`; handle and `did:web` documents
+follow at most three redirects, each checked the same way. Configured
+services (the PLC directory, the app view, relays, mail) keep their own
+transports and never take a resolved destination. `PDS_DEV_MODE=true`
+relaxes the policy for local services.
+
 ### Fixed — responses that differed from the reference PDS
 
 - `com.atproto.sync.*` reads of a missing, taken-down, or deactivated

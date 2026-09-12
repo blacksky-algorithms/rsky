@@ -1138,16 +1138,21 @@ impl IngesterManager {
                 None
             }
         })?;
-        let url = format!(
-            "{}/xrpc/com.atproto.sync.getRepoStatus?did={}",
-            pds_endpoint.trim_end_matches('/'),
-            did
-        );
-        let client = reqwest::Client::builder()
+        let url = crate::outbound::client()
+            .ok()?
+            .checked(&format!(
+                "{}/xrpc/com.atproto.sync.getRepoStatus?did={}",
+                pds_endpoint.trim_end_matches('/'),
+                did
+            ))
+            .ok()?;
+        let client = crate::outbound::client()
+            .ok()?
+            .builder()
             .timeout(std::time::Duration::from_secs(5))
             .build()
             .ok()?;
-        let resp = client.get(&url).send().await.ok()?;
+        let resp = client.get(url).send().await.ok()?;
         if !resp.status().is_success() {
             return None;
         }

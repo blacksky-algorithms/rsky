@@ -7,7 +7,7 @@ use crate::{context, SharedIdResolver, APP_USER_AGENT};
 use anyhow::{bail, Result};
 use lazy_static::lazy_static;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
-use reqwest::{Client, RequestBuilder, Response};
+use reqwest::{RequestBuilder, Response};
 use rocket::data::ToByteUnit;
 use rocket::http::{Method, Status};
 use rocket::request::{FromRequest, Outcome, Request};
@@ -17,7 +17,6 @@ use rsky_repo::types::Ids;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, HashSet};
-use std::str::FromStr;
 use std::time::Duration;
 use url::Url;
 
@@ -270,7 +269,8 @@ pub async fn format_url_and_aud(
             if let Some(ref params) = req.query {
                 url.set_query(Some(params.as_str()));
             }
-            if !req.cfg.service.dev_mode && !is_safe_url(url.clone()) {
+            if let Err(refused) = crate::outbound::client().check(&url) {
+                tracing::warn!(%refused, "proxy target refused");
                 bail!(InvalidRequestError::InvalidServiceUrl(url.to_string()));
             }
             Ok(UrlAndAud {
@@ -313,7 +313,8 @@ pub fn format_req_init(
 ) -> Result<RequestBuilder> {
     match req.method {
         Method::Get => {
-            let client = Client::builder()
+            let client = crate::outbound::client()
+                .builder()
                 .user_agent(APP_USER_AGENT)
                 .http2_keep_alive_while_idle(true)
                 .http2_keep_alive_timeout(Duration::from_secs(5))
@@ -322,7 +323,8 @@ pub fn format_req_init(
             Ok(client.get(url))
         }
         Method::Head => {
-            let client = Client::builder()
+            let client = crate::outbound::client()
+                .builder()
                 .user_agent(APP_USER_AGENT)
                 .http2_keep_alive_while_idle(true)
                 .http2_keep_alive_timeout(Duration::from_secs(5))
@@ -331,7 +333,8 @@ pub fn format_req_init(
             Ok(client.head(url))
         }
         Method::Post => {
-            let client = Client::builder()
+            let client = crate::outbound::client()
+                .builder()
                 .user_agent(APP_USER_AGENT)
                 .http2_keep_alive_while_idle(true)
                 .http2_keep_alive_timeout(Duration::from_secs(5))
@@ -351,7 +354,8 @@ pub fn format_req_init_with_value(
 ) -> Result<RequestBuilder> {
     match req.method {
         Method::Get => {
-            let client = Client::builder()
+            let client = crate::outbound::client()
+                .builder()
                 .user_agent(APP_USER_AGENT)
                 .http2_keep_alive_while_idle(true)
                 .http2_keep_alive_timeout(Duration::from_secs(5))
@@ -360,7 +364,8 @@ pub fn format_req_init_with_value(
             Ok(client.get(url))
         }
         Method::Head => {
-            let client = Client::builder()
+            let client = crate::outbound::client()
+                .builder()
                 .user_agent(APP_USER_AGENT)
                 .http2_keep_alive_while_idle(true)
                 .http2_keep_alive_timeout(Duration::from_secs(5))
@@ -369,7 +374,8 @@ pub fn format_req_init_with_value(
             Ok(client.head(url))
         }
         Method::Post => {
-            let client = Client::builder()
+            let client = crate::outbound::client()
+                .builder()
                 .user_agent(APP_USER_AGENT)
                 .http2_keep_alive_while_idle(true)
                 .http2_keep_alive_timeout(Duration::from_secs(5))
@@ -613,21 +619,6 @@ pub async fn read_array_buffer_res(res: Response) -> Result<Vec<u8>> {
         Err(err) => {
             tracing::error!("@LOG WARN: pipethrough network error {}", err.to_string());
             bail!("UpstreamFailure")
-        }
-    }
-}
-
-pub fn is_safe_url(url: Url) -> bool {
-    if url.scheme() != "https" {
-        return false;
-    }
-    match url.host_str() {
-        None | Some("localhost") => false,
-        Some(hostname) => {
-            if std::net::IpAddr::from_str(hostname).is_ok() {
-                return false;
-            }
-            true
         }
     }
 }

@@ -149,8 +149,17 @@ pub async fn assert_valid_did_documents_for_service(
         if host.contains(':') || host.contains('/') {
             bail!("Unsupported did:web form for activation: {did}")
         }
-        let url = format!("https://{host}/.well-known/did.json");
-        let doc: DidDocument = reqwest::get(&url).await?.error_for_status()?.json().await?;
+        let url =
+            crate::outbound::client().checked(&format!("https://{host}/.well-known/did.json"))?;
+        let response = crate::outbound::client()
+            .get(url, rsky_identity::safe_fetch::Redirects::Follow(3))
+            .await?;
+        let (status, body) =
+            rsky_identity::safe_fetch::SafeClient::read_bounded(response, 64 * 1024).await?;
+        if !status.is_success() {
+            bail!("did:web document request answered {status}")
+        }
+        let doc: DidDocument = serde_json::from_slice(&body)?;
         let pds_endpoint = doc.service.as_deref().and_then(|services| {
             services
                 .iter()

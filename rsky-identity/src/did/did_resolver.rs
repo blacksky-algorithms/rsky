@@ -54,6 +54,18 @@ impl DidResolver {
         }
     }
 
+    /// Resolves `did:web` documents under `policy` instead of the public
+    /// default.
+    pub fn with_network(mut self, policy: crate::safe_fetch::NetworkPolicy) -> Self {
+        if let Some(ResolverKind::Web(web)) = self.methods.remove("web") {
+            self.methods.insert(
+                "web".to_string(),
+                ResolverKind::Web(web.with_network(policy)),
+            );
+        }
+        self
+    }
+
     pub async fn resolve_no_check(&self, did: String) -> Result<Option<Value>> {
         let split = did.split(":").collect::<Vec<&str>>();
         if split[0] != "did" {

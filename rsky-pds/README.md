@@ -47,7 +47,7 @@ Mount a volume at `PDS_DATA_DIRECTORY` to persist data.
 | `PDS_HOSTNAME` | Public hostname (default `localhost`) |
 | `PDS_SERVICE_DID` | Service DID (default `did:web:{hostname}`) |
 | `PDS_VERSION` | Version string reported by the server |
-| `PDS_DEV_MODE` | Enable development mode |
+| `PDS_DEV_MODE` | Enable development mode; also lets outbound requests reach private and plain-http addresses |
 | `PDS_ADMIN_PASS` | Admin password for admin endpoints |
 | `PDS_CONTACT_EMAIL_ADDRESS` | Contact email in server metadata |
 | `PDS_PRIVACY_POLICY_URL`, `PDS_TERMS_OF_SERVICE_URL` | Policy links |

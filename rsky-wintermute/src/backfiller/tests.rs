@@ -114,10 +114,11 @@ mod backfiller_tests {
             priority: false,
         };
 
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .unwrap();
+        let http_client = rsky_identity::safe_fetch::SafeClient::new(
+            rsky_identity::safe_fetch::NetworkPolicy::PERMISSIVE,
+            std::time::Duration::from_secs(60),
+        )
+        .unwrap();
 
         BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
             .await
@@ -172,10 +173,11 @@ mod backfiller_tests {
             priority: false,
         };
 
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .unwrap();
+        let http_client = rsky_identity::safe_fetch::SafeClient::new(
+            rsky_identity::safe_fetch::NetworkPolicy::PERMISSIVE,
+            std::time::Duration::from_secs(10),
+        )
+        .unwrap();
 
         let result =
             BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
@@ -201,10 +203,11 @@ mod backfiller_tests {
             priority: false,
         };
 
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .unwrap();
+        let http_client = rsky_identity::safe_fetch::SafeClient::new(
+            rsky_identity::safe_fetch::NetworkPolicy::PERMISSIVE,
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
 
         let result =
             BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
@@ -382,7 +385,11 @@ mod backfiller_tests {
             priority: false,
         };
 
-        let http_client = reqwest::Client::new();
+        let http_client = rsky_identity::safe_fetch::SafeClient::new(
+            rsky_identity::safe_fetch::NetworkPolicy::PERMISSIVE,
+            std::time::Duration::from_secs(10),
+        )
+        .unwrap();
         let result =
             BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
                 .await;
@@ -485,7 +492,11 @@ mod backfiller_tests {
             priority: false,
         };
 
-        let http_client = reqwest::Client::new();
+        let http_client = rsky_identity::safe_fetch::SafeClient::new(
+            rsky_identity::safe_fetch::NetworkPolicy::PERMISSIVE,
+            std::time::Duration::from_secs(10),
+        )
+        .unwrap();
         let result =
             BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
                 .await;
@@ -507,7 +518,11 @@ mod backfiller_tests {
             priority: false,
         };
 
-        let http_client = reqwest::Client::new();
+        let http_client = rsky_identity::safe_fetch::SafeClient::new(
+            rsky_identity::safe_fetch::NetworkPolicy::PERMISSIVE,
+            std::time::Duration::from_secs(10),
+        )
+        .unwrap();
         let result =
             BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
                 .await;

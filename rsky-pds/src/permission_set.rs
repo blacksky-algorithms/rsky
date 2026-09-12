@@ -179,13 +179,16 @@ impl PermissionSetResolver {
         let authority = parsed.authority();
         let did = resolve_lexicon_authority(&authority).await?;
         let endpoint = resolve_pds_endpoint(&did).await?;
-        let client = reqwest::Client::builder().timeout(FETCH_TIMEOUT).build()?;
-        let url = format!(
+        let client = crate::outbound::client()
+            .builder()
+            .timeout(FETCH_TIMEOUT)
+            .build()?;
+        let url = crate::outbound::client().checked(&format!(
             "{}/xrpc/com.atproto.repo.getRecord",
             endpoint.trim_end_matches('/')
-        );
+        ))?;
         let response = client
-            .get(&url)
+            .get(url.clone())
             .query(&[
                 ("repo", did.as_str()),
                 ("collection", SCHEMA_COLLECTION),

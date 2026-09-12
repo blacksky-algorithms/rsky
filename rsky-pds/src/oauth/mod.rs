@@ -119,7 +119,7 @@ impl SharedOAuthProvider {
             issuer,
             audience,
             signing_key,
-            fetcher: Arc::new(fetcher::HttpClientMetadataFetcher::new()),
+            fetcher: Arc::new(fetcher::HttpClientMetadataFetcher::default()),
             store: Arc::new(PdsOAuthStore::new(account_db)),
             dpop: DpopManager::new(Some(nonce), replay_store),
             trusted_clients: env_list("PDS_OAUTH_TRUSTED_CLIENTS"),

@@ -7,6 +7,7 @@ use crate::types::{BackfillJob, IndexJob, WintermuteError, WriteAction};
 use dashmap::DashMap;
 use iroh_car::CarReader;
 use rsky_identity::IdResolver;
+use rsky_identity::safe_fetch::{Redirects, SafeClient};
 use rsky_identity::types::IdentityResolverOpts;
 use rsky_repo::parse::get_and_parse_record;
 use rsky_repo::readable_repo::ReadableRepo;
@@ -19,7 +20,7 @@ use std::time::Duration;
 pub struct BackfillerManager {
     workers: usize,
     storage: Arc<Storage>,
-    http_client: reqwest::Client,
+    http_client: SafeClient,
     pds_cache: Arc<DashMap<String, String>>,
     /// Where the actor generations are read before each fetch.
     generations: Option<deadpool_postgres::Pool>,
@@ -45,9 +46,7 @@ impl Drop for RepoRunningGuard {
 impl BackfillerManager {
     pub fn new(storage: Arc<Storage>) -> Result<Self, WintermuteError> {
         let workers = *WORKERS_BACKFILLER;
-        let http_client = reqwest::Client::builder()
-            .timeout(backfiller_timeout())
-            .build()?;
+        let http_client = crate::outbound::client()?;
 
         tracing::info!(
             "backfiller config: workers={}, channel_cap={}, timeout={:?}",
@@ -223,7 +222,7 @@ impl BackfillerManager {
 
     pub async fn process_job(
         storage: &Storage,
-        http_client: &reqwest::Client,
+        http_client: &SafeClient,
         pds_cache: &DashMap<String, String>,
         job: &BackfillJob,
     ) -> Result<(), WintermuteError> {
@@ -232,7 +231,7 @@ impl BackfillerManager {
 
     pub async fn process_job_with(
         storage: &Storage,
-        http_client: &reqwest::Client,
+        http_client: &SafeClient,
         pds_cache: &DashMap<String, String>,
         job: &BackfillJob,
         generations: Option<&deadpool_postgres::Pool>,
@@ -291,7 +290,15 @@ impl BackfillerManager {
         };
 
         let repo_url = format!("{pds_endpoint}/xrpc/com.atproto.sync.getRepo?did={did}");
-        let response = match http_client.get(&repo_url).send().await {
+        let repo_url = match http_client.checked(&repo_url) {
+            Ok(url) => url,
+            Err(e) => {
+                metrics::BACKFILLER_CAR_FETCH_ERRORS_TOTAL.inc();
+                metrics::BACKFILLER_REPOS_FAILED_TOTAL.inc();
+                return Err(WintermuteError::Other(format!("refused: {e}")));
+            }
+        };
+        let response = match http_client.get(repo_url, Redirects::Follow(3)).await {
             Ok(r) => r,
             Err(e) => {
                 metrics::BACKFILLER_CAR_FETCH_ERRORS_TOTAL.inc();

@@ -74,9 +74,11 @@ pub async fn inner_register_push(
         }
     }
     let notif_endpoint = get_endpoint(id_resolver, service_did.clone()).await?;
+    crate::outbound::client().checked(&notif_endpoint)?;
     let client = ReqwestClientBuilder::new(notif_endpoint)
         .client(
-            reqwest::ClientBuilder::new()
+            crate::outbound::client()
+                .builder()
                 .user_agent(APP_USER_AGENT)
                 .timeout(std::time::Duration::from_millis(1000))
                 .default_headers(auth_headers)

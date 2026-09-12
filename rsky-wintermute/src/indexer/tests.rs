@@ -117,10 +117,11 @@ mod indexer_tests {
             priority: false,
         };
 
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .unwrap();
+        let http_client = rsky_identity::safe_fetch::SafeClient::new(
+            rsky_identity::safe_fetch::NetworkPolicy::PERMISSIVE,
+            std::time::Duration::from_secs(60),
+        )
+        .unwrap();
 
         tracing::info!("processing backfill job for {test_did}");
         let result =
@@ -372,10 +373,11 @@ mod indexer_tests {
             priority: false,
         };
 
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .unwrap();
+        let http_client = rsky_identity::safe_fetch::SafeClient::new(
+            rsky_identity::safe_fetch::NetworkPolicy::PERMISSIVE,
+            std::time::Duration::from_secs(60),
+        )
+        .unwrap();
 
         let result =
             BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)

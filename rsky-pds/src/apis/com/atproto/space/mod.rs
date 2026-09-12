@@ -437,7 +437,8 @@ pub async fn deliver_notifications(
     subscribers: &[Subscriber],
     body: &serde_json::Value,
 ) {
-    let client = reqwest::Client::builder()
+    let client = crate::outbound::client()
+        .builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .expect("reqwest client");
@@ -451,7 +452,20 @@ pub async fn deliver_notifications(
             }
         };
         let url = format!("{}/xrpc/{lxm}", subscriber.endpoint.trim_end_matches('/'));
-        match client.post(&url).bearer_auth(token).json(body).send().await {
+        let url = match crate::outbound::client().checked(&url) {
+            Ok(url) => url,
+            Err(refused) => {
+                tracing::warn!(%refused, "notification endpoint refused");
+                continue;
+            }
+        };
+        match client
+            .post(url.clone())
+            .bearer_auth(token)
+            .json(body)
+            .send()
+            .await
+        {
             Ok(response) if response.status().is_success() => {
                 tracing::debug!(%url, "notification delivered");
             }
