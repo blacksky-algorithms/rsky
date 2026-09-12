@@ -54,6 +54,14 @@ Mount a volume at `PDS_DATA_DIRECTORY` to persist data.
 | `PDS_ACCEPTING_REPO_IMPORTS` | Allow `importRepo` (default true) |
 | `PDS_MAX_REPO_IMPORT_SIZE` | Largest `importRepo` body in bytes (default 100 MiB) |
 | `PDS_READ_ONLY` | Serve reads only (see below) |
+| `PDS_SHUTDOWN_GRACE_SECS` | How long in-flight requests may finish after SIGTERM or SIGINT (default 100) |
+| `PDS_LOG_FORMAT` | `json` (default; one object per line in the reference PDS's shape) or `text` |
+| `PDS_UPLOAD_SPOOL_DIR` | Where uploads are spooled while hashed and stored (default under the system temp dir) |
+| `PDS_MAX_CONCURRENT_EXPORTS` | Repository exports served at once (default 4); further requests wait up to 30 s, then 503 |
+| `PDS_MAX_CONCURRENT_BLOB_READS` | Blob downloads served at once (default 32) |
+| `PDS_RATE_LIMITS_ENABLED` | Apply the reference PDS's request limits (default false) |
+| `PDS_RATE_LIMIT_BYPASS_KEY` | Value of an `x-ratelimit-bypass` header that skips every limit |
+| `PDS_RATE_LIMIT_BYPASS_IPS` | Comma-separated addresses that skip every limit |
 | `PDS_BLOB_UPLOAD_LIMIT` | Max blob upload size in bytes (default 5MB) |
 
 ### Storage
@@ -221,6 +229,32 @@ Requests for any well-formed method without a local handler are proxied:
 `tools.ozone.*` to `PDS_MOD_SERVICE_URL`, `com.atproto.moderation.createReport`
 to `PDS_REPORT_SERVICE_URL`, and everything else to `PDS_BSKY_APP_VIEW_URL`,
 unless an `atproto-proxy` header names the service.
+
+### Operating
+
+`GET /metrics` serves Prometheus metrics: requests by route and status
+with latency, firehose subscribers, sqlite busy retries, actor write
+attempts, control-journal writes by table, rejected credentials by error,
+the sequencer head, and per actor the in-flight mutations, undelivered
+intents, and nonterminal blob work, with the lifecycle and repair
+backlogs. `GET /xrpc/_health` answers 503 while the process drains after a
+stop signal. Logs are one JSON object per line in the reference PDS's
+shape (`level` 30/40/50, `time`, `pid`, `hostname`, `name`, `msg`, nested
+fields), with every request logged as `request completed`.
+
+Repository exports and blob downloads are streamed and bounded by
+`PDS_MAX_CONCURRENT_EXPORTS` and `PDS_MAX_CONCURRENT_BLOB_READS`. Uploads
+are spooled to disk and refused with `413 PayloadTooLarge` one byte past
+`PDS_BLOB_UPLOAD_LIMIT`.
+
+With `PDS_RATE_LIMITS_ENABLED=true` the reference PDS's limits apply from
+this process's memory: 3000 XRPC requests per address per five minutes
+(repository exports excluded), and the per-route limits on session
+creation, account creation, uploads, handle updates, password and email
+flows, and repository writes (creates 3, updates 2, deletes 1 point
+against 5000 per hour and 35000 per day). An exhausted limit answers
+`429 RateLimitExceeded` with `RateLimit-*` and `Retry-After` headers.
+The address is the first `X-Forwarded-For` entry when present.
 
 ## Upgrading to 1.0
 

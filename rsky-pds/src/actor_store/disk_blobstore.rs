@@ -109,6 +109,15 @@ impl BlobStore for DiskBlobStore {
         })
     }
 
+    fn put_temp_from_path(&self, path: PathBuf) -> BoxFuture<'_, Result<String>> {
+        Box::pin(async move {
+            self.ensure_temp().await?;
+            let key = Self::gen_key();
+            tokio::fs::copy(path, self.tmp_path(&key)).await?;
+            Ok(key)
+        })
+    }
+
     fn make_permanent(&self, key: String, cid: Cid) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
             self.ensure_dir().await?;

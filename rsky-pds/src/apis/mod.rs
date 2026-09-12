@@ -205,6 +205,12 @@ pub enum ApiError {
     ReadOnly,
     /// No route answers the path.
     NotFound,
+    /// A body larger than the server accepts.
+    PayloadTooLarge,
+    /// Every slot for this kind of work is taken.
+    Overloaded(String),
+    /// A fixed-window limit is exhausted; carries the window's status.
+    RateLimitExceeded(crate::rate_limits::LimitStatus),
 }
 
 #[derive(Serialize)]
@@ -289,6 +295,29 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 Ok(res)
             }
             ApiError::NotFound => json_error(404, "NotFound", "Not Found".to_string(), __req),
+            ApiError::PayloadTooLarge => json_error(
+                413,
+                "PayloadTooLarge",
+                "request entity too large".to_string(),
+                __req,
+            ),
+            ApiError::RateLimitExceeded(status) => {
+                let mut res = json_error(
+                    429,
+                    "RateLimitExceeded",
+                    "Rate Limit Exceeded".to_string(),
+                    __req,
+                )?;
+                for header in status.headers() {
+                    res.set_header(header);
+                }
+                Ok(res)
+            }
+            ApiError::Overloaded(message) => {
+                let mut res = json_error(503, "ServiceUnavailable", message, __req)?;
+                res.set_header(Header::new("Retry-After", "5"));
+                Ok(res)
+            }
             ApiError::ReadOnly => json_error(
                 503,
                 "ReadOnly",

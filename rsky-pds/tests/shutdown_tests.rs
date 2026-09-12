@@ -4,9 +4,7 @@
 mod common;
 
 use common::pds_binary;
-use std::io::Read;
 use std::net::TcpListener;
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 fn free_port() -> u16 {
@@ -17,11 +15,27 @@ fn free_port() -> u16 {
         .port()
 }
 
-async fn wait_for(url: &str, deadline: Duration) -> bool {
+/// Every request closes its connection, so none is left for the server
+/// to wait for during its grace period.
+fn one_shot_client() -> reqwest::Client {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(reqwest::header::CONNECTION, "close".parse().unwrap());
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .pool_max_idle_per_host(0)
+        .build()
+        .unwrap()
+}
+
+async fn wait_for(client: &reqwest::Client, url: &str, deadline: Duration) -> bool {
     let started = Instant::now();
     while started.elapsed() < deadline {
-        if reqwest::get(url).await.is_ok_and(|res| res.status() == 200) {
-            return true;
+        if let Ok(res) = client.get(url).send().await {
+            let ok = res.status() == 200;
+            let _ = res.bytes().await;
+            if ok {
+                return true;
+            }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -36,21 +50,29 @@ async fn sigterm_drains_and_exits_with_json_logs() {
         .env("PDS_PORT", port.to_string())
         .env("PDS_SHUTDOWN_GRACE_SECS", "5")
         .env("RUST_LOG", "info")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(std::fs::File::create(dir.path().join("stdout.log")).unwrap())
+        .stderr(std::fs::File::create(dir.path().join("stderr.log")).unwrap())
         .spawn()
         .unwrap();
     let base = format!("http://127.0.0.1:{port}");
+    let client = one_shot_client();
     assert!(
         wait_for(
+            &client,
             &format!("{base}/xrpc/_health/live"),
             Duration::from_secs(30)
         )
         .await,
         "server did not come up"
     );
-    let health = reqwest::get(format!("{base}/xrpc/_health")).await.unwrap();
+    let health = client
+        .get(format!("{base}/xrpc/_health"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(health.status(), 200);
+    let _ = health.bytes().await.unwrap();
+    drop(client);
 
     // SAFETY: the pid names the child spawned above, which is still ours
     assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
@@ -66,20 +88,8 @@ async fn sigterm_drains_and_exits_with_json_logs() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     assert!(status.success(), "{status:?}");
-    let mut stdout = String::new();
-    child
-        .stdout
-        .take()
-        .unwrap()
-        .read_to_string(&mut stdout)
-        .unwrap();
-    let mut stderr = String::new();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut stderr)
-        .unwrap();
+    let stdout = std::fs::read_to_string(dir.path().join("stdout.log")).unwrap();
+    let stderr = std::fs::read_to_string(dir.path().join("stderr.log")).unwrap();
     let logs = format!("{stdout}{stderr}");
     let lines: Vec<serde_json::Value> = logs
         .lines()

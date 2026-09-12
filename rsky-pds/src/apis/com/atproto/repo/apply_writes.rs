@@ -5,6 +5,7 @@ use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::publication;
+use crate::rate_limits::{Caller, RateLimits};
 use crate::repo::prepare::{
     prepare_create, prepare_delete, prepare_update, PrepareCreateOpts, PrepareDeleteOpts,
     PrepareUpdateOpts,
@@ -157,6 +158,7 @@ async fn inner_apply_writes(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.repo.applyWrites", format = "json", data = "<body>")]
 pub async fn apply_writes(
@@ -166,7 +168,26 @@ pub async fn apply_writes(
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
+    limits: &State<RateLimits>,
+    caller: Caller,
 ) -> Result<Json<ApplyWritesOutput>, ApiError> {
+    limits.consume_all(
+        &crate::rate_limits::REPO_WRITES,
+        auth.access
+            .credentials
+            .as_ref()
+            .and_then(|credentials| credentials.did.as_deref())
+            .unwrap_or_default(),
+        body.writes
+            .iter()
+            .map(|write| match write {
+                ApplyWritesInputRefWrite::Create(_) => crate::rate_limits::CREATE_POINTS,
+                ApplyWritesInputRefWrite::Update(_) => crate::rate_limits::UPDATE_POINTS,
+                ApplyWritesInputRefWrite::Delete(_) => crate::rate_limits::DELETE_POINTS,
+            })
+            .sum(),
+        caller.bypass,
+    )?;
     tracing::debug!("@LOG: debug apply_writes {body:#?}");
     for write in &body.writes {
         let (collection, action) = match write {

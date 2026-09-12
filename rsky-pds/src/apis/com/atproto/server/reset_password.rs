@@ -1,6 +1,8 @@
 use crate::account_manager::{AccountManager, ResetPasswordOpts};
 use crate::apis::ApiError;
+use crate::rate_limits::{Caller, RateLimits};
 use rocket::serde::json::Json;
+use rocket::State;
 use rsky_lexicon::com::atproto::server::ResetPasswordInput;
 
 /// The reference PDS refuses passwords longer than this.
@@ -15,7 +17,15 @@ const NEW_PASSWORD_MAX_LENGTH: usize = 256;
 pub async fn reset_password(
     body: Json<ResetPasswordInput>,
     account_manager: AccountManager,
+    limits: &State<RateLimits>,
+    caller: Caller,
 ) -> Result<(), ApiError> {
+    limits.consume_all(
+        &crate::rate_limits::RESET_PASSWORD,
+        &caller.ip,
+        1,
+        caller.bypass,
+    )?;
     let ResetPasswordInput { token, password } = body.into_inner();
     if password.len() > NEW_PASSWORD_MAX_LENGTH {
         return Err(ApiError::InvalidRequest(

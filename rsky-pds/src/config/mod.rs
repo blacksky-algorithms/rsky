@@ -213,6 +213,8 @@ pub struct CoreConfig {
     pub read_only: bool,
     /// How long in-flight requests may finish after a stop signal.
     pub shutdown_grace_secs: u32,
+    /// Where uploads are spooled while they are hashed and stored.
+    pub upload_spool_dir: String,
 }
 
 pub fn env_to_cfg() -> ServerConfig {
@@ -240,6 +242,12 @@ pub fn env_to_cfg() -> ServerConfig {
         write_allowlist_file: env_str("PDS_WRITE_ALLOWLIST_FILE"),
         read_only: env_bool("PDS_READ_ONLY").unwrap_or(false),
         shutdown_grace_secs: env_int("PDS_SHUTDOWN_GRACE_SECS").unwrap_or(100) as u32,
+        upload_spool_dir: env_str("PDS_UPLOAD_SPOOL_DIR").unwrap_or_else(|| {
+            std::env::temp_dir()
+                .join("rsky-pds-spool")
+                .to_string_lossy()
+                .to_string()
+        }),
     };
     let service_handle_domains: Vec<String>;
     if !env_list("PDS_SERVICE_HANDLE_DOMAINS").is_empty() {

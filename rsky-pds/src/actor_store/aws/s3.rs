@@ -138,6 +138,23 @@ impl S3BlobStore {
         Ok(key)
     }
 
+    pub async fn put_temp_from_path(&self, path: std::path::PathBuf) -> Result<String> {
+        let key = self.gen_key();
+        let object = self.get_tmp_path(&key);
+        self.attempt(&object, "put", async {
+            self.client
+                .put_object()
+                .body(ByteStream::from_path(path).await?)
+                .bucket(&self.bucket)
+                .key(object.clone())
+                .send()
+                .await?;
+            Ok(())
+        })
+        .await?;
+        Ok(key)
+    }
+
     pub async fn make_permanent(&self, key: String, cid: Cid) -> Result<()> {
         let already_has = self.has_stored(cid).await?;
         if !already_has {
@@ -321,6 +338,10 @@ impl S3BlobStore {
 impl BlobStore for S3BlobStore {
     fn put_temp(&self, bytes: Vec<u8>) -> BoxFuture<'_, Result<String>> {
         Box::pin(S3BlobStore::put_temp(self, bytes))
+    }
+
+    fn put_temp_from_path(&self, path: std::path::PathBuf) -> BoxFuture<'_, Result<String>> {
+        Box::pin(S3BlobStore::put_temp_from_path(self, path))
     }
 
     fn make_permanent(&self, key: String, cid: Cid) -> BoxFuture<'_, Result<()>> {

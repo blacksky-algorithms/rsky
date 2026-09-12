@@ -5,6 +5,8 @@ use crate::auth_verifier::AccessFullCheckTakedown;
 use crate::mailer;
 use crate::mailer::TokenParam;
 use crate::models::models::EmailTokenPurpose;
+use crate::rate_limits::{Caller, RateLimits};
+use rocket::State;
 
 /// Mails the caller the token `deleteAccount` requires. Full access only,
 /// from an account that is not taken down, like the reference PDS.
@@ -13,7 +15,19 @@ use crate::models::models::EmailTokenPurpose;
 pub async fn request_account_delete(
     auth: AccessFullCheckTakedown,
     account_manager: AccountManager,
+    limits: &State<RateLimits>,
+    caller: Caller,
 ) -> Result<(), ApiError> {
+    limits.consume_all(
+        &crate::rate_limits::EMAIL_REQUESTS,
+        auth.access
+            .credentials
+            .as_ref()
+            .and_then(|credentials| credentials.did.as_deref())
+            .unwrap_or_default(),
+        1,
+        caller.bypass,
+    )?;
     let did = auth.access.credentials.unwrap().did.unwrap();
     let account = account_manager
         .get_account(

@@ -5,6 +5,7 @@ use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::publication;
+use crate::rate_limits::{Caller, RateLimits};
 use crate::repo::prepare::{prepare_delete, PrepareDeleteOpts};
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
@@ -91,6 +92,7 @@ async fn inner_delete_record(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.repo.deleteRecord",
@@ -104,7 +106,19 @@ pub async fn delete_record(
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
+    limits: &State<RateLimits>,
+    caller: Caller,
 ) -> Result<(), ApiError> {
+    limits.consume_all(
+        &crate::rate_limits::REPO_WRITES,
+        auth.access
+            .credentials
+            .as_ref()
+            .and_then(|credentials| credentials.did.as_deref())
+            .unwrap_or_default(),
+        crate::rate_limits::DELETE_POINTS,
+        caller.bypass,
+    )?;
     crate::apis::assert_repo_scope(
         &auth.access.credentials,
         &body.collection,

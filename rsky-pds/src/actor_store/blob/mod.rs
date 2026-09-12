@@ -508,6 +508,54 @@ impl BlobReader {
         })
     }
 
+    /// Registers a spooled upload: hashed and sniffed from the file, then
+    /// stored without being read into memory where the store allows it.
+    pub async fn upload_blob_from_path(
+        &self,
+        user_suggested_mime: String,
+        path: std::path::PathBuf,
+    ) -> Result<BlobMetadata> {
+        let hashed = tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || -> Result<(Vec<u8>, i64, Vec<u8>)> {
+                use std::io::Read;
+                let mut file = std::fs::File::open(&path)?;
+                let mut hasher = Sha256::new();
+                let mut head = Vec::new();
+                let mut size = 0i64;
+                let mut buf = vec![0u8; 64 * 1024];
+                loop {
+                    let n = file.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    hasher.update(&buf[..n]);
+                    size += n as i64;
+                    if head.len() < 8192 {
+                        let take = (8192 - head.len()).min(n);
+                        head.extend_from_slice(&buf[..take]);
+                    }
+                }
+                Ok((hasher.finalize().to_vec(), size, head))
+            }
+        })
+        .await??;
+        let (sha256, size, head) = hashed;
+        let (temp_key, img_info, sniffed_mime) = try_join!(
+            self.blobstore.put_temp_from_path(path.clone()),
+            image::maybe_get_info_from_path(path),
+            image::mime_type_from_bytes(head)
+        )?;
+        Ok(BlobMetadata {
+            temp_key,
+            size,
+            cid: sha256_to_cid(sha256),
+            mime_type: sniffed_mime.unwrap_or(user_suggested_mime),
+            width: img_info.as_ref().map(|info| info.width as i32),
+            height: img_info.map(|info| info.height as i32),
+        })
+    }
+
     pub async fn track_untethered_blob(&self, metadata: BlobMetadata) -> Result<BlobRef> {
         let BlobMetadata {
             temp_key,

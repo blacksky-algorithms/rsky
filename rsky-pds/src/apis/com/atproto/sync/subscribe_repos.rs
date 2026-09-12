@@ -341,3 +341,19 @@ pub async fn subscribe_repos<'a>(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::SubscriberGauge;
+
+    #[test]
+    fn the_gauge_follows_the_connection() {
+        let gauge = &crate::metrics::METRICS.firehose_subscribers;
+        let before = gauge.get();
+        let guard = SubscriberGauge::new();
+        assert_eq!(gauge.get(), before + 1);
+        drop(guard);
+        assert_eq!(gauge.get(), before);
+        assert!(!super::get_backfill_limit(1000).is_empty());
+    }
+}

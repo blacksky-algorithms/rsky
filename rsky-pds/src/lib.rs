@@ -22,6 +22,7 @@ pub mod custom_routes;
 pub mod db;
 pub mod did_cache;
 pub mod drain;
+pub mod exports;
 pub mod frontier;
 pub mod handle;
 pub mod image;
@@ -38,6 +39,7 @@ pub mod permission_set;
 pub mod pipethrough;
 pub mod plc;
 pub mod publication;
+pub mod rate_limits;
 pub mod read_after_write;
 pub mod repair;
 pub mod repo;
@@ -45,6 +47,7 @@ pub mod rotate_keys;
 pub mod sequencer;
 pub mod space_auth;
 pub mod space_scope;
+pub mod spool;
 pub mod well_known;
 pub mod xrpc_server;
 use crate::account_manager::AccountManager;
@@ -173,6 +176,61 @@ impl Fairing for Telemetry {
             actor_store.background_queue.process_all().await;
         }
         tracing::warn!("drained; exiting");
+    }
+}
+
+/// The reference PDS's per-address budget, charged before routing. An
+/// exhausted budget sends the request to the route that answers 429.
+pub struct GlobalRateLimit;
+
+#[rocket::async_trait]
+impl Fairing for GlobalRateLimit {
+    fn info(&self) -> Info {
+        Info {
+            name: "Global per-address rate limit",
+            kind: Kind::Request,
+        }
+    }
+
+    async fn on_request(&self, request: &mut Request<'_>, _data: &mut rocket::Data<'_>) {
+        let Some(limits) = request.rocket().state::<rate_limits::RateLimits>() else {
+            return;
+        };
+        if !limits.enabled() || !rate_limits::global_limit_applies(request.uri().path().as_str()) {
+            return;
+        }
+        let ip = rate_limits::client_ip(request);
+        if limits.bypasses(request.headers().get_one("x-ratelimit-bypass"), ip) {
+            return;
+        }
+        let key = ip.map(|ip| ip.to_string()).unwrap_or_default();
+        if let Err(status) = limits.consume(&rate_limits::GLOBAL_IP, &key, 1) {
+            request.local_cache(|| Some(ApiError::RateLimitExceeded(status)));
+            request.set_method(rocket::http::Method::Get);
+            request
+                .set_uri(rocket::http::uri::Origin::parse("/_rate_limited").expect("static uri"));
+        }
+    }
+}
+
+#[get("/_rate_limited")]
+async fn rate_limited(request_error: RateLimited) -> ApiError {
+    request_error.0
+}
+
+/// The refusal the global limiter cached for this request.
+pub struct RateLimited(ApiError);
+
+#[rocket::async_trait]
+impl<'r> rocket::request::FromRequest<'r> for RateLimited {
+    type Error = ();
+
+    async fn from_request(req: &'r Request<'_>) -> rocket::request::Outcome<Self, Self::Error> {
+        let cached: &Option<ApiError> = req.local_cache(|| None);
+        match cached {
+            Some(error) => rocket::request::Outcome::Success(RateLimited(error.clone())),
+            None => rocket::request::Outcome::Forward(Status::NotFound),
+        }
     }
 }
 
@@ -579,6 +637,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 health,
                 health_live,
                 metrics_route,
+                rate_limited,
                 drain_status,
                 custom_routes::tls_check,
                 custom_routes::custom_well_known_did,
@@ -713,6 +772,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         )
         .register("/", catchers![default_catcher])
         .attach(Telemetry)
+        .attach(GlobalRateLimit)
         .attach(CORS)
         .attach(oauth::OAuthHeaders)
         .attach(shield)
@@ -727,6 +787,8 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(crate::space_auth::SharedSpaceDpop::default())
         .manage(crate::permission_set::SharedPermissionSets::default())
         .manage(actor_store)
+        .manage(exports::Exports::from_env())
+        .manage(rate_limits::RateLimits::from_env())
         .manage(lifecycle)
         .manage(admission)
         .manage(repairs)

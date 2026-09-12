@@ -1,9 +1,9 @@
 use crate::actor_store::db::{ActorDb, RepoBlock};
 use anyhow::Result;
+use futures::Stream;
 use lexicon_cid::Cid;
 use rsky_common;
 use rsky_repo::block_map::{BlockMap, BlocksAndMissing};
-use rsky_repo::car::blocks_to_car_file;
 use rsky_repo::cid_set::CidSet;
 use rsky_repo::storage::readable_blockstore::ReadableBlockstore;
 use rsky_repo::storage::types::RepoStorage;
@@ -395,48 +395,95 @@ impl SqlRepoReader {
         since: Option<String>,
         deadline: Duration,
     ) -> Result<Vec<u8>> {
+        let stream = self.car_stream_within(since, deadline).await?;
+        futures::pin_mut!(stream);
+        let mut car = Vec::new();
+        while let Some(chunk) = futures::StreamExt::next(&mut stream).await {
+            car.extend(chunk?);
+        }
+        Ok(car)
+    }
+
+    /// The export as a stream of CAR bytes, read from one snapshot on a
+    /// dedicated read-only connection in the reference's block order. The
+    /// snapshot is released when the stream is dropped, so an abandoned
+    /// download stops the walk.
+    pub async fn car_stream_within(
+        &self,
+        since: Option<String>,
+        deadline: Duration,
+    ) -> Result<impl Stream<Item = Result<Vec<u8>>> + Send + 'static> {
         let Some(path) = self.db.path().filter(|path| !path.as_os_str().is_empty()) else {
             anyhow::bail!("repository export needs a file-backed store")
         };
-        let (root, car) = tokio::task::spawn_blocking(move || -> Result<(Cid, BlockMap)> {
-            let conn = Connection::open_with_flags(
-                &path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )?;
-            conn.busy_timeout(Duration::from_millis(5000))?;
-            let snapshot = conn.unchecked_transaction()?;
-            let root: Option<String> = snapshot
-                .query_row("SELECT cid FROM repo_root LIMIT 1", [], |row| row.get(0))
-                .optional()?;
-            let Some(root) = root else {
-                return Err(anyhow::Error::new(RepoRootNotFoundError));
-            };
-            let started = Instant::now();
-            let mut car = BlockMap::new();
-            let mut cursor: Option<CidAndRev> = None;
-            loop {
-                if started.elapsed() > deadline {
-                    anyhow::bail!("repository export exceeded {deadline:?}");
-                }
-                let rows = block_range_in(&snapshot, &since, &cursor)?;
-                for row in &rows {
-                    car.set(Cid::from_str(&row.cid)?, row.content.clone());
-                }
-                match rows.last() {
-                    Some(last_row) => {
-                        cursor = Some(CidAndRev {
-                            cid: Cid::from_str(&last_row.cid)?,
-                            rev: last_row.repo_rev.clone(),
-                        })
+        let (root_tx, root_rx) = tokio::sync::oneshot::channel::<Result<Cid>>();
+        let (block_tx, mut block_rx) = tokio::sync::mpsc::channel::<Result<Vec<(Cid, Vec<u8>)>>>(4);
+        tokio::task::spawn_blocking(move || {
+            let mut root_tx = Some(root_tx);
+            let mut walk = || -> Result<()> {
+                let conn = Connection::open_with_flags(
+                    &path,
+                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )?;
+                conn.busy_timeout(Duration::from_millis(5000))?;
+                let snapshot = conn.unchecked_transaction()?;
+                let root: Option<String> = snapshot
+                    .query_row("SELECT cid FROM repo_root LIMIT 1", [], |row| row.get(0))
+                    .optional()?;
+                let Some(root) = root else {
+                    return Err(anyhow::Error::new(RepoRootNotFoundError));
+                };
+                let root = Cid::from_str(&root)?;
+                let _ = root_tx.take().expect("root sent once").send(Ok(root));
+                let started = Instant::now();
+                let mut cursor: Option<CidAndRev> = None;
+                loop {
+                    if started.elapsed() >= deadline {
+                        anyhow::bail!("repository export exceeded {deadline:?}");
                     }
-                    None => break,
+                    let rows = block_range_in(&snapshot, &since, &cursor)?;
+                    let Some(last_row) = rows.last() else {
+                        break;
+                    };
+                    cursor = Some(CidAndRev {
+                        cid: Cid::from_str(&last_row.cid)?,
+                        rev: last_row.repo_rev.clone(),
+                    });
+                    let batch = rows
+                        .iter()
+                        .map(|row| Ok((Cid::from_str(&row.cid)?, row.content.clone())))
+                        .collect::<Result<Vec<_>>>()?;
+                    if block_tx.blocking_send(Ok(batch)).is_err() {
+                        // the download was abandoned
+                        break;
+                    }
+                }
+                snapshot.rollback()?;
+                Ok(())
+            };
+            if let Err(err) = walk() {
+                match root_tx.take() {
+                    Some(root_tx) => {
+                        let _ = root_tx.send(Err(err));
+                    }
+                    None => {
+                        let _ = block_tx.blocking_send(Err(err));
+                    }
                 }
             }
-            snapshot.rollback()?;
-            Ok((Cid::from_str(&root)?, car))
-        })
-        .await??;
-        blocks_to_car_file(Some(&root), car).await
+        });
+        let root = root_rx.await??;
+        Ok(rsky_repo::car::write_car_stream(
+            Some(&root),
+            move |mut writer| async move {
+                while let Some(batch) = block_rx.recv().await {
+                    for (cid, bytes) in batch? {
+                        writer.write(cid, bytes).await?;
+                    }
+                }
+                Ok(writer)
+            },
+        ))
     }
 
     pub async fn get_block_range(
@@ -761,6 +808,34 @@ mod tests {
         );
         let err = memory.get_car_stream(None).await.unwrap_err();
         assert!(err.to_string().contains("file-backed"));
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_export_stops_the_walk() {
+        let (_dir, reader) = test_reader().await;
+        let root_bytes = b"big-root".to_vec();
+        let root_cid = cid_for(&root_bytes);
+        let mut blocks = BlockMap::new();
+        blocks.set(root_cid, root_bytes);
+        for i in 0..3000u32 {
+            let bytes = format!("block-{i}").into_bytes();
+            blocks.set(cid_for(&bytes), bytes);
+        }
+        reader.put_many(blocks, "rev-1".to_owned()).await.unwrap();
+        reader
+            .update_root(root_cid, "rev-1".to_owned(), Some(true))
+            .await
+            .unwrap();
+        let stream = reader
+            .car_stream_within(None, EXPORT_DEADLINE)
+            .await
+            .unwrap();
+        // never read; the producer's pending batch send fails once the
+        // writer gives up on the dropped body
+        drop(stream);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let full = reader.get_car_stream(None).await.unwrap();
+        assert!(full.len() > 3000 * 10);
     }
 
     #[tokio::test]

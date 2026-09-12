@@ -5,6 +5,7 @@ use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::publication;
+use crate::rate_limits::{Caller, RateLimits};
 use crate::repo::prepare::{prepare_create, prepare_update, PrepareCreateOpts, PrepareUpdateOpts};
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
@@ -119,6 +120,7 @@ async fn inner_put_record(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.repo.putRecord", format = "json", data = "<body>")]
 pub async fn put_record(
@@ -128,7 +130,19 @@ pub async fn put_record(
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
+    limits: &State<RateLimits>,
+    caller: Caller,
 ) -> Result<Json<PutRecordOutput>, ApiError> {
+    limits.consume_all(
+        &crate::rate_limits::REPO_WRITES,
+        auth.access
+            .credentials
+            .as_ref()
+            .and_then(|credentials| credentials.did.as_deref())
+            .unwrap_or_default(),
+        crate::rate_limits::UPDATE_POINTS,
+        caller.bypass,
+    )?;
     tracing::debug!("@LOG: debug put_record {body:#?}");
     crate::apis::assert_repo_scope(
         &auth.access.credentials,

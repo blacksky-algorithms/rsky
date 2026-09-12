@@ -6,6 +6,7 @@ use crate::account_manager::AccountManager;
 use crate::apis::com::atproto::server::did_doc_for_session;
 use crate::apis::ApiError;
 use crate::config::ServerConfig;
+use crate::rate_limits::{Caller, RateLimits};
 use crate::SharedIdResolver;
 use rocket::serde::json::Json;
 use rocket::State;
@@ -144,8 +145,15 @@ pub async fn create_session(
     cfg: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
     account_manager: AccountManager,
+    limits: &State<RateLimits>,
+    caller: Caller,
 ) -> Result<Json<CreateSessionOutput>, ApiError> {
-    // @TODO: Add rate limiting
+    limits.consume_all(
+        &crate::rate_limits::CREATE_SESSION,
+        &format!("{}-{}", body.identifier, caller.ip),
+        1,
+        caller.bypass,
+    )?;
     match inner_create_session(body, cfg, id_resolver, account_manager).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => Err(error),

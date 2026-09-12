@@ -1285,3 +1285,15 @@ async fn read_only_store_serves_reads_and_refuses_every_write() {
         .unwrap_err();
     assert!(refused.to_string().contains("readonly"), "{refused}");
 }
+
+#[test]
+fn inflight_counts_stack_and_unwind() {
+    let inflight = Arc::new(Mutex::new(HashMap::new()));
+    let first = InflightGuard::new(TEST_DID, &inflight);
+    let second = InflightGuard::new(TEST_DID, &inflight);
+    assert_eq!(inflight.lock().unwrap()[TEST_DID], 2);
+    drop(first);
+    assert_eq!(inflight.lock().unwrap()[TEST_DID], 1);
+    drop(second);
+    assert!(inflight.lock().unwrap().get(TEST_DID).is_none());
+}

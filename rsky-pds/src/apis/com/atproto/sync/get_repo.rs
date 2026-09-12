@@ -5,19 +5,17 @@ use crate::apis::com::atproto::repo::assert_repo_availability;
 use crate::apis::ApiError;
 use crate::auth_verifier;
 use crate::auth_verifier::OptionalAccessOrAdminToken;
+use crate::exports::{CarStream, ExportGuard, Exports};
 use anyhow::{bail, Result};
-use rocket::{Responder, State};
-
-#[derive(Responder)]
-#[response(status = 200, content_type = "application/vnd.ipld.car")]
-pub struct BlockResponder(Vec<u8>);
+use rocket::State;
 
 async fn get_car_stream(
     blobstore_factory: &State<BlobstoreFactory>,
     did: String,
     since: Option<String>,
     actor_store: &State<ActorStore>,
-) -> Result<Vec<u8>> {
+    guard: ExportGuard,
+) -> Result<CarStream> {
     let reader = actor_store
         .read(did.clone(), blobstore_factory.blobstore(did.clone()))
         .await?;
@@ -25,9 +23,12 @@ async fn get_car_stream(
     if let Ok(root) = storage_guard.get_root_detailed().await {
         actor_store.note_exposure(&did, &root.rev).await?;
     }
-    match storage_guard.get_car_stream(since).await {
+    match storage_guard
+        .car_stream_within(since, crate::actor_store::repo::sql_repo::EXPORT_DEADLINE)
+        .await
+    {
         Err(_) => bail!("Could not find repo for DID: {did}"),
-        Ok(carstream) => Ok(carstream),
+        Ok(stream) => Ok(CarStream::new(stream, guard)),
     }
 }
 
@@ -38,14 +39,15 @@ async fn inner_get_repo(
     auth: OptionalAccessOrAdminToken,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
-) -> Result<Vec<u8>> {
+    guard: ExportGuard,
+) -> Result<CarStream> {
     let is_user_or_admin = if let Some(access) = auth.access {
         auth_verifier::is_user_or_admin(access, &did)
     } else {
         false
     };
     let _ = assert_repo_availability(&did, is_user_or_admin, &account_manager).await?;
-    get_car_stream(blobstore_factory, did, since, actor_store).await
+    get_car_stream(blobstore_factory, did, since, actor_store, guard).await
 }
 
 /// Download a repository export as CAR file. Optionally only a 'diff' since a previous revision.
@@ -59,7 +61,9 @@ pub async fn get_repo(
     auth: OptionalAccessOrAdminToken,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
-) -> Result<BlockResponder, ApiError> {
+    exports: &State<Exports>,
+) -> Result<CarStream, ApiError> {
+    let guard = exports.repo_slot().await?;
     match inner_get_repo(
         did,
         since,
@@ -67,10 +71,11 @@ pub async fn get_repo(
         auth,
         actor_store,
         account_manager,
+        guard,
     )
     .await
     {
-        Ok(res) => Ok(BlockResponder(res)),
+        Ok(res) => Ok(res),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::from(error))

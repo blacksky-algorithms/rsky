@@ -6,6 +6,7 @@ use crate::apis::ApiError;
 use crate::config::ServerConfig;
 use crate::lifecycle::{self, DeletionContext, LifecycleStore};
 use crate::models::models::EmailTokenPurpose;
+use crate::rate_limits::{Caller, RateLimits};
 use crate::SharedSequencer;
 use rocket::serde::json::Json;
 use rocket::State;
@@ -33,7 +34,15 @@ pub async fn delete_account(
     lifecycle_store: &State<LifecycleStore>,
     cfg: &State<ServerConfig>,
     account_manager: AccountManager,
+    limits: &State<RateLimits>,
+    caller: Caller,
 ) -> Result<(), ApiError> {
+    limits.consume_all(
+        &crate::rate_limits::DELETE_ACCOUNT,
+        &caller.ip,
+        1,
+        caller.bypass,
+    )?;
     let DeleteAccountInput {
         did,
         password,

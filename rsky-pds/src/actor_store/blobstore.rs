@@ -19,6 +19,14 @@ pub struct BlobNotFoundError;
 /// Mirrors the BlobStore interface from the reference implementation.
 pub trait BlobStore: Send + Sync {
     fn put_temp(&self, bytes: Vec<u8>) -> BoxFuture<'_, Result<String>>;
+    /// Stores a spooled upload as a temporary object without holding it
+    /// in memory where the store allows it.
+    fn put_temp_from_path(&self, path: std::path::PathBuf) -> BoxFuture<'_, Result<String>> {
+        Box::pin(async move {
+            let bytes = tokio::fs::read(path).await?;
+            self.put_temp(bytes).await
+        })
+    }
     fn make_permanent(&self, key: String, cid: Cid) -> BoxFuture<'_, Result<()>>;
     fn put_permanent(&self, cid: Cid, bytes: Vec<u8>) -> BoxFuture<'_, Result<()>>;
     fn quarantine(&self, cid: Cid) -> BoxFuture<'_, Result<()>>;
@@ -363,6 +371,21 @@ mod tests {
 
     fn cid_for(bytes: &[u8]) -> Cid {
         sha256_to_cid(Sha256::digest(bytes).to_vec())
+    }
+
+    #[tokio::test]
+    async fn a_spooled_file_becomes_a_temp_object() {
+        let store = MemoryBlobStore::default();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("spooled");
+        std::fs::write(&path, b"from disk").unwrap();
+        let key = BlobStore::put_temp_from_path(&store, path).await.unwrap();
+        assert!(store.has_temp(&key));
+        assert!(
+            BlobStore::put_temp_from_path(&store, dir.path().join("missing"))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

@@ -223,7 +223,9 @@ mod tests {
                 "request completed"
             );
             tracing::warn!("plain");
-            tracing::error!(nested.deep.key = "x", "deep");
+            let failure: Box<dyn std::error::Error + 'static> = "broken".into();
+            tracing::error!(nested.deep.key = "x", failure = failure.as_ref(), "deep");
+            tracing::info!(message = 42u64);
             tracing::debug!("debug");
             tracing::trace!("trace");
         });
@@ -232,7 +234,10 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        assert_eq!(lines.len(), 5, "{output}");
+        assert_eq!(lines.len(), 6, "{output}");
+        assert_eq!(lines[2]["failure"], "broken");
+        assert_eq!(lines[3]["msg"], "42");
+        assert_eq!(lines[3]["level"], 30);
         let request = &lines[0];
         assert_eq!(request["level"], 30);
         assert_eq!(request["name"], "pds");
@@ -252,8 +257,9 @@ mod tests {
         assert_eq!(lines[1]["level"], 40);
         assert_eq!(lines[2]["level"], 50);
         assert_eq!(lines[2]["nested"]["deep"]["key"], "x");
-        assert_eq!(lines[3]["level"], 20);
-        assert_eq!(lines[4]["level"], 10);
+        assert_eq!(lines[4]["level"], 20);
+        assert_eq!(lines[5]["level"], 10);
+        std::io::Write::flush(&mut sink.clone()).unwrap();
     }
 
     #[test]

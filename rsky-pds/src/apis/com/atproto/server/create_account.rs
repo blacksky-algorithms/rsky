@@ -10,6 +10,7 @@ use crate::config::ServerConfig;
 use crate::handle::{normalize_and_validate_handle, HandleValidationContext, HandleValidationOpts};
 use crate::plc::operations::{create_op, CreateAtprotoOpInput};
 use crate::plc::types::{OpOrTombstone, Operation};
+use crate::rate_limits::{Caller, RateLimits};
 use crate::SharedSequencer;
 use crate::{plc, SharedIdResolver};
 use email_address::*;
@@ -53,7 +54,15 @@ pub async fn server_create_account(
     account_manager: AccountManager,
     actor_store: &State<ActorStore>,
     lifecycle_store: &State<crate::lifecycle::LifecycleStore>,
+    limits: &State<RateLimits>,
+    caller: Caller,
 ) -> Result<Json<CreateAccountOutput>, ApiError> {
+    limits.consume_all(
+        &crate::rate_limits::CREATE_ACCOUNT,
+        &caller.ip,
+        1,
+        caller.bypass,
+    )?;
     tracing::info!("Creating new user account");
     let requester = match auth.access {
         Some(access) if access.credentials.is_some() => access.credentials.unwrap().iss,

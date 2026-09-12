@@ -2,7 +2,9 @@ use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessOrUserServiceAuth;
-use anyhow::Result;
+use crate::config::ServerConfig;
+use crate::rate_limits::{Caller, RateLimits};
+use crate::spool::SpoolFile;
 use rocket::data::{Data, ToByteUnit};
 use rocket::http::Status;
 use rocket::request::{FromRequest, Outcome};
@@ -41,10 +43,22 @@ async fn inner_upload_blob(
     content_type: ContentType,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
-) -> Result<BlobOutput> {
+    cfg: &State<ServerConfig>,
+) -> Result<BlobOutput, ApiError> {
     let requester = auth.access.credentials.unwrap().did.unwrap();
 
-    let bytes = blob.open(100.mebibytes()).into_bytes().await?.into_inner();
+    // spooled to disk, one byte past the limit, so a body over the limit
+    // is refused without ever being held in memory
+    let limit = cfg.service.blob_upload_limit as u64;
+    let spool = SpoolFile::new(&cfg.service.upload_spool_dir).await?;
+    let written = blob
+        .open((limit + 1).bytes())
+        .into_file(spool.path())
+        .await
+        .map_err(anyhow::Error::from)?;
+    if written.n.written > limit {
+        return Err(ApiError::PayloadTooLarge);
+    }
     let actor_store = actor_store
         .transact(
             requester.clone(),
@@ -54,7 +68,7 @@ async fn inner_upload_blob(
 
     let metadata = actor_store
         .blob
-        .upload_blob_and_get_metadata(content_type.name, bytes)
+        .upload_blob_from_path(content_type.name, spool.path().to_path_buf())
         .await?;
     let blobref = actor_store.blob.track_untethered_blob(metadata).await?;
 
@@ -90,6 +104,7 @@ async fn inner_upload_blob(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.repo.uploadBlob", data = "<blob>")]
 pub async fn upload_blob(
@@ -98,12 +113,30 @@ pub async fn upload_blob(
     content_type: ContentType,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
+    cfg: &State<ServerConfig>,
+    limits: &State<RateLimits>,
+    caller: Caller,
 ) -> Result<Json<BlobOutput>, ApiError> {
-    match inner_upload_blob(auth, blob, content_type, blobstore_factory, actor_store).await {
+    limits.consume_all(
+        &crate::rate_limits::UPLOAD_BLOB,
+        &caller.ip,
+        1,
+        caller.bypass,
+    )?;
+    match inner_upload_blob(
+        auth,
+        blob,
+        content_type,
+        blobstore_factory,
+        actor_store,
+        cfg,
+    )
+    .await
+    {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("{error:?}");
-            Err(ApiError::RuntimeError)
+            Err(error)
         }
     }
 }

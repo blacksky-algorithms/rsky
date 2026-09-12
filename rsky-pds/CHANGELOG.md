@@ -227,6 +227,38 @@ migrating, mutating requests are answered `503 ReadOnly` before any handler
 runs, the DID cache is never written, and neither deletions nor
 publication are resumed. The rsky control journals stay writable.
 
+### Added — production exposure minimums
+
+`GET /metrics` serves Prometheus metrics (requests by route and status
+with latency, firehose subscribers, sqlite busy retries, write attempts,
+control-journal writes by table, rejected credentials by error, the
+sequencer head, per-actor in-flight mutations, pending intents, and
+nonterminal blob work, lifecycle and repair backlogs, and a draining
+flag). Logs are one JSON object per line in the reference PDS's shape
+unless `PDS_LOG_FORMAT=text`, and every request is logged with its route,
+status, and response time.
+
+SIGTERM and SIGINT stop accepting connections, let in-flight requests
+finish within `PDS_SHUTDOWN_GRACE_SECS`, drain the background queue, and
+stop the sequencer; `/xrpc/_health` answers 503 meanwhile. Unrouted paths
+answer `404 NotFound` instead of an internal error.
+
+Repository exports are streamed from one snapshot as they are produced,
+in the reference's block order, and blob downloads are streamed from
+object storage with the registered length; both are bounded by
+`PDS_MAX_CONCURRENT_EXPORTS` and `PDS_MAX_CONCURRENT_BLOB_READS`, and an
+abandoned download releases its slot and snapshot. Uploads are spooled to
+disk under `PDS_UPLOAD_SPOOL_DIR`, hashed and sniffed from the file, and
+refused with `413 PayloadTooLarge` one byte past `PDS_BLOB_UPLOAD_LIMIT`
+instead of being silently truncated.
+
+`PDS_RATE_LIMITS_ENABLED=true` applies the reference PDS's request limits
+from this process's memory (the global per-address budget, the per-route
+budgets, and the shared repository-write budgets charged 3/2/1 points per
+create/update/delete), answering `429 RateLimitExceeded` with the
+`RateLimit-*` and `Retry-After` headers the reference sends;
+`PDS_RATE_LIMIT_BYPASS_KEY` and `PDS_RATE_LIMIT_BYPASS_IPS` skip them.
+
 ### Fixed — responses that differed from the reference PDS
 
 - `com.atproto.sync.*` reads of a missing, taken-down, or deactivated
