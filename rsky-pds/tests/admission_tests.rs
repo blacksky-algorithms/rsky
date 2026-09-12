@@ -87,6 +87,23 @@ async fn the_allowlist_gates_writes_and_reloads_without_a_restart() {
     std::env::set_var("PDS_WRITE_ALLOWLIST_FILE", &allowlist);
     std::env::set_var("PDS_LOCK_DIR", dir.path().join("rsky/locks"));
     let client = get_client_in(dir.path()).await;
+    // the stage gate reads the linked SQLite build from an admin route
+    let anonymous = client.get("/xrpc/_sqlite").dispatch().await;
+    assert_ne!(anonymous.status(), Status::Ok);
+    let sqlite = client
+        .get("/xrpc/_sqlite")
+        .header(Header::new("Authorization", get_admin_token()))
+        .dispatch()
+        .await;
+    assert_eq!(sqlite.status(), Status::Ok);
+    let report: Value = sqlite.into_json().await.unwrap();
+    assert_eq!(report["version"], rusqlite::version());
+    assert!(
+        report["sourceId"].as_str().unwrap().contains("20"),
+        "{report}"
+    );
+    assert_eq!(report["synchronousWrites"], "FULL");
+    assert_eq!(report["synchronousReads"], "NORMAL");
     let (identifier, password) = create_account(&client).await;
     rusqlite::Connection::open(dir.path().join("account.sqlite"))
         .unwrap()

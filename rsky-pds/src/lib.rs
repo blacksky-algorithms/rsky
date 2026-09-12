@@ -376,6 +376,39 @@ async fn drain_status(
     Ok(Json(drain::drain_status(actor_store, repairs, &did).await?))
 }
 
+/// The SQLite build this process links and the synchronous modes it uses,
+/// for the stage gate's per-process report.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqliteReport {
+    pub version: &'static str,
+    pub source_id: String,
+    pub synchronous_writes: &'static str,
+    pub synchronous_reads: &'static str,
+}
+
+#[tracing::instrument(skip_all)]
+#[get("/xrpc/_sqlite")]
+async fn sqlite_report(
+    _admin: auth_verifier::AdminToken,
+    account_manager: AccountManager,
+) -> Result<Json<SqliteReport>, ApiError> {
+    let source_id = account_manager
+        .db
+        .run(|conn| {
+            Ok(conn.query_row("SELECT sqlite_source_id()", [], |row| {
+                row.get::<_, String>(0)
+            })?)
+        })
+        .await?;
+    Ok(Json(SqliteReport {
+        version: rusqlite::version(),
+        source_id,
+        synchronous_writes: "FULL",
+        synchronous_reads: "NORMAL",
+    }))
+}
+
 #[tracing::instrument(skip_all)]
 #[catch(default)]
 async fn default_catcher(status: Status, request: &Request<'_>) -> ApiError {
@@ -643,6 +676,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 metrics_route,
                 rate_limited,
                 drain_status,
+                sqlite_report,
                 custom_routes::tls_check,
                 custom_routes::custom_well_known_did,
                 custom_routes::custom_resolve_handle,

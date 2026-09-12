@@ -158,6 +158,33 @@ async fn drain_mode_reports_and_exits_by_outcome() {
     let report: serde_json::Value = serde_json::from_slice(&diverged.stdout).unwrap();
     assert_eq!(report["converged"], false);
 
+    // the batch form reports only the accounts that diverge
+    let list = dir.path().join("dids.txt");
+    std::fs::write(&list, format!("{DID}\n\n  \n")).unwrap();
+    let batch = binary(dir.path())
+        .args(["--converge-file", list.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(batch.status.code(), Some(1));
+    let summary: serde_json::Value = serde_json::from_slice(&batch.stdout).unwrap();
+    assert_eq!(summary["checked"], 1);
+    assert_eq!(summary["converged"], 0);
+    assert_eq!(summary["diverged"][0]["did"], DID);
+    std::fs::write(&list, "").unwrap();
+    let empty = binary(dir.path())
+        .args(["--converge-file", list.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(empty.status.code(), Some(0));
+    let unreadable = binary(dir.path())
+        .args([
+            "--converge-file",
+            dir.path().join("missing.txt").to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(unreadable.status.code(), Some(2));
+
     // a lock another process holds exclusively makes the drain give up
     let locks = rsky_pds::locks::LockDir::new(dir.path().join("rsky/locks")).unwrap();
     let held = locks.try_exclusive(DID).unwrap().unwrap();

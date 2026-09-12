@@ -36,7 +36,8 @@ pub const USAGE: &str = "usage: rsky-pds [<maintenance command>]\n\
   --quarantine-local-reconciled <seq>\n\
   --quarantine-close <seq> --external verified|accepted [--justification <text>]\n\
   --quarantine-status <seq>\n\
-  --converge <did>";
+  --converge <did>\n\
+  --converge-file <file>               one DID per line; reports the ones that diverge";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -73,6 +74,9 @@ pub enum Command {
     },
     Converge {
         did: String,
+    },
+    ConvergeFile {
+        file: PathBuf,
     },
 }
 
@@ -123,6 +127,7 @@ pub fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Option<Comma
         "--quarantine-close",
         "--quarantine-status",
         "--converge",
+        "--converge-file",
         "--timeout-secs",
         "--did",
         "--kind",
@@ -171,6 +176,8 @@ pub fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Option<Comma
         Command::QuarantineStatus { seq }
     } else if let Some(did) = value("--converge")? {
         Command::Converge { did }
+    } else if let Some(file) = value("--converge-file")? {
+        Command::ConvergeFile { file: file.into() }
     } else {
         bail!("no command given\n{USAGE}");
     };
@@ -369,6 +376,35 @@ pub async fn run(command: Command) -> Result<(serde_json::Value, i32)> {
             let code = if report.converged { 0 } else { 1 };
             Ok((serde_json::to_value(report)?, code))
         }
+        Command::ConvergeFile { file } => {
+            let text = std::fs::read_to_string(&file)
+                .with_context(|| format!("cannot read {}", file.display()))?;
+            let context = ConvergenceContext {
+                actor_store: &maintenance.actor_store,
+                account_manager: &maintenance.account_manager,
+                sequencer: &maintenance.sequencer,
+                lifecycle: &maintenance.lifecycle,
+                repairs: &maintenance.repairs,
+            };
+            let mut checked = 0usize;
+            let mut diverged = Vec::new();
+            for did in text.lines().map(str::trim).filter(|did| !did.is_empty()) {
+                checked += 1;
+                let report = convergence(&context, did).await?;
+                if !report.converged {
+                    diverged.push(serde_json::to_value(report)?);
+                }
+            }
+            let code = if diverged.is_empty() { 0 } else { 1 };
+            Ok((
+                serde_json::json!({
+                    "checked": checked,
+                    "converged": checked - diverged.len(),
+                    "diverged": diverged,
+                }),
+                code,
+            ))
+        }
     }
 }
 
@@ -476,6 +512,12 @@ mod tests {
         assert_eq!(
             parse(&["--quarantine-status", "7"]).unwrap().unwrap(),
             Command::QuarantineStatus { seq: 7 }
+        );
+        assert_eq!(
+            parse(&["--converge-file", "dids.txt"]).unwrap().unwrap(),
+            Command::ConvergeFile {
+                file: "dids.txt".into()
+            }
         );
         assert_eq!(
             parse(&["--converge", "did:plc:a"]).unwrap().unwrap(),
