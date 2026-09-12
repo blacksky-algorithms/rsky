@@ -171,23 +171,25 @@ pub async fn apply_writes(
     limits: &State<RateLimits>,
     caller: Caller,
 ) -> Result<Json<ApplyWritesOutput>, ApiError> {
-    limits.consume_all(
-        &crate::rate_limits::REPO_WRITES,
-        auth.access
-            .credentials
-            .as_ref()
-            .and_then(|credentials| credentials.did.as_deref())
-            .unwrap_or_default(),
-        body.writes
-            .iter()
-            .map(|write| match write {
-                ApplyWritesInputRefWrite::Create(_) => crate::rate_limits::CREATE_POINTS,
-                ApplyWritesInputRefWrite::Update(_) => crate::rate_limits::UPDATE_POINTS,
-                ApplyWritesInputRefWrite::Delete(_) => crate::rate_limits::DELETE_POINTS,
-            })
-            .sum(),
-        caller.bypass,
-    )?;
+    limits
+        .consume_all(
+            &crate::rate_limits::REPO_WRITES,
+            auth.access
+                .credentials
+                .as_ref()
+                .and_then(|credentials| credentials.did.as_deref())
+                .unwrap_or_default(),
+            body.writes
+                .iter()
+                .map(|write| match write {
+                    ApplyWritesInputRefWrite::Create(_) => crate::rate_limits::CREATE_POINTS,
+                    ApplyWritesInputRefWrite::Update(_) => crate::rate_limits::UPDATE_POINTS,
+                    ApplyWritesInputRefWrite::Delete(_) => crate::rate_limits::DELETE_POINTS,
+                })
+                .sum(),
+            caller.bypass,
+        )
+        .await?;
     tracing::debug!("@LOG: debug apply_writes {body:#?}");
     for write in &body.writes {
         let (collection, action) = match write {

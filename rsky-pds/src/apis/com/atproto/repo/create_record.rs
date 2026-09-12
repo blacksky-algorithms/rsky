@@ -128,16 +128,18 @@ pub async fn create_record(
     limits: &State<RateLimits>,
     caller: Caller,
 ) -> Result<Json<CreateRecordOutput>, ApiError> {
-    limits.consume_all(
-        &crate::rate_limits::REPO_WRITES,
-        auth.access
-            .credentials
-            .as_ref()
-            .and_then(|credentials| credentials.did.as_deref())
-            .unwrap_or_default(),
-        crate::rate_limits::CREATE_POINTS,
-        caller.bypass,
-    )?;
+    limits
+        .consume_all(
+            &crate::rate_limits::REPO_WRITES,
+            auth.access
+                .credentials
+                .as_ref()
+                .and_then(|credentials| credentials.did.as_deref())
+                .unwrap_or_default(),
+            crate::rate_limits::CREATE_POINTS,
+            caller.bypass,
+        )
+        .await?;
     tracing::debug!("@LOG: debug create_record {body:#?}");
     crate::apis::assert_repo_scope(
         &auth.access.credentials,

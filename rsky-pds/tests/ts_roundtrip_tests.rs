@@ -550,7 +550,7 @@ async fn sessions_records_and_frames_round_trip_between_the_implementations() {
             }
             _ => None,
         })
-        .last()
+        .next_back()
         .expect("rsky's commit is in the shared sequencer");
     let expected = rsky_frame(&commit);
     let seq = commit.seq;

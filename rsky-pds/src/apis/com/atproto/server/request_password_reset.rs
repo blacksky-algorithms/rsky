@@ -1,7 +1,6 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::mailer;
 use crate::mailer::IdentifierAndTokenParams;
 use crate::models::models::EmailTokenPurpose;
@@ -58,17 +57,18 @@ async fn inner_request_password_reset(
 )]
 pub async fn request_password_reset(
     body: Json<RequestPasswordResetInput>,
-    _auth: AccessStandardIncludeChecks,
     account_manager: AccountManager,
     limits: &State<RateLimits>,
     caller: Caller,
 ) -> Result<(), ApiError> {
-    limits.consume_all(
-        &crate::rate_limits::REQUEST_PASSWORD_RESET,
-        &caller.ip,
-        1,
-        caller.bypass,
-    )?;
+    limits
+        .consume_all(
+            &crate::rate_limits::REQUEST_PASSWORD_RESET,
+            &caller.ip,
+            1,
+            caller.bypass,
+        )
+        .await?;
     match inner_request_password_reset(body, account_manager).await {
         Ok(_) => Ok(()),
         Err(error) => {

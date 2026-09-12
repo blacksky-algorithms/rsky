@@ -148,12 +148,14 @@ pub async fn create_session(
     limits: &State<RateLimits>,
     caller: Caller,
 ) -> Result<Json<CreateSessionOutput>, ApiError> {
-    limits.consume_all(
-        &crate::rate_limits::CREATE_SESSION,
-        &format!("{}-{}", body.identifier, caller.ip),
-        1,
-        caller.bypass,
-    )?;
+    limits
+        .consume_all(
+            &crate::rate_limits::CREATE_SESSION,
+            &format!("{}-{}", body.identifier, caller.ip),
+            1,
+            caller.bypass,
+        )
+        .await?;
     match inner_create_session(body, cfg, id_resolver, account_manager).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => Err(error),

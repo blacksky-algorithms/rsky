@@ -57,12 +57,14 @@ pub async fn server_create_account(
     limits: &State<RateLimits>,
     caller: Caller,
 ) -> Result<Json<CreateAccountOutput>, ApiError> {
-    limits.consume_all(
-        &crate::rate_limits::CREATE_ACCOUNT,
-        &caller.ip,
-        1,
-        caller.bypass,
-    )?;
+    limits
+        .consume_all(
+            &crate::rate_limits::CREATE_ACCOUNT,
+            &caller.ip,
+            1,
+            caller.bypass,
+        )
+        .await?;
     tracing::info!("Creating new user account");
     let requester = match auth.access {
         Some(access) if access.credentials.is_some() => access.credentials.unwrap().iss,

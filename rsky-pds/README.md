@@ -247,14 +247,54 @@ Repository exports and blob downloads are streamed and bounded by
 are spooled to disk and refused with `413 PayloadTooLarge` one byte past
 `PDS_BLOB_UPLOAD_LIMIT`.
 
-With `PDS_RATE_LIMITS_ENABLED=true` the reference PDS's limits apply from
-this process's memory: 3000 XRPC requests per address per five minutes
-(repository exports excluded), and the per-route limits on session
-creation, account creation, uploads, handle updates, password and email
-flows, and repository writes (creates 3, updates 2, deletes 1 point
-against 5000 per hour and 35000 per day). An exhausted limit answers
-`429 RateLimitExceeded` with `RateLimit-*` and `Retry-After` headers.
-The address is the first `X-Forwarded-For` entry when present.
+With `PDS_RATE_LIMITS_ENABLED=true` the reference PDS's limits apply: 3000
+XRPC requests per address per five minutes (repository exports have their
+own 6000), and the per-route limits on session creation, account creation,
+uploads, handle updates, password and email flows, and repository writes
+(creates 3, updates 2, deletes 1 point against 5000 per hour and 35000 per
+day). An exhausted limit answers `429 RateLimitExceeded` with `RateLimit-*`
+and `Retry-After` headers. The address is the first `X-Forwarded-For`
+entry when present. With `PDS_REDIS_SCRATCH_ADDRESS` the windows live in
+that redis under the reference's keys and script (`rl-global-ip:<ip>`,
+`rl-repo-write-hour:<did>`, `com.atproto.server.createSession-0:<key>`,
+and so on), so a reference PDS sharing the redis charges the same budgets;
+a redis that stops answering lets requests through and counts them in
+`pds_rate_limit_store_errors_total`. Without it the windows live in this
+process's memory.
+
+Account mail (password reset, account deletion, email confirmation and
+update, PLC operation) is sent over SMTP from `PDS_EMAIL_SMTP_URL` and
+`PDS_EMAIL_FROM_ADDRESS`, as the reference reads them: `smtps://` for
+implicit TLS, `smtp://` for STARTTLS, `smtp://...?ignoreTLS=true` for a
+plain connection, credentials in the URL. The templates are the branded
+ones the reference image sends, rendered here with a text alternative.
+Moderation mail from `com.atproto.admin.sendEmail` uses
+`PDS_MODERATION_EMAIL_SMTP_URL` and `PDS_MODERATION_EMAIL_ADDRESS` when
+set. Without an SMTP URL, Mailgun is used when `PDS_MAILGUN_API_KEY` is
+set; without either, messages are logged and the token flows complete.
+
+### Account management without the reference OAuth UI API
+
+The reference PDS serves account mutations to its own authorization UI
+under `/@atproto/oauth-provider/~api/*`, authenticated by device-session
+cookies. This server has no equivalent of that API; after a cutover those
+paths answer 410 at the edge, an authorization page already open in a
+browser restarts its flow, and existing sessions and tokens are untouched.
+Every operation the UI API offered is served here through XRPC, which is
+how the Blacksky client performs them:
+
+| UI API endpoint | XRPC equivalent |
+|---|---|
+| `update-handle` | `com.atproto.identity.updateHandle` |
+| `deactivate-account` | `com.atproto.server.deactivateAccount` |
+| `reactivate-account` | `com.atproto.server.activateAccount` |
+| `delete-account-request`, `delete-account-confirm` | `com.atproto.server.requestAccountDelete`, `com.atproto.server.deleteAccount` |
+| `reset-password-request`, `reset-password-confirm` | `com.atproto.server.requestPasswordReset`, `com.atproto.server.resetPassword` |
+| `update-email-request`, `update-email-confirm` | `com.atproto.server.requestEmailUpdate`, `com.atproto.server.updateEmail` |
+| `verify-email-request`, `verify-email-confirm` | `com.atproto.server.requestEmailConfirmation`, `com.atproto.server.confirmEmail` |
+| `revoke-account-session`, `sign-out` | `com.atproto.server.deleteSession` |
+| `revoke-oauth-session` | `POST /oauth/revoke` |
+| `sign-in`, `sign-up` | `com.atproto.server.createSession`, `com.atproto.server.createAccount` (the gatekeeper's 2FA interception moves to `/oauth/authorize/sign-in`) |
 
 ## Upgrading to 1.0
 

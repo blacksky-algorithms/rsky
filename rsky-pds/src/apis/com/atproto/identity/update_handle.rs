@@ -98,7 +98,9 @@ pub async fn update_handle(
         .as_ref()
         .and_then(|credentials| credentials.did.clone())
         .unwrap_or_default();
-    limits.consume_all(&crate::rate_limits::UPDATE_HANDLE, &did, 1, caller.bypass)?;
+    limits
+        .consume_all(&crate::rate_limits::UPDATE_HANDLE, &did, 1, caller.bypass)
+        .await?;
     match inner_update_handle(
         body,
         sequencer,

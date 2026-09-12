@@ -55,6 +55,7 @@ async fn limits_follow_the_reference_table() {
     let limits = client.rocket().state::<RateLimits>().unwrap();
     limits
         .consume(&CREATE_SESSION[1], "foo@example.com-", 27)
+        .await
         .unwrap();
     for attempt in 0..3 {
         let (status, body, _) = login(&client, "wrong", false).await;
@@ -170,7 +171,7 @@ async fn limits_follow_the_reference_table() {
     // the global budget: 3000 XRPC requests per address in five minutes,
     // keyed by the forwarded address; the budget is spent down directly
     // rather than with three thousand requests
-    let _ = limits.consume(&GLOBAL_IP, "", 2_990);
+    let _ = limits.consume(&GLOBAL_IP, "", 2_990).await;
     let mut refused = None;
     for _ in 0..11 {
         let response = client.get("/xrpc/_health/live").dispatch().await;

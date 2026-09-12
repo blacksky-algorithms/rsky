@@ -46,16 +46,18 @@ pub async fn request_email_confirmation(
     limits: &State<RateLimits>,
     caller: Caller,
 ) -> Result<(), ApiError> {
-    limits.consume_all(
-        &crate::rate_limits::EMAIL_REQUESTS,
-        auth.access
-            .credentials
-            .as_ref()
-            .and_then(|credentials| credentials.did.as_deref())
-            .unwrap_or_default(),
-        1,
-        caller.bypass,
-    )?;
+    limits
+        .consume_all(
+            &crate::rate_limits::REQUEST_EMAIL_CONFIRMATION,
+            auth.access
+                .credentials
+                .as_ref()
+                .and_then(|credentials| credentials.did.as_deref())
+                .unwrap_or_default(),
+            1,
+            caller.bypass,
+        )
+        .await?;
     match inner_request_email_confirmation(auth, account_manager).await {
         Ok(_) => Ok(()),
         Err(error) => {

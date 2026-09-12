@@ -37,12 +37,14 @@ pub async fn delete_account(
     limits: &State<RateLimits>,
     caller: Caller,
 ) -> Result<(), ApiError> {
-    limits.consume_all(
-        &crate::rate_limits::DELETE_ACCOUNT,
-        &caller.ip,
-        1,
-        caller.bypass,
-    )?;
+    limits
+        .consume_all(
+            &crate::rate_limits::DELETE_ACCOUNT,
+            &caller.ip,
+            1,
+            caller.bypass,
+        )
+        .await?;
     let DeleteAccountInput {
         did,
         password,

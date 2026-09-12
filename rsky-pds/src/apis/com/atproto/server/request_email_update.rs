@@ -52,16 +52,18 @@ pub async fn request_email_update(
     limits: &State<RateLimits>,
     caller: Caller,
 ) -> Result<Json<RequestEmailUpdateOutput>, ApiError> {
-    limits.consume_all(
-        &crate::rate_limits::EMAIL_REQUESTS,
-        auth.access
-            .credentials
-            .as_ref()
-            .and_then(|credentials| credentials.did.as_deref())
-            .unwrap_or_default(),
-        1,
-        caller.bypass,
-    )?;
+    limits
+        .consume_all(
+            &crate::rate_limits::REQUEST_EMAIL_UPDATE,
+            auth.access
+                .credentials
+                .as_ref()
+                .and_then(|credentials| credentials.did.as_deref())
+                .unwrap_or_default(),
+            1,
+            caller.bypass,
+        )
+        .await?;
     match inner_request_email_update(auth, account_manager).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {

@@ -18,16 +18,18 @@ pub async fn request_account_delete(
     limits: &State<RateLimits>,
     caller: Caller,
 ) -> Result<(), ApiError> {
-    limits.consume_all(
-        &crate::rate_limits::EMAIL_REQUESTS,
-        auth.access
-            .credentials
-            .as_ref()
-            .and_then(|credentials| credentials.did.as_deref())
-            .unwrap_or_default(),
-        1,
-        caller.bypass,
-    )?;
+    limits
+        .consume_all(
+            &crate::rate_limits::REQUEST_ACCOUNT_DELETE,
+            auth.access
+                .credentials
+                .as_ref()
+                .and_then(|credentials| credentials.did.as_deref())
+                .unwrap_or_default(),
+            1,
+            caller.bypass,
+        )
+        .await?;
     let did = auth.access.credentials.unwrap().did.unwrap();
     let account = account_manager
         .get_account(

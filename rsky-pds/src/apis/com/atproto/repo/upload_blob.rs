@@ -117,12 +117,14 @@ pub async fn upload_blob(
     limits: &State<RateLimits>,
     caller: Caller,
 ) -> Result<Json<BlobOutput>, ApiError> {
-    limits.consume_all(
-        &crate::rate_limits::UPLOAD_BLOB,
-        &caller.ip,
-        1,
-        caller.bypass,
-    )?;
+    limits
+        .consume_all(
+            &crate::rate_limits::UPLOAD_BLOB,
+            &caller.ip,
+            1,
+            caller.bypass,
+        )
+        .await?;
     match inner_upload_blob(
         auth,
         blob,

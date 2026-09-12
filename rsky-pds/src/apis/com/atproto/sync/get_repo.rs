@@ -54,6 +54,7 @@ async fn inner_get_repo(
 /// Does not require auth; implemented by PDS.
 #[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.sync.getRepo?<did>&<since>")]
+#[allow(clippy::too_many_arguments)]
 pub async fn get_repo(
     did: String,
     since: Option<String>, // The revision ('rev') of the repo to create a diff from.
@@ -62,7 +63,12 @@ pub async fn get_repo(
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
     exports: &State<Exports>,
+    limits: &State<crate::rate_limits::RateLimits>,
+    caller: crate::rate_limits::Caller,
 ) -> Result<CarStream, ApiError> {
+    limits
+        .consume_all(&crate::rate_limits::GET_REPO, &caller.ip, 1, caller.bypass)
+        .await?;
     let guard = exports.repo_slot().await?;
     match inner_get_repo(
         did,

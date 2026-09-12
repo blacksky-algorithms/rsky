@@ -25,6 +25,7 @@ pub struct Metrics {
     pub write_attempts: IntCounter,
     pub control_journal_writes: IntCounterVec,
     pub auth_failures: IntCounterVec,
+    pub rate_limit_store_errors: IntCounter,
     pub sequencer_last_seq: IntGauge,
     pub inflight_mutations: IntGaugeVec,
     pub publish_intents_pending: IntGaugeVec,
@@ -133,6 +134,11 @@ impl Metrics {
                 "pds_auth_failures_total",
                 "Rejected credentials by error",
                 &["kind"],
+            ),
+            rate_limit_store_errors: counter(
+                &registry,
+                "pds_rate_limit_store_errors_total",
+                "Rate limit consumptions allowed because the shared store did not answer",
             ),
             sequencer_last_seq: gauge(
                 &registry,

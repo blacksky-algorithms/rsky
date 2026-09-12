@@ -205,7 +205,7 @@ impl Fairing for GlobalRateLimit {
             return;
         }
         let key = ip.map(|ip| ip.to_string()).unwrap_or_default();
-        if let Err(status) = limits.consume(&rate_limits::GLOBAL_IP, &key, 1) {
+        if let Err(status) = limits.consume(&rate_limits::GLOBAL_IP, &key, 1).await {
             request.local_cache(|| Some(ApiError::RateLimitExceeded(status)));
             request.set_method(rocket::http::Method::Get);
             request
@@ -826,7 +826,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(crate::permission_set::SharedPermissionSets::default())
         .manage(actor_store)
         .manage(exports::Exports::from_env())
-        .manage(rate_limits::RateLimits::from_env())
+        .manage(rate_limits::RateLimits::connect_from_env().await)
         .manage(lifecycle)
         .manage(admission)
         .manage(repairs)
