@@ -130,6 +130,18 @@ it. The journal lives outside every actor store and must never be restored
 from a backup: an attempt with no outcome is the evidence that an object
 may still appear.
 
+### Added — the convergence report
+
+`community.blacksky.pds.getConvergence` (admin auth) and `rsky-pds --converge
+<did>` report whether an account's state on this server agrees with what
+it has published: the store's root, the account database's root, and the
+last published commit must be one commit, the status and handle must match
+their last events, and no publication intent, blob work, quarantine, repair,
+or deletion may be outstanding, with every shortfall named. Blob work older
+than an hour that is still not terminal is flagged. A deleted account
+converges once its deletion is journaled complete; whether its objects were
+purged is reported separately and never blocks logical convergence.
+
 ### Added — journaled repairs and quarantines
 
 `PDS_REPAIR_DB` records repairs (`republish`, `empty-commit`,

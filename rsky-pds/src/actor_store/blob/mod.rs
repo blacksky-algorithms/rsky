@@ -131,6 +131,7 @@ pub struct BlobWork {
     pub state: BlobWorkState,
     /// For a restoration, the moderation version it was requested under.
     pub version: Option<i64>,
+    pub created_at: String,
 }
 
 /// Where a restoration stopped; tests stop after a step to stand in for a
@@ -149,7 +150,8 @@ pub struct PromotedBlob {
     pub temp_key: String,
 }
 
-const SELECT_BLOB_WORK: &str = "SELECT id, kind, key, cid, state, version FROM blob_work";
+const SELECT_BLOB_WORK: &str =
+    "SELECT id, kind, key, cid, state, version, \"createdAt\" FROM blob_work";
 
 fn blob_work_from_row(row: &rusqlite::Row) -> Result<BlobWork> {
     Ok(BlobWork {
@@ -159,6 +161,7 @@ fn blob_work_from_row(row: &rusqlite::Row) -> Result<BlobWork> {
         cid: row.get(3)?,
         state: BlobWorkState::parse(&row.get::<_, String>(4)?)?,
         version: row.get(5)?,
+        created_at: row.get(6)?,
     })
 }
 

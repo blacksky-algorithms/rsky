@@ -179,6 +179,20 @@ async fn drain_mode_reports_and_exits_by_outcome() {
         .unwrap();
     assert_eq!(missing.status.code(), Some(1));
 
+    // an account this server never wrote does not converge
+    let diverged = binary(dir.path())
+        .args(["--converge", DID])
+        .output()
+        .unwrap();
+    assert_eq!(
+        diverged.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&diverged.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&diverged.stdout).unwrap();
+    assert_eq!(report["converged"], false);
+
     // a lock another process holds exclusively makes the drain give up
     let locks = rsky_pds::locks::LockDir::new(dir.path().join("rsky/locks")).unwrap();
     let held = locks.try_exclusive(DID).unwrap().unwrap();

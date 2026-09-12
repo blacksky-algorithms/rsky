@@ -266,6 +266,31 @@ async fn the_allowlist_gates_writes_and_reloads_without_a_restart() {
         (Some("verified"), 0)
     );
 
+    // the account was activated at the row level, so no account event was
+    // ever published, and the quarantine above hid the head commit: both
+    // are named as the reasons it does not converge
+    let (report, code) = rsky_pds::cli::run(rsky_pds::cli::Command::Converge {
+        did: DID.to_owned(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        (report["converged"].as_bool(), code),
+        (Some(false), 1),
+        "{report}"
+    );
+    let reasons: Vec<&str> = report["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|reason| reason.as_str().unwrap())
+        .collect();
+    assert_eq!(reasons.len(), 2, "{reasons:?}");
+    assert!(reasons[0].contains("status or handle"));
+    assert!(reasons[1].contains("roots differ"));
+    assert_eq!(report["account"]["consistent"], false);
+    assert_eq!(report["pendingIntents"], 0);
+
     // without an allowlist every actor is admitted
     std::env::remove_var("PDS_WRITE_ALLOWLIST_FILE");
     let (open, _) = rsky_pds::cli::run(rsky_pds::cli::Command::Drain {

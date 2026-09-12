@@ -2,12 +2,14 @@
 //! with one of these it performs one operator action over the data
 //! directory named by the environment, prints a JSON result, and exits.
 
+use crate::account_manager::AccountManager;
 use crate::actor_store::blobstore::{BlobStore, BlobstoreFactory};
 use crate::actor_store::ActorStore;
 use crate::admission::Admission;
 use crate::background::BackgroundQueue;
 use crate::blob_attempts::AttemptJournal;
 use crate::config::env_to_cfg;
+use crate::convergence::{convergence, ConvergenceContext};
 use crate::crawlers::Crawlers;
 use crate::drain::{drain_did, DrainStatus};
 use crate::lifecycle::LifecycleStore;
@@ -33,7 +35,8 @@ pub const USAGE: &str = "usage: rsky-pds [<maintenance command>]\n\
   --quarantine-open <seq> --did <did> --kind <kind> [--repair <id>]...\n\
   --quarantine-local-reconciled <seq>\n\
   --quarantine-close <seq> --external verified|accepted [--justification <text>]\n\
-  --quarantine-status <seq>";
+  --quarantine-status <seq>\n\
+  --converge <did>";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -67,6 +70,9 @@ pub enum Command {
     },
     QuarantineStatus {
         seq: i64,
+    },
+    Converge {
+        did: String,
     },
 }
 
@@ -116,6 +122,7 @@ pub fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Option<Comma
         "--quarantine-local-reconciled",
         "--quarantine-close",
         "--quarantine-status",
+        "--converge",
         "--timeout-secs",
         "--did",
         "--kind",
@@ -162,6 +169,8 @@ pub fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Option<Comma
         }
     } else if let Some(seq) = seq_of("--quarantine-status")? {
         Command::QuarantineStatus { seq }
+    } else if let Some(did) = value("--converge")? {
+        Command::Converge { did }
     } else {
         bail!("no command given\n{USAGE}");
     };
@@ -172,6 +181,7 @@ pub fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Option<Comma
 /// directory without starting the server.
 pub struct Maintenance {
     pub actor_store: ActorStore,
+    pub account_manager: AccountManager,
     pub sequencer: SharedSequencer,
     pub lifecycle: LifecycleStore,
     pub repairs: RepairStore,
@@ -217,8 +227,13 @@ impl Maintenance {
                 .await?,
             );
         let repairs = RepairStore::open(&cfg.service_db.repair_db_location).await?;
+        let account_manager = AccountManager::new(
+            crate::account_manager::db::get_migrated_db(&cfg.service_db.account_db_location)
+                .await?,
+        );
         Ok(Maintenance {
             actor_store,
+            account_manager,
             sequencer,
             lifecycle,
             repairs,
@@ -234,6 +249,7 @@ impl Maintenance {
     fn repair_context(&self, did: &str) -> RepairContext<'_> {
         RepairContext {
             actor_store: &self.actor_store,
+            account_manager: &self.account_manager,
             sequencer: &self.sequencer,
             lifecycle: &self.lifecycle,
             repairs: &self.repairs,
@@ -340,6 +356,21 @@ pub async fn run(command: Command) -> Result<(serde_json::Value, i32)> {
             let quarantine = maintenance.repairs.quarantine(seq).await?;
             let code = if quarantine.is_some() { 0 } else { 1 };
             Ok((serde_json::to_value(quarantine)?, code))
+        }
+        Command::Converge { did } => {
+            let report = convergence(
+                &ConvergenceContext {
+                    actor_store: &maintenance.actor_store,
+                    account_manager: &maintenance.account_manager,
+                    sequencer: &maintenance.sequencer,
+                    lifecycle: &maintenance.lifecycle,
+                    repairs: &maintenance.repairs,
+                },
+                &did,
+            )
+            .await?;
+            let code = if report.converged { 0 } else { 1 };
+            Ok((serde_json::to_value(report)?, code))
         }
     }
 }
@@ -448,6 +479,12 @@ mod tests {
         assert_eq!(
             parse(&["--quarantine-status", "7"]).unwrap().unwrap(),
             Command::QuarantineStatus { seq: 7 }
+        );
+        assert_eq!(
+            parse(&["--converge", "did:plc:a"]).unwrap().unwrap(),
+            Command::Converge {
+                did: "did:plc:a".to_owned()
+            }
         );
     }
 

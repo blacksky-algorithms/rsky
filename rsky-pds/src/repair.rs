@@ -10,6 +10,7 @@
 //! exact root the previous step produced, so any other root, a client's
 //! included, ends the repair as superseded rather than rebased.
 
+use crate::account_manager::AccountManager;
 use crate::actor_store::blobstore::BlobStore;
 use crate::actor_store::repo::sql_repo::ConcurrentWriteError;
 use crate::actor_store::ActorStore;
@@ -421,6 +422,7 @@ impl RepairStore {
 /// Everything a repair or quarantine touches.
 pub struct RepairContext<'a> {
     pub actor_store: &'a ActorStore,
+    pub account_manager: &'a AccountManager,
     pub sequencer: &'a SharedSequencer,
     pub lifecycle: &'a LifecycleStore,
     pub repairs: &'a RepairStore,
@@ -501,6 +503,13 @@ async fn commit_step(
         Ok(commit) => {
             drop(txn);
             publish_pending(ctx.actor_store, ctx.sequencer, did, None).await?;
+            ctx.account_manager
+                .update_repo_root(
+                    did.to_owned(),
+                    commit.commit_data.cid,
+                    commit.commit_data.rev.clone(),
+                )
+                .await?;
             Ok(Ok((
                 commit.commit_data.cid.to_string(),
                 commit.commit_data.rev,
@@ -816,6 +825,7 @@ mod tests {
     struct World {
         dir: tempfile::TempDir,
         actor_store: ActorStore,
+        account_manager: AccountManager,
         sequencer: SharedSequencer,
         lifecycle: LifecycleStore,
         repairs: RepairStore,
@@ -827,6 +837,7 @@ mod tests {
         fn ctx(&self) -> RepairContext<'_> {
             RepairContext {
                 actor_store: &self.actor_store,
+                account_manager: &self.account_manager,
                 sequencer: &self.sequencer,
                 lifecycle: &self.lifecycle,
                 repairs: &self.repairs,
@@ -928,9 +939,17 @@ mod tests {
         let repairs = RepairStore::open(dir.path().join("rsky/repair.sqlite"))
             .await
             .unwrap();
+        // the account database follows the repair's roots; its writes are
+        // not gated so a maintenance workflow can update the root
+        let account_manager = AccountManager::new(
+            crate::account_manager::db::get_migrated_db(dir.path().join("account.sqlite"))
+                .await
+                .unwrap(),
+        );
         let world = World {
             dir,
             actor_store,
+            account_manager,
             sequencer,
             lifecycle,
             repairs,
@@ -984,6 +1003,23 @@ mod tests {
             .unwrap();
         assert_eq!(done.state, "done", "{done:?}");
         assert!(done.outcome.unwrap().contains("republish committed"));
+        // the account database follows the repair's last root
+        let reader = world
+            .actor_store
+            .read(DID.to_owned(), world.blobstore.clone())
+            .await
+            .unwrap();
+        let root = reader
+            .storage
+            .read()
+            .await
+            .get_root_detailed()
+            .await
+            .unwrap();
+        assert_eq!(
+            world.account_manager.get_repo_root(DID).await.unwrap(),
+            Some((root.cid.to_string(), root.rev))
+        );
         assert!(done.done_at.is_some());
         assert_eq!(world.record_cid().await.unwrap(), before);
         // two new commits reached the sequencer: the delete and the create

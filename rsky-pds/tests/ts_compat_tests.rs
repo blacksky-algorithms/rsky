@@ -1562,3 +1562,48 @@ async fn publication_frontier_classifies_the_fixture_accounts() {
     assert_eq!(json["lifetime"], "unknown");
     assert_eq!(json["genesisKind"], "creation");
 }
+
+/// The convergence report over the reference-created fixture: an account
+/// the reference wrote and published agrees with itself; an account the
+/// reference deleted is reported as deleted but not journaled here.
+#[tokio::test]
+async fn convergence_report_over_the_fixture_accounts() {
+    let (fixture, client) = get_client_with_fixture().await;
+    let report = |did: String| {
+        let client = &client;
+        async move {
+            let response = client
+                .get(format!(
+                    "/xrpc/community.blacksky.pds.getConvergence?did={did}"
+                ))
+                .header(Header::new("Authorization", get_admin_token()))
+                .dispatch()
+                .await;
+            let status = response.status();
+            let json: Value = response.into_json().await.unwrap_or(Value::Null);
+            (status, json)
+        }
+    };
+    let (status, json) = report(fixture.did("alice")).await;
+    assert_eq!(status, Status::Ok, "{json}");
+    assert_eq!(json["converged"], true, "{json}");
+    assert_eq!(json["storeRoot"], json["accountRoot"]);
+    assert_eq!(json["storeRoot"], json["lastPublished"]);
+    assert_eq!(json["account"]["consistent"], true);
+    let (_, json) = report(fixture.did("erin")).await;
+    assert_eq!(json["converged"], false);
+    assert_eq!(json["deleted"], true);
+    assert!(json["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason.as_str().unwrap().contains("not journaled")));
+    let unauthenticated = client
+        .get(format!(
+            "/xrpc/community.blacksky.pds.getConvergence?did={}",
+            fixture.did("alice")
+        ))
+        .dispatch()
+        .await;
+    assert_ne!(unauthenticated.status(), Status::Ok);
+}

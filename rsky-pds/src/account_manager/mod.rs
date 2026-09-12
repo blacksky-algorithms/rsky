@@ -198,6 +198,11 @@ impl AccountManager {
         account::get_account_admin_status(did, &self.db).await
     }
 
+    /// The root the account database records for `did`, as `(cid, rev)`.
+    pub async fn get_repo_root(&self, did: &str) -> Result<Option<(String, String)>> {
+        repo::get_root(did, &self.db).await
+    }
+
     pub async fn update_repo_root(&self, did: String, cid: Cid, rev: String) -> Result<()> {
         self.admit(&did)?;
         repo::update_root(did, cid, rev, &self.db).await

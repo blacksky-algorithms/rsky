@@ -171,6 +171,15 @@ linked repairs; `--quarantine-local-reconciled <seq>` and
 was reconciled, and every affected consumer was verified or the gap
 explicitly accepted.
 
+`GET /xrpc/community.blacksky.pds.getConvergence?did=<did>` (admin auth)
+and `rsky-pds --converge <did>` report whether the account's state here
+agrees with what it has published: the store's root, the account database's
+root, and the last published commit are one commit; the status and handle
+match their last events; and no publication intent, blob work, quarantine,
+repair, or deletion is outstanding. A deleted account converges once its
+deletion is journaled complete; whether its objects were purged is reported
+separately.
+
 `GET /xrpc/_drain_status?did=<did>` (admin auth) reports what an account
 still owes this process: in-flight writes, undelivered publication intents,
 non-terminal blob work, and an in-progress deletion, with `clientQuiescent`
