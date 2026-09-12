@@ -68,6 +68,8 @@ pub struct ServiceDbConfig {
     pub lock_dir: String,
     /// The journal of every physical object-storage write.
     pub blob_attempts_db_location: String,
+    /// The repair and quarantine journal.
+    pub repair_db_location: String,
 }
 
 /// Per-location overrides of the layout under the data directory.
@@ -81,6 +83,7 @@ pub struct StorageOverrides {
     pub lifecycle_db_location: Option<String>,
     pub lock_dir: Option<String>,
     pub blob_attempts_db_location: Option<String>,
+    pub repair_db_location: Option<String>,
 }
 
 pub fn storage_cfg_from(
@@ -114,6 +117,9 @@ pub fn storage_cfg_from(
         blob_attempts_db_location: overrides
             .blob_attempts_db_location
             .unwrap_or_else(|| db_loc("rsky/blob-attempts.sqlite")),
+        repair_db_location: overrides
+            .repair_db_location
+            .unwrap_or_else(|| db_loc("rsky/repair.sqlite")),
     };
     (actor_store, service_db)
 }
@@ -272,6 +278,7 @@ pub fn env_to_cfg() -> ServerConfig {
             lifecycle_db_location: env_str("PDS_LIFECYCLE_DB"),
             lock_dir: env_str("PDS_LOCK_DIR"),
             blob_attempts_db_location: env_str("PDS_BLOB_ATTEMPTS_DB"),
+            repair_db_location: env_str("PDS_REPAIR_DB"),
         },
     );
     let blobstore_cfg = blobstore_cfg_from(
@@ -515,6 +522,7 @@ mod tests {
             service_db.blob_attempts_db_location,
             "rsky/blob-attempts.sqlite"
         );
+        assert_eq!(service_db.repair_db_location, "rsky/repair.sqlite");
     }
 
     #[test]
@@ -534,6 +542,7 @@ mod tests {
             service_db.blob_attempts_db_location,
             "/data/rsky/blob-attempts.sqlite"
         );
+        assert_eq!(service_db.repair_db_location, "/data/rsky/repair.sqlite");
     }
 
     #[test]
@@ -549,6 +558,7 @@ mod tests {
                 lifecycle_db_location: Some("/dbs/lifecycle.sqlite".to_owned()),
                 lock_dir: Some("/dbs/locks".to_owned()),
                 blob_attempts_db_location: Some("/dbs/attempts.sqlite".to_owned()),
+                repair_db_location: Some("/dbs/repair.sqlite".to_owned()),
             },
         );
         assert_eq!(actor_store.directory, "/elsewhere/actors");
@@ -559,5 +569,6 @@ mod tests {
         assert_eq!(service_db.lifecycle_db_location, "/dbs/lifecycle.sqlite");
         assert_eq!(service_db.lock_dir, "/dbs/locks");
         assert_eq!(service_db.blob_attempts_db_location, "/dbs/attempts.sqlite");
+        assert_eq!(service_db.repair_db_location, "/dbs/repair.sqlite");
     }
 }

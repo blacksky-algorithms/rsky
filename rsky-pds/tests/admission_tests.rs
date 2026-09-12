@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{create_account, get_admin_token, get_client_in};
+use common::{create_account, get_admin_token, get_client_in, sequencer_events};
 use rocket::http::{ContentType, Header, Status};
 use rocket::local::asynchronous::Client;
 use rocket::serde::json::json;
@@ -182,26 +182,98 @@ async fn the_allowlist_gates_writes_and_reloads_without_a_restart() {
         ("PDS_SEQUENCER_DB_LOCATION", "sequencer.sqlite"),
         ("PDS_DID_CACHE_DB_LOCATION", "did_cache.sqlite"),
         ("PDS_LIFECYCLE_DB", "rsky/lifecycle.sqlite"),
+        ("PDS_BLOB_ATTEMPTS_DB", "rsky/blob-attempts.sqlite"),
+        ("PDS_REPAIR_DB", "rsky/repair.sqlite"),
     ] {
         std::env::set_var(key, dir.path().join(name));
     }
-    let drained = rsky_pds::drain::run_from_env(rsky_pds::drain::DrainArgs {
+    let (drained, code) = rsky_pds::cli::run(rsky_pds::cli::Command::Drain {
         did: DID.to_owned(),
         timeout: Duration::from_secs(5),
     })
     .await
     .unwrap();
-    assert_eq!(drained.state, "draining");
-    assert!(drained.fully_drained);
+    assert_eq!(drained["state"], "draining");
+    assert_eq!(drained["fullyDrained"], true);
+    assert_eq!(code, 0);
+
+    // a repair runs once the account's entry names it, and a quarantine
+    // closes as verified once its repair is done and the index reconciled
+    write_allowlist(
+        &allowlist,
+        &format!(
+            "version = 1\ndefault = \"absent\"\n[entries]\n\"{DID}\" = {{ state = \"maintenance\", workflow_id = \"r1\" }}\n"
+        ),
+        Duration::from_secs(10),
+    );
+    let spec = dir.path().join("repair.json");
+    std::fs::write(
+        &spec,
+        format!(
+            r#"{{"id":"r1","did":"{DID}","kind":{{"kind":"republish","uri":"at://{DID}/app.bsky.feed.post/3lfixtureaa2a"}}}}"#
+        ),
+    )
+    .unwrap();
+    let (created, code) =
+        rsky_pds::cli::run(rsky_pds::cli::Command::RepairCreate { file: spec.clone() })
+            .await
+            .unwrap();
+    assert_eq!((created["state"].as_str(), code), (Some("pending"), 0));
+    let (ran, code) = rsky_pds::cli::run(rsky_pds::cli::Command::RepairRun {
+        id: "r1".to_owned(),
+        timeout: Duration::from_secs(10),
+    })
+    .await
+    .unwrap();
+    assert_eq!((ran["state"].as_str(), code), (Some("done"), 0), "{ran}");
+    let (status, code) = rsky_pds::cli::run(rsky_pds::cli::Command::RepairStatus {
+        id: "r1".to_owned(),
+    })
+    .await
+    .unwrap();
+    assert_eq!((status["state"].as_str(), code), (Some("done"), 0));
+    let seq = sequencer_events(&dir.path().join("sequencer.sqlite"), DID)
+        .last()
+        .unwrap()
+        .0;
+    let (opened, code) = rsky_pds::cli::run(rsky_pds::cli::Command::QuarantineOpen {
+        seq,
+        did: DID.to_owned(),
+        kind: "bad-event".to_owned(),
+        repairs: vec!["r1".to_owned()],
+    })
+    .await
+    .unwrap();
+    assert_eq!((opened["state"].as_str(), code), (Some("opened"), 0));
+    let (reconciled, _) =
+        rsky_pds::cli::run(rsky_pds::cli::Command::QuarantineLocalReconciled { seq })
+            .await
+            .unwrap();
+    assert_eq!(reconciled["localState"], "reconciled");
+    let (closed, code) = rsky_pds::cli::run(rsky_pds::cli::Command::QuarantineClose {
+        seq,
+        external: rsky_pds::repair::ExternalOutcome::Verified,
+        justification: None,
+    })
+    .await
+    .unwrap();
+    assert_eq!((closed["state"].as_str(), code), (Some("closed"), 0));
+    let (status, code) = rsky_pds::cli::run(rsky_pds::cli::Command::QuarantineStatus { seq })
+        .await
+        .unwrap();
+    assert_eq!(
+        (status["externalState"].as_str(), code),
+        (Some("verified"), 0)
+    );
 
     // without an allowlist every actor is admitted
     std::env::remove_var("PDS_WRITE_ALLOWLIST_FILE");
-    let open = rsky_pds::drain::run_from_env(rsky_pds::drain::DrainArgs {
+    let (open, _) = rsky_pds::cli::run(rsky_pds::cli::Command::Drain {
         did: DID.to_owned(),
         timeout: Duration::from_secs(5),
     })
     .await
     .unwrap();
-    assert_eq!(open.state, "active");
-    assert!(open.fully_drained);
+    assert_eq!(open["state"], "active");
+    assert_eq!(open["fullyDrained"], true);
 }

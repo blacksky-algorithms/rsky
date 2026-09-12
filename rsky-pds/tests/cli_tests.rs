@@ -32,7 +32,9 @@ fn binary(dir: &std::path::Path) -> Command {
         .env("PDS_SEQUENCER_DB_LOCATION", path("sequencer.sqlite"))
         .env("PDS_DID_CACHE_DB_LOCATION", path("did_cache.sqlite"))
         .env("PDS_LIFECYCLE_DB", path("rsky/lifecycle.sqlite"))
-        .env("PDS_LOCK_DIR", path("rsky/locks"));
+        .env("PDS_LOCK_DIR", path("rsky/locks"))
+        .env("PDS_BLOB_ATTEMPTS_DB", path("rsky/blob-attempts.sqlite"))
+        .env("PDS_REPAIR_DB", path("rsky/repair.sqlite"));
     if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
         command.env("LLVM_PROFILE_FILE", profile);
     }
@@ -76,6 +78,106 @@ async fn drain_mode_reports_and_exits_by_outcome() {
     assert_eq!(owed.status.code(), Some(1));
     let status: serde_json::Value = serde_json::from_slice(&owed.stdout).unwrap();
     assert_eq!(status["lifecyclePending"], 1);
+
+    // a repair is created from a file, refused while the account is not
+    // fenced for it, and reported; a quarantine opens and reports
+    let spec = dir.path().join("repair.json");
+    std::fs::write(
+        &spec,
+        format!(
+            r#"{{"id":"r1","did":"{DID}","kind":{{"kind":"empty-commit","boundary":"3zzzzzzzzzzzz"}}}}"#
+        ),
+    )
+    .unwrap();
+    let created = binary(dir.path())
+        .args(["--repair-create"])
+        .arg(&spec)
+        .output()
+        .unwrap();
+    assert_eq!(
+        created.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let repair: serde_json::Value = serde_json::from_slice(&created.stdout).unwrap();
+    assert_eq!(repair["state"], "pending");
+    let status = binary(dir.path())
+        .args(["--repair-status", "r1"])
+        .output()
+        .unwrap();
+    assert_eq!(status.status.code(), Some(0));
+    let missing = binary(dir.path())
+        .args(["--repair-status", "nope"])
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(1));
+    let refused = binary(dir.path())
+        .args(["--repair-run", "r1", "--timeout-secs", "1"])
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(2), "not fenced for maintenance");
+    let unknown_run = binary(dir.path())
+        .args(["--repair-run", "nope"])
+        .output()
+        .unwrap();
+    assert_eq!(unknown_run.status.code(), Some(2));
+    let bad_file = binary(dir.path())
+        .args(["--repair-create", "/nonexistent/repair.json"])
+        .output()
+        .unwrap();
+    assert_eq!(bad_file.status.code(), Some(2));
+
+    let opened = binary(dir.path())
+        .args([
+            "--quarantine-open",
+            "999",
+            "--did",
+            DID,
+            "--kind",
+            "bad-event",
+            "--repair",
+            "r1",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        opened.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&opened.stderr)
+    );
+    let quarantine: serde_json::Value = serde_json::from_slice(&opened.stdout).unwrap();
+    assert_eq!(quarantine["state"], "opened");
+    let reconciled = binary(dir.path())
+        .args(["--quarantine-local-reconciled", "999"])
+        .output()
+        .unwrap();
+    assert_eq!(reconciled.status.code(), Some(0));
+    let blocked_close = binary(dir.path())
+        .args(["--quarantine-close", "999", "--external", "verified"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        blocked_close.status.code(),
+        Some(2),
+        "the linked repair is pending"
+    );
+    let unknown_close = binary(dir.path())
+        .args(["--quarantine-close", "998", "--external", "verified"])
+        .output()
+        .unwrap();
+    assert_eq!(unknown_close.status.code(), Some(2));
+    let status = binary(dir.path())
+        .args(["--quarantine-status", "999"])
+        .output()
+        .unwrap();
+    assert_eq!(status.status.code(), Some(0));
+    let missing = binary(dir.path())
+        .args(["--quarantine-status", "998"])
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(1));
 
     // a lock another process holds exclusively makes the drain give up
     let locks = rsky_pds::locks::LockDir::new(dir.path().join("rsky/locks")).unwrap();

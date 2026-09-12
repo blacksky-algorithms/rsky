@@ -99,6 +99,25 @@ pub struct PublishIntent {
     pub event: Vec<u8>,
 }
 
+/// What a commit records besides its writes.
+#[derive(Debug, Clone, Default)]
+struct CommitOptions {
+    /// An import replaces the repository; intents from before it name a
+    /// root it replaced and must never be published.
+    supersede_pending: bool,
+    /// The repair and step this commit belongs to, recorded in the same
+    /// transaction so a restart recognises it.
+    repair_step: Option<(String, i64)>,
+}
+
+/// A commit a repair made, recognisable from the store after a crash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepairStep {
+    pub step_no: i64,
+    pub rev: String,
+    pub cid: String,
+}
+
 /// A publication intent as stored, with its delivery progress.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredIntent {
@@ -535,8 +554,28 @@ impl ActorStore {
         did: String,
         blobstore: Arc<dyn BlobStore>,
     ) -> Result<ActorStoreTransactor> {
-        crate::lifecycle::assert_not_deleting(&self.tombstones, &did)?;
         self.admission.admit_mutation(&did)?;
+        self.transact_admitted(did, blobstore).await
+    }
+
+    /// A write by the maintenance workflow the actor's allowlist entry
+    /// names, while client writes are refused.
+    pub async fn transact_maintenance(
+        &self,
+        did: String,
+        blobstore: Arc<dyn BlobStore>,
+        workflow_id: &str,
+    ) -> Result<ActorStoreTransactor> {
+        self.admission.admit_maintenance(&did, workflow_id)?;
+        self.transact_admitted(did, blobstore).await
+    }
+
+    async fn transact_admitted(
+        &self,
+        did: String,
+        blobstore: Arc<dyn BlobStore>,
+    ) -> Result<ActorStoreTransactor> {
+        crate::lifecycle::assert_not_deleting(&self.tombstones, &did)?;
         let guard = self.did_lock(&did).lock_owned().await;
         let file_lock = match &self.lock_dir {
             Some(lock_dir) => Some(lock_dir.shared(&did).await?),
@@ -715,6 +754,30 @@ impl ActorStoreReader {
         }
     }
 
+    /// The commits a repair has made in this store, in step order.
+    pub async fn repair_steps(&self, repair_id: &str) -> Result<Vec<RepairStep>> {
+        let repair_id = repair_id.to_owned();
+        self.record
+            .db
+            .run(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT \"stepNo\", rev, cid FROM repair_step WHERE \"repairId\" = ?1 \
+                     ORDER BY \"stepNo\"",
+                )?;
+                let rows = stmt
+                    .query_map([&repair_id], |row| {
+                        Ok(RepairStep {
+                            step_no: row.get(0)?,
+                            rev: row.get(1)?,
+                            cid: row.get(2)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await
+    }
+
     /// The store's undelivered publication intents, oldest first.
     pub async fn pending_intents(&self) -> Result<Vec<StoredIntent>> {
         self.record.db.run(|conn| pending_intents_in(conn)).await
@@ -835,7 +898,7 @@ impl ActorStoreTransactor {
             &writes,
             &promoted,
             &intents,
-            false,
+            CommitOptions::default(),
         )
         .await?;
         Ok(commit)
@@ -855,14 +918,50 @@ impl ActorStoreTransactor {
         let promoted = self.blob.promote_write_blobs(&writes, true).await?;
         // an intent from before the import names a root the import
         // replaced; publishing it now would be a commit behind the head
-        self.commit_write(&commit, current_root, &writes, &promoted, &[], true)
-            .await
+        self.commit_write(
+            &commit,
+            current_root,
+            &writes,
+            &promoted,
+            &[],
+            CommitOptions {
+                supersede_pending: true,
+                repair_step: None,
+            },
+        )
+        .await
     }
 
     pub async fn process_writes(
         &mut self,
         writes: Vec<PreparedWrite>,
         swap_commit_cid: Option<Cid>,
+    ) -> Result<CommitDataWithOps> {
+        self.process_writes_for(writes, swap_commit_cid, None).await
+    }
+
+    /// A commit made by a repair: the step is recorded in the same
+    /// transaction, so a restart that finds the commit recognises it.
+    pub async fn process_repair_step(
+        &mut self,
+        writes: Vec<PreparedWrite>,
+        swap_commit_cid: Option<Cid>,
+        repair_id: &str,
+        step_no: i64,
+    ) -> Result<CommitDataWithOps> {
+        self.process_writes_for(
+            writes,
+            swap_commit_cid,
+            Some((repair_id.to_owned(), step_no)),
+        )
+        .await
+    }
+
+    async fn process_writes_for(
+        &mut self,
+        writes: Vec<PreparedWrite>,
+        swap_commit_cid: Option<Cid>,
+        repair_step: Option<(String, i64)>,
     ) -> Result<CommitDataWithOps> {
         if writes.len() > MAX_WRITES_PER_COMMIT {
             return Err(WriteLimitError::TooManyWrites.into());
@@ -879,7 +978,10 @@ impl ActorStoreTransactor {
             &writes,
             &promoted,
             &intents,
-            false,
+            CommitOptions {
+                supersede_pending: false,
+                repair_step,
+            },
         )
         .await?;
         Ok(commit)
@@ -897,8 +999,12 @@ impl ActorStoreTransactor {
         writes: &[PreparedWrite],
         promoted: &[PromotedBlob],
         intents: &[PublishIntent],
-        supersede_pending: bool,
+        options: CommitOptions,
     ) -> Result<()> {
+        let CommitOptions {
+            supersede_pending,
+            repair_step,
+        } = options;
         self.lifecycle.mark_pending_work(&self.did).await?;
         let did = self.did.clone();
         let now = self.storage.read().await.now.clone();
@@ -937,6 +1043,13 @@ impl ActorStoreTransactor {
                     tx.execute(
                         "UPDATE publish_intent SET state = 'superseded' WHERE state = 'pending'",
                         [],
+                    )?;
+                }
+                if let Some((repair_id, step_no)) = &repair_step {
+                    tx.execute(
+                        "INSERT INTO repair_step (\"repairId\", \"stepNo\", rev, cid) \
+                         VALUES (?1, ?2, ?3, ?4)",
+                        rusqlite::params![repair_id, step_no, commit.rev, commit.cid.to_string()],
                     )?;
                 }
                 let mut insert = tx.prepare_cached(

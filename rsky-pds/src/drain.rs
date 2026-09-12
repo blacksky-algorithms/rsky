@@ -2,22 +2,16 @@
 //! finishes it under an exclusive lock.
 
 use crate::actor_store::blob::BlobReader;
-use crate::actor_store::blobstore::{unavailable, BlobStore, BlobstoreFactory};
+use crate::actor_store::blobstore::{unavailable, BlobStore};
 use crate::actor_store::{pending_intents_in, ActorStore};
-use crate::admission::Admission;
-use crate::background::BackgroundQueue;
-use crate::config::env_to_cfg;
-use crate::crawlers::Crawlers;
-use crate::lifecycle::LifecycleStore;
 use crate::locks::LockDir;
 use crate::publication::{publish_pending, settle_pending_work};
-use crate::sequencer::Sequencer;
+use crate::repair::RepairStore;
 use crate::SharedSequencer;
-use anyhow::{bail, Result};
+use anyhow::Result;
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
 
 /// The per-actor counters behind the drain and hand-back decisions.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -68,7 +62,11 @@ async fn journal_counts(actor_store: &ActorStore, did: &str) -> Result<(usize, u
     Ok((intents, blob_work))
 }
 
-pub async fn drain_status(actor_store: &ActorStore, did: &str) -> Result<DrainStatus> {
+pub async fn drain_status(
+    actor_store: &ActorStore,
+    repairs: &RepairStore,
+    did: &str,
+) -> Result<DrainStatus> {
     let state = actor_store.admission.state_of(did);
     let (publish_intent_pending, blob_work_nonterminal) = journal_counts(actor_store, did).await?;
     let lifecycle_pending = actor_store
@@ -78,7 +76,8 @@ pub async fn drain_status(actor_store: &ActorStore, did: &str) -> Result<DrainSt
         .filter(|tombstone| tombstone.logically_deleted_at.is_none())
         .map(|_| 1)
         .unwrap_or(0);
-    let repair_pending = 0;
+    let repair_pending =
+        repairs.pending_for(did).await?.len() + repairs.open_quarantines_for(did).await?.len();
     let inflight_mutations = actor_store.inflight_mutations(did);
     let client_quiescent = inflight_mutations == 0 && publish_intent_pending == 0;
     let fully_drained = client_quiescent
@@ -105,6 +104,7 @@ pub async fn drain_status(actor_store: &ActorStore, did: &str) -> Result<DrainSt
 pub async fn drain_did(
     actor_store: &ActorStore,
     sequencer: &SharedSequencer,
+    repairs: &RepairStore,
     lock_dir: &LockDir,
     blobstore: Arc<dyn BlobStore>,
     did: &str,
@@ -125,90 +125,22 @@ pub async fn drain_did(
             settle_pending_work(&actor_store.lifecycle, &db, &blob, did).await?;
         }
     }
-    drain_status(actor_store, did).await
-}
-
-/// `--drain-did <did> [--timeout-secs <n>]`
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DrainArgs {
-    pub did: String,
-    pub timeout: Duration,
-}
-
-pub const USAGE: &str = "usage: rsky-pds [--drain-did <did> [--timeout-secs <n>]]";
-
-/// `None` means run the server.
-pub fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Option<DrainArgs>> {
-    let mut did = None;
-    let mut timeout = Duration::from_secs(600);
-    let mut argv = argv.into_iter();
-    while let Some(arg) = argv.next() {
-        match arg.as_str() {
-            "--drain-did" => match argv.next() {
-                Some(value) => did = Some(value),
-                None => bail!("--drain-did requires a value"),
-            },
-            "--timeout-secs" => match argv.next().map(|value| value.parse::<u64>()) {
-                Some(Ok(secs)) => timeout = Duration::from_secs(secs),
-                _ => bail!("--timeout-secs requires a number"),
-            },
-            other => bail!("unrecognised argument: {other}\n{USAGE}"),
-        }
-    }
-    Ok(did.map(|did| DrainArgs { did, timeout }))
-}
-
-/// Runs a drain over the data directory named by the environment.
-pub async fn run_from_env(args: DrainArgs) -> Result<DrainStatus> {
-    let cfg = env_to_cfg();
-    let lifecycle = LifecycleStore::open(&cfg.service_db.lifecycle_db_location).await?;
-    let admission = Arc::new(match &cfg.service.write_allowlist_file {
-        Some(path) => Admission::from_file(path)?,
-        None => Admission::unrestricted(),
-    });
-    let lock_dir = LockDir::new(&cfg.service_db.lock_dir)?;
-    let actor_store = ActorStore::new(&cfg.actor_store, BackgroundQueue::default(), lifecycle)
-        .with_coexistence(cfg.service.coexistence)
-        .with_admission(admission)
-        .with_lock_dir(lock_dir.clone());
-    let sequencer = SharedSequencer {
-        sequencer: RwLock::new(Sequencer::new(
-            crate::sequencer::db::get_migrated_db(&cfg.service_db.sequencer_db_location).await?,
-            Crawlers::new(cfg.service.hostname.clone(), vec![]),
-            None,
-        )),
-    };
-    let aws_sdk_config = aws_config::from_env()
-        .endpoint_url(std::env::var("AWS_ENDPOINT").unwrap_or("localhost".to_owned()))
-        .load()
-        .await;
-    let blobstore = BlobstoreFactory::new(cfg.blobstore.clone(), aws_sdk_config)
-        .with_attempts(
-            crate::blob_attempts::AttemptJournal::open(
-                &cfg.service_db.blob_attempts_db_location,
-                cfg.service.coexistence,
-            )
-            .await?,
-        )
-        .blobstore(args.did.clone());
-    drain_did(
-        &actor_store,
-        &sequencer,
-        &lock_dir,
-        blobstore,
-        &args.did,
-        args.timeout,
-    )
-    .await
+    drain_status(actor_store, repairs, did).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::actor_store::blobstore::MemoryBlobStore;
+    use crate::admission::Admission;
+    use crate::background::BackgroundQueue;
     use crate::config::ActorStoreConfig;
+    use crate::crawlers::Crawlers;
+    use crate::lifecycle::LifecycleStore;
+    use crate::sequencer::Sequencer;
     use rsky_repo::types::{PreparedCreateOrUpdate, PreparedWrite, WriteOpAction};
     use secp256k1::{Keypair, Secp256k1, SecretKey};
+    use tokio::sync::RwLock;
 
     const DID: &str = "did:plc:drain";
 
@@ -216,6 +148,7 @@ mod tests {
         dir: tempfile::TempDir,
         actor_store: ActorStore,
         sequencer: SharedSequencer,
+        repairs: RepairStore,
         lock_dir: LockDir,
         blobstore: Arc<MemoryBlobStore>,
     }
@@ -247,10 +180,14 @@ mod tests {
                 None,
             )),
         };
+        let repairs = RepairStore::open(dir.path().join("rsky/repair.sqlite"))
+            .await
+            .unwrap();
         World {
             dir,
             actor_store,
             sequencer,
+            repairs,
             lock_dir,
             blobstore: Arc::new(MemoryBlobStore::default()),
         }
@@ -284,7 +221,9 @@ mod tests {
     #[tokio::test]
     async fn status_reports_what_the_actor_owes() {
         let world = world("version = 1\ndefault = \"active\"\n").await;
-        let status = drain_status(&world.actor_store, DID).await.unwrap();
+        let status = drain_status(&world.actor_store, &world.repairs, DID)
+            .await
+            .unwrap();
         assert_eq!(status.state, "active");
         assert!(status.fully_drained);
         assert!(status.client_quiescent);
@@ -300,7 +239,9 @@ mod tests {
         txn.process_writes(vec![post("3lfixtureaa2a")], None)
             .await
             .unwrap();
-        let status = drain_status(&world.actor_store, DID).await.unwrap();
+        let status = drain_status(&world.actor_store, &world.repairs, DID)
+            .await
+            .unwrap();
         assert_eq!(status.inflight_mutations, 1);
         assert_eq!(status.publish_intent_pending, 3);
         assert!(!status.client_quiescent);
@@ -309,7 +250,9 @@ mod tests {
 
         // the actor's deletion in progress keeps it from being drained
         world.actor_store.lifecycle.tombstone(DID).await.unwrap();
-        let status = drain_status(&world.actor_store, DID).await.unwrap();
+        let status = drain_status(&world.actor_store, &world.repairs, DID)
+            .await
+            .unwrap();
         assert_eq!(status.lifecycle_pending, 1);
         assert_eq!(status.inflight_mutations, 0);
         world
@@ -322,6 +265,7 @@ mod tests {
         let drained = drain_did(
             &world.actor_store,
             &world.sequencer,
+            &world.repairs,
             &world.lock_dir,
             world.blobstore.clone(),
             DID,
@@ -356,9 +300,24 @@ mod tests {
             "version = 1\ndefault = \"absent\"\n[entries]\n\"did:plc:drain\" = { state = \"maintenance\", workflow_id = \"w1\" }\n",
         )
         .await;
-        let status = drain_status(&world.actor_store, DID).await.unwrap();
+        world
+            .repairs
+            .create(
+                "w1",
+                DID,
+                &crate::repair::RepairKind::EmptyCommit {
+                    boundary: "3zzzzzzzzzzzz".to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+        let status = drain_status(&world.actor_store, &world.repairs, DID)
+            .await
+            .unwrap();
         assert_eq!(status.state, "maintenance");
         assert_eq!(status.workflow_id.as_deref(), Some("w1"));
+        assert_eq!(status.repair_pending, 1);
+        assert!(!status.fully_drained);
         assert_eq!(serde_json::to_value(&status).unwrap()["workflowId"], "w1");
 
         // a shared holder keeps the exclusive drain out until it lets go
@@ -366,6 +325,7 @@ mod tests {
         let err = drain_did(
             &world.actor_store,
             &world.sequencer,
+            &world.repairs,
             &world.lock_dir,
             world.blobstore.clone(),
             DID,
@@ -380,6 +340,7 @@ mod tests {
         let absent = drain_did(
             &world.actor_store,
             &world.sequencer,
+            &world.repairs,
             &world.lock_dir,
             world.blobstore.clone(),
             "did:plc:nobody",
@@ -402,28 +363,12 @@ mod tests {
             })
             .await
             .unwrap();
-        let status = drain_status(&world.actor_store, DID).await.unwrap();
-        assert_eq!(status.publish_intent_pending, 0);
-        assert!(status.fully_drained);
-        let _ = world.dir.path();
-    }
-
-    #[test]
-    fn parses_drain_arguments() {
-        assert_eq!(parse_args(Vec::<String>::new()).unwrap(), None);
-        let args = parse_args(["--drain-did", "did:plc:a"].map(str::to_owned))
-            .unwrap()
+        let status = drain_status(&world.actor_store, &world.repairs, DID)
+            .await
             .unwrap();
-        assert_eq!(args.did, "did:plc:a");
-        assert_eq!(args.timeout, Duration::from_secs(600));
-        let args =
-            parse_args(["--drain-did", "did:plc:a", "--timeout-secs", "5"].map(str::to_owned))
-                .unwrap()
-                .unwrap();
-        assert_eq!(args.timeout, Duration::from_secs(5));
-        assert!(parse_args(["--drain-did"].map(str::to_owned)).is_err());
-        assert!(parse_args(["--timeout-secs", "soon"].map(str::to_owned)).is_err());
-        assert!(parse_args(["--timeout-secs"].map(str::to_owned)).is_err());
-        assert!(parse_args(["--bogus"].map(str::to_owned)).is_err());
+        assert_eq!(status.publish_intent_pending, 0);
+        assert_eq!(status.repair_pending, 1);
+        assert!(!status.fully_drained);
+        let _ = world.dir.path();
     }
 }

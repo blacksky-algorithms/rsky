@@ -15,6 +15,7 @@ pub mod apis;
 pub mod auth_verifier;
 pub mod background;
 pub mod blob_attempts;
+pub mod cli;
 pub mod config;
 pub mod context;
 pub mod crawlers;
@@ -36,6 +37,7 @@ pub mod pipethrough;
 pub mod plc;
 pub mod publication;
 pub mod read_after_write;
+pub mod repair;
 pub mod repo;
 pub mod rotate_keys;
 pub mod sequencer;
@@ -176,8 +178,9 @@ async fn drain_status(
     _admin: auth_verifier::AdminToken,
     did: String,
     actor_store: &State<ActorStore>,
+    repairs: &State<repair::RepairStore>,
 ) -> Result<Json<drain::DrainStatus>, ApiError> {
-    Ok(Json(drain::drain_status(actor_store, &did).await?))
+    Ok(Json(drain::drain_status(actor_store, repairs, &did).await?))
 }
 
 #[tracing::instrument(skip_all)]
@@ -337,6 +340,9 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
             },
         })),
     };
+    let repairs = repair::RepairStore::open(&cfg.service_db.repair_db_location)
+        .await
+        .expect("Failed to open the repair journal");
     let admission = Arc::new(match &cfg.service.write_allowlist_file {
         Some(path) => {
             admission::Admission::from_file(path).expect("Failed to load the write allowlist")
@@ -530,4 +536,5 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(actor_store)
         .manage(lifecycle)
         .manage(admission)
+        .manage(repairs)
 }

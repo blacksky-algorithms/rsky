@@ -44,10 +44,64 @@ impl LockDir {
     }
 
     pub fn path_for(&self, did: &str) -> Result<PathBuf> {
+        self.path_with(did, "lock")
+    }
+
+    /// The actor's maintenance slot: one repair, quarantine step, or drain
+    /// at a time.
+    pub fn maintenance_path_for(&self, did: &str) -> Result<PathBuf> {
+        self.path_with(did, "maint")
+    }
+
+    fn path_with(&self, did: &str, suffix: &str) -> Result<PathBuf> {
         if did.is_empty() || did.contains('/') || did.contains('\\') || did.starts_with('.') {
             bail!("unsafe lock name: {did}");
         }
-        Ok(self.directory.join(format!("{did}.lock")))
+        Ok(self.directory.join(format!("{did}.{suffix}")))
+    }
+
+    fn open_path(&self, path: PathBuf) -> Result<(File, PathBuf)> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("cannot open lock {}", path.display()))?;
+        Ok((file, path))
+    }
+
+    /// Takes the actor's maintenance slot without waiting.
+    pub fn try_maintenance_slot(&self, did: &str) -> Result<Option<FileLock>> {
+        let (file, path) = self.open_path(self.maintenance_path_for(did)?)?;
+        Self::try_exclusive_on(file, path)
+    }
+
+    /// Takes the actor's maintenance slot, retrying until `timeout` passes.
+    pub async fn maintenance_slot_within(&self, did: &str, timeout: Duration) -> Result<FileLock> {
+        let started = Instant::now();
+        loop {
+            if let Some(lock) = self.try_maintenance_slot(did)? {
+                return Ok(lock);
+            }
+            if started.elapsed() >= timeout {
+                bail!("{did} is held by another maintenance workflow after {timeout:?}");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    fn try_exclusive_on(file: File, path: PathBuf) -> Result<Option<FileLock>> {
+        match flock(&file, libc::LOCK_EX | libc::LOCK_NB) {
+            Ok(()) => Ok(Some(FileLock {
+                _file: file,
+                path,
+                exclusive: true,
+            })),
+            Err(err) => (err.kind() == std::io::ErrorKind::WouldBlock)
+                .then_some(None)
+                .ok_or_else(|| anyhow::Error::from(err)),
+        }
     }
 
     fn open(&self, did: &str) -> Result<(File, PathBuf)> {
@@ -81,16 +135,7 @@ impl LockDir {
     /// holder is in the way.
     pub fn try_exclusive(&self, did: &str) -> Result<Option<FileLock>> {
         let (file, path) = self.open(did)?;
-        match flock(&file, libc::LOCK_EX | libc::LOCK_NB) {
-            Ok(()) => Ok(Some(FileLock {
-                _file: file,
-                path,
-                exclusive: true,
-            })),
-            Err(err) => (err.kind() == std::io::ErrorKind::WouldBlock)
-                .then_some(None)
-                .ok_or_else(|| anyhow::Error::from(err)),
-        }
+        Self::try_exclusive_on(file, path)
     }
 
     /// Takes the actor's lock exclusively, retrying until `timeout` passes.
@@ -153,6 +198,27 @@ mod tests {
         assert!(!waiter.is_finished());
         drop(exclusive);
         assert!(!waiter.await.unwrap().unwrap());
+    }
+
+    #[tokio::test]
+    async fn the_maintenance_slot_is_separate_from_the_write_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let locks = LockDir::new(dir.path().join("locks")).unwrap();
+        let _write = locks.shared("did:plc:a").await.unwrap();
+        let slot = locks.try_maintenance_slot("did:plc:a").unwrap().unwrap();
+        assert!(slot.path.ends_with("did:plc:a.maint"));
+        assert!(locks.try_maintenance_slot("did:plc:a").unwrap().is_none());
+        let err = locks
+            .maintenance_slot_within("did:plc:a", Duration::from_millis(60))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("maintenance"));
+        drop(slot);
+        assert!(locks
+            .maintenance_slot_within("did:plc:a", Duration::from_secs(1))
+            .await
+            .is_ok());
+        assert!(locks.try_maintenance_slot("a/b").is_err());
     }
 
     #[test]

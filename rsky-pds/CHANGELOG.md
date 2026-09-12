@@ -130,6 +130,24 @@ it. The journal lives outside every actor store and must never be restored
 from a backup: an attempt with no outcome is the evidence that an object
 may still appear.
 
+### Added — journaled repairs and quarantines
+
+`PDS_REPAIR_DB` records repairs (`republish`, `empty-commit`,
+`phantom-delete`) and quarantines. A repair runs only for an account whose
+allowlist entry names it as the maintenance workflow, only after client
+writes have drained, and only while holding the account's maintenance slot;
+every commit it makes is recorded with its step in the same transaction, so
+a crash resumes from the last commit that landed, and each step swaps
+against the root the previous step left, so any other root ends the repair
+`client-superseded`. A quarantine supersedes the event's intent, invalidates
+its sequencer row, records its linked repairs, and closes only when every
+linked repair is finished, the local index was reconciled, and every
+affected consumer was verified or the gap explicitly accepted. The binary
+gains `--repair-create`, `--repair-run`, `--repair-status`,
+`--quarantine-open`, `--quarantine-local-reconciled`, `--quarantine-close`,
+and `--quarantine-status`; `/xrpc/_drain_status` counts pending repairs and
+open quarantines.
+
 ### Added — the publication frontier
 
 `community.blacksky.pds.getPublicationFrontier` (admin auth) reports how far

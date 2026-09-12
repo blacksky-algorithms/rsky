@@ -329,6 +329,20 @@ impl Sequencer {
         self.sequence_evt(evt).await
     }
 
+    /// Marks one sequenced row invalidated so no subscriber receives it
+    /// again; returns whether a row was changed.
+    pub async fn invalidate(&self, seq: i64) -> Result<bool> {
+        self.db
+            .run(move |conn| {
+                let changed = conn.execute(
+                    "UPDATE repo_seq SET invalidated = 1 WHERE seq = ?1 AND invalidated = 0",
+                    params![seq],
+                )?;
+                Ok(changed == 1)
+            })
+            .await
+    }
+
     pub async fn delete_all_for_user(
         &self,
         did: &str,

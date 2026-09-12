@@ -214,6 +214,7 @@ pub const ACTOR_DB_MIGRATIONS: &[Migration] = &[
         \"repairId\" TEXT NOT NULL, \
         \"stepNo\" INTEGER NOT NULL, \
         rev TEXT NOT NULL, \
+        cid TEXT NOT NULL, \
         PRIMARY KEY (\"repairId\", \"stepNo\")\
     );",
     },

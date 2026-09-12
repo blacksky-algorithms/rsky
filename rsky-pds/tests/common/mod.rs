@@ -197,6 +197,7 @@ pub async fn get_client_in(dir: &std::path::Path) -> Client {
             lifecycle_db_location: path("rsky/lifecycle.sqlite"),
             lock_dir: path("rsky/locks"),
             blob_attempts_db_location: path("rsky/blob-attempts.sqlite"),
+            repair_db_location: path("rsky/repair.sqlite"),
         }),
         actor_store_directory: Some(path("actors")),
     };
@@ -484,6 +485,7 @@ pub async fn get_client_with_fixture() -> (&'static Fixture, Client) {
             lifecycle_db_location: path("rsky/lifecycle.sqlite"),
             lock_dir: path("rsky/locks"),
             blob_attempts_db_location: path("rsky/blob-attempts.sqlite"),
+            repair_db_location: path("rsky/repair.sqlite"),
         }),
         actor_store_directory: Some(path("actors")),
     };
@@ -518,6 +520,7 @@ pub async fn get_client_with_fixture_copy() -> (&'static Fixture, TempDir, Clien
             lifecycle_db_location: path("rsky/lifecycle.sqlite"),
             lock_dir: path("rsky/locks"),
             blob_attempts_db_location: path("rsky/blob-attempts.sqlite"),
+            repair_db_location: path("rsky/repair.sqlite"),
         }),
         actor_store_directory: Some(path("actors")),
     };

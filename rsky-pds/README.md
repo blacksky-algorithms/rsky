@@ -82,6 +82,7 @@ Mount a volume at `PDS_DATA_DIRECTORY` to persist data.
 | `PDS_WRITE_ALLOWLIST_FILE` | The write allowlist naming the accounts this process may write (see below); every account is admitted when unset |
 | `PDS_LOCK_DIR` | Per-account advisory locks shared with the maintenance drain (default `<PDS_DATA_DIRECTORY>/rsky/locks`) |
 | `PDS_BLOB_ATTEMPTS_DB` | The journal of every physical S3 write (default `<PDS_DATA_DIRECTORY>/rsky/blob-attempts.sqlite`); never restore it from a backup |
+| `PDS_REPAIR_DB` | The repair and quarantine journal (default `<PDS_DATA_DIRECTORY>/rsky/repair.sqlite`) |
 | `PDS_REDIS_SCRATCH_ADDRESS` | `host:port` of a redis used to track DPoP proof replay across processes (with `PDS_REDIS_SCRATCH_PASSWORD`); in-memory when unset |
 | `PDS_RECOVERY_DID_KEY` | Optional additional PLC rotation key |
 
@@ -152,6 +153,23 @@ mutations are, and answer `503 NotAdmitted` with `Retry-After: 1`.
 auth) reports how far the account's publication history here reaches and
 whether it is provably whole, for a downstream index that reconciles
 against this server.
+
+Repairs never re-deliver a consumed revision; each lands as a new commit.
+`rsky-pds --repair-create <file.json>` records one (`republish` a record at
+the same key and value, an `empty-commit` above a revision boundary, or a
+`phantom-delete` of a record consumers still hold), `--repair-run <id>`
+runs it once the account's allowlist entry is `maintenance` with that id:
+it waits for client writes to drain, takes the account's maintenance slot,
+records every commit with its step so a crash resumes from the last commit
+that landed, and swaps each step against the root the previous step left,
+so a change by anyone else ends the repair `client-superseded` rather than
+overwritten. `--quarantine-open <seq> --did <did> --kind <kind> [--repair
+<id>]...` supersedes the event's intent, invalidates its row, and records the
+linked repairs; `--quarantine-local-reconciled <seq>` and
+`--quarantine-close <seq> --external verified|accepted [--justification
+<text>]` close it only once every linked repair is finished, the local index
+was reconciled, and every affected consumer was verified or the gap
+explicitly accepted.
 
 `GET /xrpc/_drain_status?did=<did>` (admin auth) reports what an account
 still owes this process: in-flight writes, undelivered publication intents,
