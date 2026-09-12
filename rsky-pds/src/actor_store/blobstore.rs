@@ -1,6 +1,6 @@
 use crate::actor_store::aws::s3::S3BlobStore;
 use crate::actor_store::disk_blobstore::DiskBlobStore;
-use crate::config::BlobstoreConfig;
+use crate::config::{BlobstoreConfig, S3Config};
 use anyhow::{bail, Result};
 use aws_config::SdkConfig;
 use aws_sdk_s3::primitives::ByteStream;
@@ -113,6 +113,17 @@ impl BlobstoreFactory {
         }
     }
 
+    /// Builds the factory for the configured store, deriving the S3 client
+    /// settings from the `PDS_BLOBSTORE_S3_*` configuration over whatever
+    /// the AWS environment provides.
+    pub async fn from_config(cfg: BlobstoreConfig) -> Self {
+        let s3 = match &cfg {
+            BlobstoreConfig::S3(s3) => s3.clone(),
+            BlobstoreConfig::Disk { .. } => S3Config::default(),
+        };
+        Self::new(cfg, sdk_config_for(&s3).await)
+    }
+
     /// Journals every physical write the S3 stores make.
     pub fn with_attempts(mut self, attempts: crate::blob_attempts::AttemptJournal) -> Self {
         self.attempts = Some(attempts);
@@ -130,8 +141,9 @@ impl BlobstoreFactory {
                 tmp_location.as_deref().map(Path::new),
                 None,
             )),
-            BlobstoreConfig::S3 { bucket } => {
-                let store = S3BlobStore::new(did, &self.aws_cfg, bucket.clone());
+            BlobstoreConfig::S3(s3) => {
+                let store =
+                    S3BlobStore::new(did, &self.aws_cfg, s3.bucket.clone(), s3.force_path_style);
                 Arc::new(match &self.attempts {
                     Some(attempts) => store.with_attempts(attempts.clone()),
                     None => store,
@@ -139,6 +151,28 @@ impl BlobstoreFactory {
             }
         }
     }
+}
+
+/// The SDK configuration for an S3 store: the environment's defaults with
+/// the reference PDS settings layered on top.
+pub async fn sdk_config_for(s3: &S3Config) -> SdkConfig {
+    let mut loader = aws_config::from_env();
+    if let Some(region) = &s3.region {
+        loader = loader.region(aws_sdk_s3::config::Region::new(region.clone()));
+    }
+    if let Some(endpoint) = &s3.endpoint {
+        loader = loader.endpoint_url(endpoint.clone());
+    }
+    if let (Some(key), Some(secret)) = (&s3.access_key_id, &s3.secret_access_key) {
+        loader = loader.credentials_provider(aws_sdk_s3::config::Credentials::new(
+            key.clone(),
+            secret.clone(),
+            None,
+            None,
+            "pds-blobstore",
+        ));
+    }
+    loader.load().await
 }
 
 /// In-memory blobstore used by deterministic tests. It counts every call
@@ -495,21 +529,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn factory_derives_the_sdk_config_from_the_s3_settings() {
+        let s3 = S3Config {
+            bucket: Some("bucket".to_owned()),
+            region: Some("nyc3".to_owned()),
+            endpoint: Some("https://nyc3.digitaloceanspaces.com".to_owned()),
+            force_path_style: true,
+            access_key_id: Some("key".to_owned()),
+            secret_access_key: Some("secret".to_owned()),
+        };
+        let sdk = sdk_config_for(&s3).await;
+        assert_eq!(sdk.region().map(|r| r.as_ref()), Some("nyc3"));
+        assert_eq!(
+            sdk.endpoint_url(),
+            Some("https://nyc3.digitaloceanspaces.com")
+        );
+        assert!(sdk.credentials_provider().is_some());
+        let factory = BlobstoreFactory::from_config(BlobstoreConfig::S3(s3)).await;
+        assert!(factory
+            .blobstore("did:example:alice".to_owned())
+            .delete_all()
+            .is_none());
+        let disk_dir = tempfile::tempdir().unwrap();
+        let disk = BlobstoreFactory::from_config(BlobstoreConfig::Disk {
+            location: disk_dir.path().join("blobs").to_string_lossy().to_string(),
+            tmp_location: None,
+        })
+        .await;
+        assert!(disk
+            .blobstore("did:example:alice".to_owned())
+            .delete_all()
+            .is_some());
+    }
+
+    #[tokio::test]
     async fn factory_builds_s3_store_from_s3_config() {
         let aws_cfg = SdkConfig::builder()
             .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
             .build();
         let factory = BlobstoreFactory::new(
-            BlobstoreConfig::S3 {
+            BlobstoreConfig::S3(S3Config {
                 bucket: Some("my-bucket".to_owned()),
-            },
+                ..Default::default()
+            }),
             aws_cfg.clone(),
         );
         // constructs without touching the network; s3 stores cannot delete_all
         let store = factory.blobstore("did:example:alice".to_owned());
         assert!(store.delete_all().is_none());
 
-        let legacy = BlobstoreFactory::new(BlobstoreConfig::S3 { bucket: None }, aws_cfg.clone());
+        let legacy =
+            BlobstoreFactory::new(BlobstoreConfig::S3(S3Config::default()), aws_cfg.clone());
         let store = legacy.blobstore("did:example:alice".to_owned());
         assert!(store.delete_all().is_none());
 
@@ -518,7 +588,7 @@ mod tests {
             crate::blob_attempts::AttemptJournal::open(dir.path().join("attempts.sqlite"), true)
                 .await
                 .unwrap();
-        let journaled = BlobstoreFactory::new(BlobstoreConfig::S3 { bucket: None }, aws_cfg)
+        let journaled = BlobstoreFactory::new(BlobstoreConfig::S3(S3Config::default()), aws_cfg)
             .with_attempts(journal);
         assert!(journaled
             .blobstore("did:example:alice".to_owned())

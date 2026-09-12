@@ -8,7 +8,7 @@ use aws_sdk_s3 as s3;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::put_object::builders::PutObjectFluentBuilder;
 use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::types::{Delete, ObjectCannedAcl, ObjectIdentifier};
+use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use futures::future::BoxFuture;
 use lexicon_cid::Cid;
 use rsky_common::get_random_str;
@@ -23,7 +23,7 @@ pub struct S3BlobStore {
     client: s3::Client,
     pub did: String,
     pub bucket: String,
-    apply_acl: bool,
+    path_style: bool,
     attempts: Option<AttemptJournal>,
 }
 
@@ -43,20 +43,32 @@ impl S3BlobStore {
     /// The client never retries on its own: a request that timed out may
     /// still complete, and a hidden retry would report one success for two
     /// attempts. The caller journals each attempt instead.
-    pub fn new(did: String, cfg: &SdkConfig, bucket: Option<String>) -> Self {
+    ///
+    /// Objects are written without an ACL, as the reference PDS writes them;
+    /// what is readable is the bucket's policy, not a per-object grant.
+    pub fn new(
+        did: String,
+        cfg: &SdkConfig,
+        bucket: Option<String>,
+        force_path_style: bool,
+    ) -> Self {
         let config = s3::config::Builder::from(cfg)
             .retry_config(RetryConfig::disabled())
+            .force_path_style(force_path_style)
             .build();
         let client = aws_sdk_s3::Client::from_conf(config);
-        let apply_acl = !is_gcs_endpoint(cfg.endpoint_url());
         let bucket = bucket.unwrap_or_else(|| did.clone());
         S3BlobStore {
             client,
             did,
             bucket,
-            apply_acl,
+            path_style: force_path_style,
             attempts: None,
         }
+    }
+
+    pub fn path_style(&self) -> bool {
+        self.path_style
     }
 
     pub fn with_attempts(mut self, attempts: AttemptJournal) -> Self {
@@ -108,17 +120,11 @@ impl S3BlobStore {
     }
 
     fn put_object_request(&self, key: String, bytes: Vec<u8>) -> PutObjectFluentBuilder {
-        let req = self
-            .client
+        self.client
             .put_object()
             .body(ByteStream::from(bytes))
             .bucket(&self.bucket)
-            .key(key);
-        if self.apply_acl {
-            req.acl(ObjectCannedAcl::PublicRead)
-        } else {
-            req
-        }
+            .key(key)
     }
 
     pub async fn put_temp(&self, bytes: Vec<u8>) -> Result<String> {
@@ -267,18 +273,13 @@ impl S3BlobStore {
     async fn copy_object(&self, keys: MoveObject) -> Result<()> {
         let to = keys.to.clone();
         self.attempt(&to, "copy", async {
-            let req = self
-                .client
+            self.client
                 .copy_object()
                 .bucket(&self.bucket)
                 .copy_source(format!("{0}/{1}", self.bucket, keys.from))
-                .key(keys.to);
-            let req = if self.apply_acl {
-                req.acl(ObjectCannedAcl::PublicRead)
-            } else {
-                req
-            };
-            req.send().await?;
+                .key(keys.to)
+                .send()
+                .await?;
             Ok(())
         })
         .await
@@ -315,10 +316,6 @@ impl S3BlobStore {
         })
         .await
     }
-}
-
-fn is_gcs_endpoint(endpoint_url: Option<&str>) -> bool {
-    endpoint_url.is_some_and(|url| url.contains("storage.googleapis.com"))
 }
 
 impl BlobStore for S3BlobStore {
@@ -401,7 +398,9 @@ mod tests {
             "did:example:alice".to_owned(),
             &cfg,
             Some("shared-bucket".to_owned()),
+            true,
         );
+        assert!(store.path_style());
         assert_eq!(store.bucket, "shared-bucket");
         assert_eq!(store.get_tmp_path("key"), "tmp/did:example:alice/key");
         let cid = sha256_to_cid(Sha256::digest(b"layout").to_vec());
@@ -420,9 +419,9 @@ mod tests {
     #[test]
     fn legacy_fallback_uses_did_as_bucket() {
         let cfg = sdk_config(Some("https://nyc3.digitaloceanspaces.com"));
-        let store = S3BlobStore::new("did:example:alice".to_owned(), &cfg, None);
+        let store = S3BlobStore::new("did:example:alice".to_owned(), &cfg, None, false);
         assert_eq!(store.bucket, "did:example:alice");
-        assert!(store.apply_acl);
+        assert!(!store.path_style());
         assert!(store.retries_disabled());
         assert!(format!("{store:?}").contains("did:example:alice"));
     }
@@ -447,6 +446,7 @@ mod tests {
             "did:example:alice".to_owned(),
             &cfg,
             Some("bucket".to_owned()),
+            false,
         )
         .with_attempts(journal.clone());
         let cid = sha256_to_cid(Sha256::digest(b"unreachable").to_vec());
@@ -481,24 +481,14 @@ mod tests {
             .unwrap()
             .is_empty());
         // without a journal the bulk delete goes out as one request
-        let bare = S3BlobStore::new("did:example:alice".to_owned(), &cfg, Some("b".to_owned()));
+        let bare = S3BlobStore::new(
+            "did:example:alice".to_owned(),
+            &cfg,
+            Some("b".to_owned()),
+            false,
+        );
         assert!(bare.delete_many(vec![cid]).await.is_err());
         assert!(bare.make_permanent("k".to_owned(), cid).await.is_err());
         assert!(bare.quarantine(cid).await.is_err());
-    }
-
-    #[test]
-    fn gcs_endpoint_disables_per_object_acls() {
-        assert!(!is_gcs_endpoint(None));
-        assert!(!is_gcs_endpoint(Some("https://s3.us-east-1.amazonaws.com")));
-        assert!(is_gcs_endpoint(Some("https://storage.googleapis.com")));
-
-        let cfg = sdk_config(Some("https://storage.googleapis.com"));
-        let store = S3BlobStore::new(
-            "did:example:alice".to_owned(),
-            &cfg,
-            Some("gcs-bucket".to_owned()),
-        );
-        assert!(!store.apply_acl);
     }
 }

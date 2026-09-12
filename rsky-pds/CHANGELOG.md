@@ -203,6 +203,30 @@ allowlist in force. A refused write answers `503 NotAdmitted` with
 publication and blob work, and reports the same counters that
 `GET /xrpc/_drain_status?did=<did>` (admin auth) serves.
 
+### Added — reference deployment settings, handle routes, open proxy, read-only mode
+
+The server listens on `PDS_PORT` on every interface, as the reference PDS
+does. The S3 blobstore is configured by `PDS_BLOBSTORE_S3_{BUCKET, REGION,
+ENDPOINT, FORCE_PATH_STYLE, ACCESS_KEY_ID, SECRET_ACCESS_KEY}` and no longer
+requests a public-read ACL on any object. `PDS_MAX_REPO_IMPORT_SIZE` bounds
+`importRepo` (default 100 MiB), and a server with
+`PDS_ACCEPTING_REPO_IMPORTS=false` refuses imports with the reference
+message. `PDS_EXTRA_HANDLE_DOMAINS` names handle domains served but not
+offered, and `GET /tls-check`, `GET /custom-well-known-atproto-did`, and
+`GET /custom-resolve-handle` answer as the production image's routes do.
+
+Any well-formed method without a local handler is proxied, and the default
+target follows the reference: `tools.ozone.*` to the moderation service,
+`com.atproto.moderation.createReport` to the report service, everything
+else to the app view; a method with no configured target answers
+`InvalidRequest`.
+
+`PDS_READ_ONLY=true` serves reads over a data directory another process
+writes: every user and service database is opened read-only without
+migrating, mutating requests are answered `503 ReadOnly` before any handler
+runs, the DID cache is never written, and neither deletions nor
+publication are resumed. The rsky control journals stay writable.
+
 ### Fixed — responses that differed from the reference PDS
 
 - `com.atproto.sync.*` reads of a missing, taken-down, or deactivated

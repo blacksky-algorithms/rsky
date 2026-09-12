@@ -214,11 +214,8 @@ impl Maintenance {
                 None,
             )),
         };
-        let aws_sdk_config = aws_config::from_env()
-            .endpoint_url(std::env::var("AWS_ENDPOINT").unwrap_or("localhost".to_owned()))
-            .load()
-            .await;
-        let blobstores = BlobstoreFactory::new(cfg.blobstore.clone(), aws_sdk_config)
+        let blobstores = BlobstoreFactory::from_config(cfg.blobstore.clone())
+            .await
             .with_attempts(
                 AttemptJournal::open(
                     &cfg.service_db.blob_attempts_db_location,

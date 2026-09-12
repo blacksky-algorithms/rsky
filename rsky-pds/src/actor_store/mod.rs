@@ -76,6 +76,11 @@ impl fmt::Display for FormatCommitError {
 
 impl std::error::Error for FormatCommitError {}
 
+/// This process serves reads only; nothing may be written.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("ReadOnly: this server is serving reads only")]
+pub struct ReadOnlyMode;
+
 /// The reference PDS's pre-publication size gates, applied before a commit
 /// is formatted or persisted.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -291,6 +296,8 @@ pub struct ActorStore {
     publish_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Cross-process locks, when a directory for them is configured.
     lock_dir: Option<LockDir>,
+    /// Every store opens read-only and no write is admitted.
+    read_only: bool,
     inflight: Arc<Mutex<HashMap<String, usize>>>,
     /// DIDs whose deletion is in progress; no write is admitted for them.
     tombstones: crate::lifecycle::Tombstones,
@@ -364,8 +371,18 @@ impl ActorStore {
             locks: Mutex::new(HashMap::new()),
             publish_locks: Mutex::new(HashMap::new()),
             lock_dir: None,
+            read_only: false,
             inflight: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn with_read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     pub fn with_coexistence(mut self, coexistence: bool) -> Self {
@@ -493,6 +510,9 @@ impl ActorStore {
     }
 
     async fn open_db(&self, did: &str, mode: OpenMode) -> Result<ActorDb> {
+        if mode == OpenMode::Write && self.read_only {
+            return Err(ReadOnlyMode.into());
+        }
         {
             let mut cache = self.cache.lock().expect("actor store cache poisoned");
             if let Some(entry) = cache.get_mut(did) {
@@ -510,6 +530,9 @@ impl ActorStore {
         // create, so an account created before a local migration existed
         // still receives it before its first write needs the new table.
         let db = match mode {
+            OpenMode::Read if self.read_only => {
+                crate::db::sqlite::Db::open_read_only(&location.db_location)?
+            }
             OpenMode::Read => get_db(&location.db_location)?,
             OpenMode::Write => get_migrated_db(&location.db_location).await?,
         };
@@ -604,6 +627,9 @@ impl ActorStore {
     }
 
     pub async fn create(&self, did: &str, keypair: &Keypair) -> Result<()> {
+        if self.read_only {
+            return Err(ReadOnlyMode.into());
+        }
         crate::lifecycle::assert_not_deleting(&self.tombstones, did)?;
         self.admission.admit_mutation(did)?;
         let location = self.get_location(did)?;

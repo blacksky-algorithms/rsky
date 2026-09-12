@@ -1239,3 +1239,49 @@ async fn commits_rise_above_the_revision_floor() {
         Some(recovery.commit_data.rev.as_str())
     );
 }
+
+#[tokio::test]
+async fn read_only_store_serves_reads_and_refuses_every_write() {
+    let (dir, writer) = test_store(10).await;
+    writer.create(TEST_DID, &test_keypair()).await.unwrap();
+    // a read-only process starts over the directory another one wrote
+    let cfg = ActorStoreConfig {
+        directory: dir.path().join("actors").to_string_lossy().to_string(),
+        cache_size: 10,
+    };
+    let lifecycle = LifecycleStore::open(dir.path().join("rsky/lifecycle.sqlite"))
+        .await
+        .unwrap();
+    let store = ActorStore::new(&cfg, BackgroundQueue::default(), lifecycle).with_read_only(true);
+    assert!(store.is_read_only());
+    let refused = store
+        .create("did:plc:someoneelse", &test_keypair())
+        .await
+        .unwrap_err();
+    assert!(
+        refused.downcast_ref::<ReadOnlyMode>().is_some(),
+        "{refused}"
+    );
+    let refused = store.open_db(TEST_DID, OpenMode::Write).await.unwrap_err();
+    assert!(
+        refused.downcast_ref::<ReadOnlyMode>().is_some(),
+        "{refused}"
+    );
+    let db = store.open_db(TEST_DID, OpenMode::Read).await.unwrap();
+    let tables = db
+        .run(|conn| {
+            let mut stmt = conn.prepare("SELECT count(*) FROM sqlite_master")?;
+            Ok(stmt.query_row([], |row| row.get::<_, i64>(0))?)
+        })
+        .await
+        .unwrap();
+    assert!(tables > 0);
+    let refused = db
+        .run(|conn| {
+            conn.execute("CREATE TABLE never (id INTEGER)", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("readonly"), "{refused}");
+}

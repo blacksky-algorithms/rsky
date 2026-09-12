@@ -580,26 +580,23 @@ lazy_static! {
 
 }
 
+/// The service a method reaches without an `atproto-proxy` header, as the
+/// reference PDS decides it: every `tools.ozone.*` method goes to the
+/// moderation service, reports to the report service, everything else to
+/// the app view.
 pub async fn default_service(req: &ProxyRequest<'_>, nsid: &str) -> Option<ServiceConfig> {
-    let cfg = req.cfg;
-    match Ids::from_str(nsid) {
-        Ok(Ids::ToolsOzoneTeamAddMember) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneTeamDeleteMember) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneTeamUpdateMember) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneTeamListMembers) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneCommunicationCreateTemplate) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneCommunicationDeleteTemplate) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneCommunicationUpdateTemplate) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneCommunicationListTemplates) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneModerationEmitEvent) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneModerationGetEvent) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneModerationGetRecord) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneModerationGetRepo) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneModerationQueryEvents) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneModerationQueryStatuses) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneModerationSearchRepos) => cfg.mod_service.clone(),
-        Ok(Ids::ComAtprotoModerationCreateReport) => cfg.report_service.clone(),
-        _ => cfg.bsky_app_view.clone(),
+    default_service_for(req.cfg, nsid)
+}
+
+pub fn default_service_for(cfg: &ServerConfig, nsid: &str) -> Option<ServiceConfig> {
+    if nsid.starts_with("tools.ozone.") {
+        cfg.mod_service.clone()
+    } else if Ids::from_str(nsid)
+        .is_ok_and(|id| matches!(id, Ids::ComAtprotoModerationCreateReport))
+    {
+        cfg.report_service.clone()
+    } else {
+        cfg.bsky_app_view.clone()
     }
 }
 
@@ -632,5 +629,47 @@ pub fn is_safe_url(url: Url) -> bool {
             }
             true
         }
+    }
+}
+
+#[cfg(test)]
+mod default_service_tests {
+    use super::default_service_for;
+    use crate::config::{env_to_cfg, ServiceConfig};
+
+    fn service(name: &str) -> Option<ServiceConfig> {
+        Some(ServiceConfig {
+            url: format!("https://{name}.example.com"),
+            did: format!("did:web:{name}.example.com"),
+            cdn_url_pattern: None,
+        })
+    }
+
+    #[test]
+    fn methods_reach_the_reference_default_service() {
+        let mut cfg = env_to_cfg();
+        cfg.mod_service = service("mod");
+        cfg.report_service = service("report");
+        cfg.bsky_app_view = service("appview");
+        let did_for = |nsid: &str| default_service_for(&cfg, nsid).unwrap().did;
+        assert_eq!(
+            did_for("tools.ozone.moderation.queryStatuses"),
+            "did:web:mod.example.com"
+        );
+        assert_eq!(
+            did_for("tools.ozone.some.futureMethod"),
+            "did:web:mod.example.com"
+        );
+        assert_eq!(
+            did_for("com.atproto.moderation.createReport"),
+            "did:web:report.example.com"
+        );
+        assert_eq!(
+            did_for("app.bsky.feed.getTimeline"),
+            "did:web:appview.example.com"
+        );
+        assert_eq!(did_for("xyz.unknown.method"), "did:web:appview.example.com");
+        cfg.bsky_app_view = None;
+        assert!(default_service_for(&cfg, "app.bsky.feed.getTimeline").is_none());
     }
 }

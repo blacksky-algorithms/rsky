@@ -22,16 +22,28 @@ impl<'a> FromParam<'a> for Nsid {
     type Error = &'a str;
 
     fn from_param(param: &'a str) -> Result<Self, Self::Error> {
-        // This is how we make sure we allowlist lexicons and what gets proxied
-        if param.starts_with("app.bsky.")
-            || param.starts_with("chat.bsky")
-            || param.starts_with("community.blacksky.")
-        {
+        // any well-formed method name reaches the proxy, as on the reference
+        // PDS; which service answers is decided from the header or the
+        // method, not from an allowlist here
+        if is_nsid(param) {
             Ok(Nsid(param.to_string()))
         } else {
             Err(param)
         }
     }
+}
+
+/// A namespaced identifier: at least three dot-separated segments of
+/// letters, digits, and hyphens.
+pub fn is_nsid(value: &str) -> bool {
+    let segments: Vec<&str> = value.split('.').collect();
+    segments.len() >= 3
+        && segments.iter().all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
 }
 
 /// Privileged methods (e.g. chat.bsky.*) must not be reachable with
@@ -189,6 +201,8 @@ pub enum ApiError {
     UpstreamResponse(u16, String, String),
     /// This server does not admit writes for the actor right now.
     NotAdmitted(String),
+    /// This server serves reads only.
+    ReadOnly,
 }
 
 #[derive(Serialize)]
@@ -272,6 +286,12 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 res.set_header(Header::new("Retry-After", "1"));
                 Ok(res)
             }
+            ApiError::ReadOnly => json_error(
+                503,
+                "ReadOnly",
+                "this server is serving reads only".to_string(),
+                __req,
+            ),
             ApiError::InsufficientScope(message) => {
                 let body = Json(ErrorBody {
                     error: "InsufficientScope".to_string(),
@@ -575,6 +595,12 @@ impl From<Error> for ApiError {
         if let Some(refused) = value.downcast_ref::<crate::admission::NotAdmitted>() {
             return ApiError::NotAdmitted(refused.to_string());
         }
+        if value
+            .downcast_ref::<crate::actor_store::ReadOnlyMode>()
+            .is_some()
+        {
+            return ApiError::ReadOnly;
+        }
         if let Some(limit) = value.downcast_ref::<crate::actor_store::WriteLimitError>() {
             return ApiError::InvalidRequest(limit.to_string());
         }
@@ -615,6 +641,35 @@ mod tests {
         }
         let other: ApiError = anyhow::anyhow!("disk on fire").into();
         assert!(matches!(other, ApiError::RuntimeError));
+        let read_only: ApiError = anyhow::Error::from(crate::actor_store::ReadOnlyMode).into();
+        assert!(matches!(read_only, ApiError::ReadOnly));
+    }
+
+    #[test]
+    fn any_well_formed_method_reaches_the_proxy() {
+        use super::{is_nsid, Nsid};
+        use rocket::request::FromParam;
+        for method in [
+            "app.bsky.feed.getTimeline",
+            "chat.bsky.convo.listConvos",
+            "tools.ozone.moderation.queryStatuses",
+            "com.atproto.moderation.createReport",
+            "community.blacksky.pds.getConvergence",
+            "xyz.some-vendor.thing",
+        ] {
+            assert!(is_nsid(method), "{method}");
+            assert_eq!(Nsid::from_param(method).unwrap().0, method);
+        }
+        for junk in [
+            "",
+            "app.bsky",
+            "app..bsky",
+            "a.b.c/d",
+            "app.bsky.feed.get timeline",
+        ] {
+            assert!(!is_nsid(junk), "{junk:?}");
+            assert!(Nsid::from_param(junk).is_err(), "{junk:?}");
+        }
     }
 }
 

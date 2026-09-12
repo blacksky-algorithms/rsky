@@ -18,6 +18,7 @@ pub mod config;
 pub mod context;
 pub mod convergence;
 pub mod crawlers;
+pub mod custom_routes;
 pub mod db;
 pub mod did_cache;
 pub mod drain;
@@ -163,6 +164,47 @@ async fn health_live() -> &'static str {
     "ok"
 }
 
+/// Present only while the server serves reads only; a mutating request
+/// that reaches it is refused before any handler runs.
+pub struct ReadOnlyGate;
+
+#[rocket::async_trait]
+impl<'r> rocket::request::FromRequest<'r> for ReadOnlyGate {
+    type Error = ();
+
+    async fn from_request(req: &'r Request<'_>) -> rocket::request::Outcome<Self, Self::Error> {
+        let read_only = req
+            .rocket()
+            .state::<config::ServerConfig>()
+            .is_some_and(|cfg| cfg.service.read_only);
+        if read_only {
+            rocket::request::Outcome::Success(ReadOnlyGate)
+        } else {
+            rocket::request::Outcome::Forward(Status::NotFound)
+        }
+    }
+}
+
+#[rocket::post("/<_..>")]
+async fn read_only_post(_gate: ReadOnlyGate) -> ApiError {
+    ApiError::ReadOnly
+}
+
+#[rocket::put("/<_..>")]
+async fn read_only_put(_gate: ReadOnlyGate) -> ApiError {
+    ApiError::ReadOnly
+}
+
+#[rocket::delete("/<_..>")]
+async fn read_only_delete(_gate: ReadOnlyGate) -> ApiError {
+    ApiError::ReadOnly
+}
+
+#[rocket::patch("/<_..>")]
+async fn read_only_patch(_gate: ReadOnlyGate) -> ApiError {
+    ApiError::ReadOnly
+}
+
 /// What an actor still owes this process; the router and the hand-back
 /// tooling read it before moving the actor to another writer.
 #[tracing::instrument(skip_all)]
@@ -223,9 +265,12 @@ pub struct RocketConfig {
 pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
     dotenv().ok();
 
-    let figment = rocket::Config::figment()
-        .merge(("limits", Limits::default().limit("file", 100.mebibytes())));
     let mut cfg = env_to_cfg();
+    // the reference PDS listens on PDS_PORT on every interface
+    let figment = rocket::Config::figment()
+        .merge(("port", cfg.service.port as u16))
+        .merge(("address", "0.0.0.0"))
+        .merge(("limits", Limits::default().limit("file", 100.mebibytes())));
     if let Some(rocket_cfg) = rocket_cfg {
         if let Some(service_db) = rocket_cfg.service_db {
             cfg.service_db = service_db;
@@ -235,15 +280,32 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         }
     }
 
-    let account_db = account_manager::db::get_migrated_db(&cfg.service_db.account_db_location)
-        .await
-        .expect("Failed to open account database");
-    let sequencer_db = sequencer::db::get_migrated_db(&cfg.service_db.sequencer_db_location)
-        .await
-        .expect("Failed to open sequencer database");
-    let did_cache_db = did_cache::get_migrated_db(&cfg.service_db.did_cache_db_location)
-        .await
-        .expect("Failed to open did cache database");
+    let read_only = cfg.service.read_only;
+    // read-only: every user and service database is opened so that nothing
+    // can change it, and no migration runs; the control journals below
+    // stay writable for the watermarks reads record
+    let (account_db, sequencer_db, did_cache_db) = if read_only {
+        (
+            db::sqlite::Db::open_read_only(&cfg.service_db.account_db_location)
+                .expect("Failed to open account database"),
+            db::sqlite::Db::open_read_only(&cfg.service_db.sequencer_db_location)
+                .expect("Failed to open sequencer database"),
+            db::sqlite::Db::open_read_only(&cfg.service_db.did_cache_db_location)
+                .expect("Failed to open did cache database"),
+        )
+    } else {
+        (
+            account_manager::db::get_migrated_db(&cfg.service_db.account_db_location)
+                .await
+                .expect("Failed to open account database"),
+            sequencer::db::get_migrated_db(&cfg.service_db.sequencer_db_location)
+                .await
+                .expect("Failed to open sequencer database"),
+            did_cache::get_migrated_db(&cfg.service_db.did_cache_db_location)
+                .await
+                .expect("Failed to open did cache database"),
+        )
+    };
     let lifecycle = lifecycle::LifecycleStore::open(&cfg.service_db.lifecycle_db_location)
         .await
         .expect("Failed to open lifecycle database");
@@ -268,18 +330,15 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
     let mut background_sequencer = sequencer.sequencer.write().await.clone();
     tokio::spawn(async move { background_sequencer.start().await });
 
-    let aws_sdk_config = aws_config::from_env()
-        .endpoint_url(env::var("AWS_ENDPOINT").unwrap_or("localhost".to_owned()))
-        .load()
-        .await;
     let blob_attempts = blob_attempts::AttemptJournal::open(
         &cfg.service_db.blob_attempts_db_location,
         cfg.service.coexistence,
     )
     .await
     .expect("Failed to open the blob attempt journal");
-    let blobstore_factory =
-        BlobstoreFactory::new(cfg.blobstore.clone(), aws_sdk_config).with_attempts(blob_attempts);
+    let blobstore_factory = BlobstoreFactory::from_config(cfg.blobstore.clone())
+        .await
+        .with_attempts(blob_attempts);
 
     let id_resolver = SharedIdResolver {
         id_resolver: RwLock::new(IdResolver::new(IdentityResolverOpts {
@@ -287,12 +346,15 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 cfg.identity.resolver_timeout,
             )),
             plc_url: Some(cfg.identity.plc_url.clone()),
-            did_cache: Some(Arc::new(DidSqliteCache::new(
-                did_cache_db,
-                background_queue.clone(),
-                std::time::Duration::from_millis(cfg.identity.cache_state_ttl),
-                std::time::Duration::from_millis(cfg.identity.cache_max_ttl),
-            ))),
+            did_cache: Some(Arc::new(
+                DidSqliteCache::new(
+                    did_cache_db,
+                    background_queue.clone(),
+                    std::time::Duration::from_millis(cfg.identity.cache_state_ttl),
+                    std::time::Duration::from_millis(cfg.identity.cache_max_ttl),
+                )
+                .with_read_only(read_only),
+            )),
             backup_nameservers: cfg.identity.handle_backup_name_servers.clone(),
         })),
     };
@@ -350,34 +412,53 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
     let actor_store = ActorStore::new(&cfg.actor_store, background_queue, lifecycle.clone())
         .with_coexistence(cfg.service.coexistence)
         .with_admission(admission.clone())
-        .with_lock_dir(lock_dir);
-    let resumed = lifecycle::resume_deletions(&lifecycle::DeletionContext {
-        lifecycle: &lifecycle,
-        account_manager: &account_manager,
-        sequencer: &sequencer,
-        actor_store: &actor_store,
-        blobstore: None,
-    })
-    .await
-    .expect("Failed to resume incomplete account deletions");
-    if !resumed.is_empty() {
-        tracing::warn!(
-            count = resumed.len(),
-            "resumed incomplete account deletions"
-        );
+        .with_lock_dir(lock_dir)
+        .with_read_only(read_only);
+    if !read_only {
+        let resumed = lifecycle::resume_deletions(&lifecycle::DeletionContext {
+            lifecycle: &lifecycle,
+            account_manager: &account_manager,
+            sequencer: &sequencer,
+            actor_store: &actor_store,
+            blobstore: None,
+        })
+        .await
+        .expect("Failed to resume incomplete account deletions");
+        if !resumed.is_empty() {
+            tracing::warn!(
+                count = resumed.len(),
+                "resumed incomplete account deletions"
+            );
+        }
+        let republished = publication::resume_pending_work(&actor_store, &sequencer, |did| {
+            blobstore_factory.blobstore(did.to_owned())
+        })
+        .await
+        .expect("Failed to resume publication");
+        if !republished.is_empty() {
+            tracing::warn!(count = republished.len(), "resumed publication");
+        }
     }
-    let republished = publication::resume_pending_work(&actor_store, &sequencer, |did| {
-        blobstore_factory.blobstore(did.to_owned())
+
+    // the gate must outrank every mounted mutating route; explicit ranks
+    // in the attribute cannot be negative, so they are set here
+    let read_only_gate: Vec<rocket::Route> = rocket::routes![
+        read_only_post,
+        read_only_put,
+        read_only_delete,
+        read_only_patch
+    ]
+    .into_iter()
+    .map(|mut route| {
+        route.rank = -100;
+        route
     })
-    .await
-    .expect("Failed to resume publication");
-    if !republished.is_empty() {
-        tracing::warn!(count = republished.len(), "resumed publication");
-    }
+    .collect();
 
     let shield = Shield::default().enable(NoSniff::Enable);
 
     rocket::custom(figment)
+        .mount("/", read_only_gate)
         .mount(
             "/",
             routes![
@@ -386,6 +467,9 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 health,
                 health_live,
                 drain_status,
+                custom_routes::tls_check,
+                custom_routes::custom_well_known_did,
+                custom_routes::custom_resolve_handle,
                 com::atproto::admin::delete_account::delete_account,
                 com::atproto::admin::disable_account_invites::disable_account_invites,
                 com::atproto::admin::disable_invite_codes::disable_invite_codes,

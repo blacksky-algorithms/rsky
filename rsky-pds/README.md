@@ -52,6 +52,8 @@ Mount a volume at `PDS_DATA_DIRECTORY` to persist data.
 | `PDS_CONTACT_EMAIL_ADDRESS` | Contact email in server metadata |
 | `PDS_PRIVACY_POLICY_URL`, `PDS_TERMS_OF_SERVICE_URL` | Policy links |
 | `PDS_ACCEPTING_REPO_IMPORTS` | Allow `importRepo` (default true) |
+| `PDS_MAX_REPO_IMPORT_SIZE` | Largest `importRepo` body in bytes (default 100 MiB) |
+| `PDS_READ_ONLY` | Serve reads only (see below) |
 | `PDS_BLOB_UPLOAD_LIMIT` | Max blob upload size in bytes (default 5MB) |
 
 ### Storage
@@ -67,6 +69,10 @@ Mount a volume at `PDS_DATA_DIRECTORY` to persist data.
 | `PDS_BLOBSTORE_DISK_LOCATION` | Disk blobstore directory |
 | `PDS_BLOBSTORE_DISK_TMP_LOCATION` | Temp dir for blob uploads |
 | `PDS_BLOBSTORE_S3_BUCKET` | S3 bucket for blobs (mutually exclusive with disk) |
+| `PDS_BLOBSTORE_S3_REGION` | Bucket region |
+| `PDS_BLOBSTORE_S3_ENDPOINT` | S3-compatible endpoint URL (`AWS_ENDPOINT` is honoured as well) |
+| `PDS_BLOBSTORE_S3_FORCE_PATH_STYLE` | Address the bucket in the path rather than the host |
+| `PDS_BLOBSTORE_S3_ACCESS_KEY_ID`, `PDS_BLOBSTORE_S3_SECRET_ACCESS_KEY` | Static credentials; both or neither, otherwise the SDK's default chain |
 
 ### Keys and secrets
 
@@ -92,6 +98,7 @@ Mount a volume at `PDS_DATA_DIRECTORY` to persist data.
 |---|---|
 | `PDS_DID_PLC_URL` | PLC directory URL (default `https://plc.directory`) |
 | `PDS_SERVICE_HANDLE_DOMAINS` | Comma-separated handle suffixes (default `.{hostname}`) |
+| `PDS_EXTRA_HANDLE_DOMAINS` | Further handle suffixes served here but not offered at signup |
 | `PDS_HANDLE_BACKUP_NAMESERVERS` | Backup nameservers for handle resolution |
 | `PDS_ID_RESOLVER_TIMEOUT` | DID/handle resolution timeout (ms) |
 | `PDS_DID_CACHE_STALE_TTL`, `PDS_DID_CACHE_MAX_TTL` | DID cache TTLs (ms) |
@@ -187,6 +194,33 @@ and `fullyDrained` derived from them. `rsky-pds --drain-did <did>
 [--timeout-secs <n>]` waits for the account's in-flight writes, delivers its
 intents and runs its blob work under the account's exclusive lock, prints
 the same status, and exits 0 only when the account is fully drained.
+
+### Read-only mode
+
+`PDS_READ_ONLY=true` starts a process that only serves reads over a data
+directory another process writes. `account.sqlite`, `sequencer.sqlite`,
+`did_cache.sqlite`, and every actor store are opened read-only and no
+migration runs, so a directory the other implementation created is served
+as-is. Every `POST`, `PUT`, `PATCH`, and `DELETE` is answered `503
+ReadOnly` before any handler runs; the resolvers cache nothing; deletions
+and publication are not resumed. The rsky control journals
+(`PDS_LIFECYCLE_DB`, `PDS_REPAIR_DB`, `PDS_BLOB_ATTEMPTS_DB`) stay writable
+for the watermarks that reads record.
+
+### Handle routes
+
+Three routes the production edge rewrites to are served beside the
+standard ones: `GET /tls-check?domain=` answers `{"success":true}` for the
+host itself and for any handle on a served domain (`PDS_SERVICE_HANDLE_DOMAINS`
+and `PDS_EXTRA_HANDLE_DOMAINS`), `GET /custom-well-known-atproto-did?handle=`
+answers the DID as plain text (falling back to the request host), and
+`GET /custom-resolve-handle?handle=` answers `{"did":...}` for local
+accounts and resolves foreign handles through the network.
+
+Requests for any well-formed method without a local handler are proxied:
+`tools.ozone.*` to `PDS_MOD_SERVICE_URL`, `com.atproto.moderation.createReport`
+to `PDS_REPORT_SERVICE_URL`, and everything else to `PDS_BSKY_APP_VIEW_URL`,
+unless an `atproto-proxy` header names the service.
 
 ## Upgrading to 1.0
 

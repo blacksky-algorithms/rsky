@@ -99,6 +99,19 @@ impl Db {
         })
     }
 
+    /// Opens an existing database so that no statement can change it; the
+    /// file's journal mode is left as it is.
+    pub fn open_read_only(location: impl AsRef<Path>) -> Result<Self> {
+        let conn = Connection::open_with_flags(
+            location,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(Duration::from_millis(RETRY_TIMEOUT_MS))?;
+        Ok(Db {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
     fn setup_conn(conn: &Connection, synchronous: Synchronous) -> Result<()> {
         let journal_mode: String =
             conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
@@ -209,6 +222,37 @@ mod tests {
         );
         let normal = Db::open(dir.path().join("normal.sqlite")).unwrap();
         assert_eq!(normal.synchronous().unwrap(), Synchronous::Normal);
+    }
+
+    #[tokio::test]
+    async fn read_only_connections_refuse_every_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let location = dir.path().join("ro.sqlite");
+        Db::open(&location)
+            .unwrap()
+            .run(|conn| {
+                conn.execute_batch(
+                    "CREATE TABLE t (val TEXT NOT NULL); INSERT INTO t VALUES ('a')",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let db = Db::open_read_only(&location).unwrap();
+        let val: String = db
+            .run(|conn| Ok(conn.query_row("SELECT val FROM t", [], |row| row.get(0))?))
+            .await
+            .unwrap();
+        assert_eq!(val, "a");
+        let err = db
+            .run(|conn| {
+                conn.execute("INSERT INTO t VALUES ('b')", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("readonly"), "{err}");
+        assert!(Db::open_read_only(dir.path().join("missing.sqlite")).is_err());
     }
 
     #[tokio::test]
