@@ -130,6 +130,19 @@ it. The journal lives outside every actor store and must never be restored
 from a backup: an attempt with no outcome is the evidence that an object
 may still appear.
 
+### Changed — firehose subscriptions are fed by one broadcast
+
+The sequencer's poll loop fans each batch out over a `tokio` broadcast
+channel sized by `PDS_MAX_SUBSCRIPTION_BUFFER`, and every clone shares the
+poll loop's head, replacing the process-wide event emitter and the runtime
+each subscription used to build per batch. A subscription subscribes to the
+broadcast before it backfills from the database and delivers a live event
+only above the last sequence the backfill yielded, so the switch from
+backfill to live delivery has no gap and no repeat, a backfill of any
+length completes, and invalidated rows are never delivered. A subscriber
+that falls further behind than the buffer receives a `ConsumerTooSlow`
+error frame instead of a gap.
+
 ### Added — the convergence report
 
 `community.blacksky.pds.getConvergence` (admin auth) and `rsky-pds --converge

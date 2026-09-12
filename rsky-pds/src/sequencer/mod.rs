@@ -7,17 +7,20 @@ use crate::sequencer::events::{
     format_seq_account_evt, format_seq_commit, format_seq_handle_update, format_seq_identity_evt,
     SeqEvt, TypedAccountEvt, TypedCommitEvt, TypedIdentityEvt, TypedSyncEvt,
 };
-use crate::EVENT_EMITTER;
 use anyhow::Result;
 use events::format_seq_sync_evt;
 use rsky_common::cbor_to_struct;
 use rsky_repo::types::CommitDataWithOps;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, OptionalExtension, Row};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Notify;
+use tokio::sync::{broadcast, Notify};
+
+/// How many polled batches a subscriber may fall behind before it is
+/// disconnected as too slow.
+pub const DEFAULT_BROADCAST_CAPACITY: usize = 500;
 
 pub struct RequestSeqRangeOpts {
     pub earliest_seq: Option<i64>,
@@ -30,9 +33,13 @@ pub struct RequestSeqRangeOpts {
 pub struct Sequencer {
     pub db: Db,
     pub crawlers: Crawlers,
-    pub last_seen: Option<i64>,
+    /// The highest sequence number the poll loop has emitted, shared by
+    /// every clone so a subscriber knows where live delivery begins.
+    last_seen: Arc<AtomicI64>,
     destroyed: Arc<AtomicBool>,
     notify: Arc<Notify>,
+    /// Every batch the poll loop emits, fanned out to every subscriber.
+    events: broadcast::Sender<Vec<SeqEvt>>,
 }
 
 const SELECT_REPO_SEQ: &str = "\
@@ -51,12 +58,23 @@ fn repo_seq_from_row(row: &Row) -> Result<models::RepoSeq, rusqlite::Error> {
 
 impl Sequencer {
     pub fn new(db: Db, crawlers: Crawlers, last_seen: Option<i64>) -> Self {
+        Self::with_broadcast_capacity(db, crawlers, last_seen, DEFAULT_BROADCAST_CAPACITY)
+    }
+
+    pub fn with_broadcast_capacity(
+        db: Db,
+        crawlers: Crawlers,
+        last_seen: Option<i64>,
+        capacity: usize,
+    ) -> Self {
+        let (events, _) = broadcast::channel(capacity.max(1));
         Sequencer {
             db,
             crawlers,
-            last_seen: Some(last_seen.unwrap_or(0)),
+            last_seen: Arc::new(AtomicI64::new(last_seen.unwrap_or(0))),
             destroyed: Arc::new(AtomicBool::new(false)),
             notify: Arc::new(Notify::new()),
+            events,
         }
     }
 
@@ -64,11 +82,21 @@ impl Sequencer {
         self.destroyed.load(Ordering::SeqCst)
     }
 
+    /// The highest sequence number the poll loop has emitted so far.
+    pub fn last_seen(&self) -> i64 {
+        self.last_seen.load(Ordering::SeqCst)
+    }
+
+    /// A receiver of every batch the poll loop emits from now on.
+    pub fn subscribe(&self) -> broadcast::Receiver<Vec<SeqEvt>> {
+        self.events.subscribe()
+    }
+
     /// Polls the sequencer db for newly sequenced events and emits them.
     /// Sleeps on a notification handle between polls rather than busy-polling.
     pub async fn start(&mut self) -> Result<()> {
         let curr = self.curr().await?;
-        self.last_seen = Some(curr.unwrap_or(0));
+        self.last_seen.store(curr.unwrap_or(0), Ordering::SeqCst);
         while !self.is_destroyed() {
             // arm the notification before polling so sequencing that lands
             // mid-poll is never missed
@@ -77,7 +105,7 @@ impl Sequencer {
             notified.as_mut().enable();
             match self
                 .request_seq_range(RequestSeqRangeOpts {
-                    earliest_seq: self.last_seen,
+                    earliest_seq: Some(self.last_seen()),
                     latest_seq: None,
                     earliest_time: None,
                     limit: Some(1000),
@@ -88,18 +116,17 @@ impl Sequencer {
                     tracing::error!(
                         "sequencer failed to poll db, err: {}, last_seen: {:?}",
                         err.to_string(),
-                        self.last_seen
+                        self.last_seen()
                     );
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
                 Ok(evts) if !evts.is_empty() => {
-                    self.last_seen = evts.last().map(|evt| evt.seq()).or(self.last_seen);
-                    EVENT_EMITTER.write().await.emit(
-                        "events",
-                        evts.iter()
-                            .map(|evt| serde_json::to_string(evt).unwrap())
-                            .collect::<Vec<String>>(),
-                    );
+                    if let Some(last) = evts.last() {
+                        self.last_seen.store(last.seq(), Ordering::SeqCst);
+                    }
+                    // no subscriber is not an error; the batch is simply
+                    // not wanted by anyone right now
+                    let _ = self.events.send(evts);
                 }
                 Ok(_) => {
                     tokio::select! {
@@ -115,7 +142,6 @@ impl Sequencer {
     pub async fn destroy(&mut self) {
         self.destroyed.store(true, Ordering::SeqCst);
         self.notify.notify_waiters();
-        EVENT_EMITTER.write().await.emit("close", ());
     }
 
     pub async fn curr(&self) -> Result<Option<i64>> {

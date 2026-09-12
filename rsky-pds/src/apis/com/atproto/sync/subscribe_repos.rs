@@ -3,7 +3,7 @@ use crate::sequencer::events::{
     AccountEvt, CommitEvt, IdentityEvt, SeqEvt, SyncEvt, TypedAccountEvt, TypedCommitEvt,
     TypedIdentityEvt, TypedSyncEvt,
 };
-use crate::sequencer::outbox::{Outbox, OutboxOpts};
+use crate::sequencer::outbox::{Outbox, OutboxError};
 use crate::xrpc_server::stream::frames::{ErrorFrame, Frame, MessageFrame, MessageFrameOpts};
 use crate::xrpc_server::stream::types::{ErrorFrameBody, InfoFrameBody};
 use crate::SharedSequencer;
@@ -46,12 +46,7 @@ pub async fn subscribe_repos<'a>(
 ) -> ws::Stream!['a] {
     ws::Stream! { ws =>
         let sequencer_lock = sequencer.sequencer.read().await.clone();
-        let mut outbox = Outbox::new(
-            sequencer_lock.clone(),
-            Some(OutboxOpts {
-                max_buffer_size: cfg.subscription.max_buffer as usize,
-            })
-        );
+        let outbox = Outbox::new(sequencer_lock.clone());
 
         tracing::debug!("@LOG DEBUG: request to com.atproto.sync.subscribeRepos; Cursor={cursor:?}");
         let backfill_time = get_backfill_limit(cfg.subscription.repo_backfill_limit_ms);
@@ -137,8 +132,12 @@ pub async fn subscribe_repos<'a>(
                     let evt = match evt {
                         Some(Ok(evt)) => evt,
                         Some(Err(err)) => {
+                            let name = match err.downcast_ref::<OutboxError>() {
+                                Some(OutboxError::ConsumerTooSlow(_)) => "ConsumerTooSlow",
+                                _ => "EventStreamError",
+                            };
                             let error_frame = ErrorFrame::new(ErrorFrameBody {
-                                error: "EventStreamError".to_string(),
+                                error: name.to_string(),
                                 message: Some(err.to_string()),
                             });
                             yield Message::Binary(error_frame.to_bytes().expect("couldn't translate error to binary."));

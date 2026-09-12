@@ -6,8 +6,6 @@ extern crate serde;
 use crate::read_after_write::viewer::{LocalViewer, LocalViewerCreator, LocalViewerCreatorParams};
 use crate::sequencer::Sequencer;
 use atrium_xrpc_client::reqwest::ReqwestClient;
-use event_emitter_rs::EventEmitter;
-use lazy_static::lazy_static;
 pub mod account_manager;
 pub mod actor_store;
 pub mod admission;
@@ -79,12 +77,6 @@ pub struct SharedLocalViewer {
 
 pub struct SharedATPAgent {
     pub app_view_agent: Option<RwLock<AtpServiceClient<ReqwestClient>>>,
-}
-
-// Use lazy_static! because the size of EventEmitter is not known at compile time
-lazy_static! {
-    // Export the emitter with `pub` keyword
-    pub static ref EVENT_EMITTER: RwLock<EventEmitter> = RwLock::new(EventEmitter::new());
 }
 
 extern crate rocket;
@@ -266,10 +258,11 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
     let account_manager = AccountManager::new(account_db);
 
     let sequencer = SharedSequencer {
-        sequencer: RwLock::new(Sequencer::new(
+        sequencer: RwLock::new(Sequencer::with_broadcast_capacity(
             sequencer_db,
             Crawlers::new(cfg.service.hostname.clone(), cfg.crawlers.clone()),
             None,
+            cfg.subscription.max_buffer as usize,
         )),
     };
     let mut background_sequencer = sequencer.sequencer.write().await.clone();

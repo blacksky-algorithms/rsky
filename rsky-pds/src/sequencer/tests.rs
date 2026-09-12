@@ -1,13 +1,16 @@
 use super::db::get_migrated_db;
+use super::outbox::{Outbox, OutboxError};
 use super::*;
 use crate::account_manager::helpers::account::AccountStatus;
 use crate::actor_store::repo::types::SyncEvtData;
 use crate::sequencer::events::sync_evt_data_from_commit;
+use futures::{pin_mut, StreamExt};
 use ipld_core::ipld::Ipld;
 use lexicon_cid::Cid;
 use rsky_repo::block_map::BlockMap;
 use rsky_repo::cid_set::CidSet;
 use rsky_repo::types::{CommitAction, CommitData, CommitOp};
+use rusqlite::params;
 use std::str::FromStr;
 use std::time::Duration as StdDuration;
 
@@ -245,20 +248,9 @@ async fn deletes_events_for_user() {
 }
 
 #[tokio::test]
-async fn start_emits_sequenced_events_until_destroyed() {
+async fn start_broadcasts_sequenced_events_until_destroyed() {
     let (_dir, mut sequencer) = test_sequencer().await;
-    let received: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(vec![]));
-    {
-        let received = received.clone();
-        EVENT_EMITTER
-            .write()
-            .await
-            .on("events", move |evts: Vec<String>| {
-                received.lock().unwrap().extend(evts);
-            });
-    }
-
+    let mut live = sequencer.subscribe();
     let mut background = sequencer.clone();
     let handle = tokio::spawn(async move { background.start().await });
     // let the poll loop take its initial cursor before sequencing
@@ -268,21 +260,13 @@ async fn start_emits_sequenced_events_until_destroyed() {
         .sequence_identity_evt("did:plc:start-loop".to_owned(), None)
         .await
         .unwrap();
-
-    let mut seen = false;
-    for _ in 0..100 {
-        if received
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|evt| evt.contains("did:plc:start-loop"))
-        {
-            seen = true;
-            break;
-        }
-        tokio::time::sleep(StdDuration::from_millis(50)).await;
-    }
-    assert!(seen, "sequenced event was not emitted by the poll loop");
+    let batch = tokio::time::timeout(StdDuration::from_secs(5), live.recv())
+        .await
+        .expect("the poll loop broadcasts the batch")
+        .unwrap();
+    assert_eq!(batch.len(), 1);
+    assert!(matches!(batch[0], SeqEvt::TypedIdentityEvt(_)));
+    assert_eq!(sequencer.last_seen(), batch[0].seq());
 
     assert!(!sequencer.is_destroyed());
     sequencer.destroy().await;
@@ -292,6 +276,135 @@ async fn start_emits_sequenced_events_until_destroyed() {
         .expect("sequencer poll loop did not stop after destroy")
         .unwrap();
     assert!(res.is_ok());
+}
+
+/// Inserts `count` identity rows for `did` directly, as one transaction.
+async fn seed_rows(sequencer: &Sequencer, did: &str, count: usize) {
+    let did = did.to_owned();
+    let event = rsky_common::struct_to_cbor(&crate::sequencer::events::IdentityEvt {
+        did: did.clone(),
+        handle: None,
+    })
+    .unwrap();
+    sequencer
+        .db
+        .tx(move |tx| {
+            let mut stmt = tx.prepare(
+                "INSERT INTO repo_seq (did, event, \"eventType\", \"sequencedAt\") \
+                 VALUES (?1, ?2, 'identity', ?3)",
+            )?;
+            for _ in 0..count {
+                stmt.execute(params![did, event, rsky_common::now()])?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// A subscriber with a cursor receives every row above it exactly once,
+/// across page boundaries and across the switch from backfill to live
+/// delivery, and never an invalidated row.
+#[tokio::test]
+async fn outbox_backfills_exactly_and_hands_over_to_live_delivery() {
+    let (_dir, sequencer) = test_sequencer().await;
+    seed_rows(&sequencer, "did:plc:backfill", 3000).await;
+    assert!(sequencer.invalidate(1500).await.unwrap());
+    assert!(!sequencer.invalidate(1500).await.unwrap());
+    let outbox = Outbox::new(sequencer.clone());
+
+    // the whole history from the start, minus the invalidated row
+    let stream = outbox.events(Some(0)).await;
+    pin_mut!(stream);
+    let mut seqs = Vec::new();
+    while seqs.len() < 2999 {
+        let evt = stream.next().await.unwrap().unwrap();
+        seqs.push(evt.seq());
+    }
+    assert_eq!(seqs.len(), 2999);
+    assert!(seqs.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(seqs.first(), Some(&1));
+    assert_eq!(seqs.last(), Some(&3000));
+    assert!(!seqs.contains(&1500));
+
+    // live rows arrive through the poll loop with no gap or repeat
+    let mut background = sequencer.clone();
+    let poller = tokio::spawn(async move { background.start().await });
+    tokio::time::sleep(StdDuration::from_millis(300)).await;
+    let mut writer = sequencer.clone();
+    for _ in 0..3 {
+        writer
+            .sequence_identity_evt("did:plc:live".to_owned(), None)
+            .await
+            .unwrap();
+    }
+    for expected in 3001..=3003 {
+        let evt = tokio::time::timeout(StdDuration::from_secs(5), stream.next())
+            .await
+            .expect("live event")
+            .unwrap()
+            .unwrap();
+        assert_eq!(evt.seq(), expected);
+    }
+
+    // a cursor in the middle starts right after it, and a subscriber with
+    // no cursor sees only what follows
+    let middle = outbox.events(Some(2998)).await;
+    pin_mut!(middle);
+    let first = middle.next().await.unwrap().unwrap();
+    assert_eq!(first.seq(), 2999);
+    let tail = outbox.events(None).await;
+    pin_mut!(tail);
+    writer
+        .sequence_identity_evt("did:plc:live".to_owned(), None)
+        .await
+        .unwrap();
+    let only = tokio::time::timeout(StdDuration::from_secs(5), tail.next())
+        .await
+        .expect("live event")
+        .unwrap()
+        .unwrap();
+    assert_eq!(only.seq(), 3004);
+
+    writer.destroy().await;
+    poller.await.unwrap().unwrap();
+}
+
+/// A subscriber that falls further behind the broadcast than its capacity
+/// is told so instead of being served a gap.
+#[tokio::test]
+async fn outbox_reports_a_consumer_that_fell_too_far_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = get_migrated_db(dir.path().join("sequencer.sqlite"))
+        .await
+        .unwrap();
+    let sequencer = Sequencer::with_broadcast_capacity(
+        db,
+        crate::crawlers::Crawlers::new("pds.test".to_owned(), vec![]),
+        None,
+        2,
+    );
+    let outbox = Outbox::new(sequencer.clone());
+    let stream = outbox.events(None).await;
+    pin_mut!(stream);
+    // three batches land while the subscriber has not polled once
+    for _ in 0..3 {
+        let _ = sequencer.events.send(vec![]);
+    }
+    let err = stream.next().await.unwrap().unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<OutboxError>(),
+        Some(&OutboxError::ConsumerTooSlow(1))
+    );
+    assert!(err.to_string().contains("ConsumerTooSlow"));
+    // the poll loop going away ends the subscription with its own error
+    assert_eq!(
+        OutboxError::from(tokio::sync::broadcast::error::RecvError::Closed),
+        OutboxError::SequencerStopped
+    );
+    assert!(OutboxError::SequencerStopped
+        .to_string()
+        .contains("stopped"));
 }
 
 #[tokio::test]
