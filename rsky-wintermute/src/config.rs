@@ -298,6 +298,19 @@ pub fn create_pg_pool(
     cfg.builder(deadpool_postgres::tokio_postgres::NoTls)
         .map_err(|e| WintermuteError::Other(format!("pool config invalid: {e}")))?
         .runtime(deadpool_postgres::Runtime::Tokio1)
+        .post_recycle(deadpool_postgres::Hook::async_fn(|client, _| {
+            Box::pin(async move {
+                client
+                    .batch_execute("SELECT pg_advisory_unlock_all()")
+                    .await
+                    .map_err(|e| {
+                        deadpool_postgres::HookError::message(format!(
+                            "advisory unlock failed: {e}"
+                        ))
+                    })?;
+                Ok(())
+            })
+        }))
         .post_create(deadpool_postgres::Hook::async_fn(|client, _| {
             Box::pin(async move {
                 client
@@ -309,6 +322,14 @@ pub fn create_pg_pool(
                     .map_err(|e| {
                         deadpool_postgres::HookError::message(format!(
                             "bulk staging DDL failed: {e}"
+                        ))
+                    })?;
+                client
+                    .batch_execute(crate::reconcile::SCHEMA_DDL)
+                    .await
+                    .map_err(|e| {
+                        deadpool_postgres::HookError::message(format!(
+                            "reconciliation schema DDL failed: {e}"
                         ))
                     })?;
                 Ok(())

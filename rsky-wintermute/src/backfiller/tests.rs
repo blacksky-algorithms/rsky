@@ -69,6 +69,7 @@ mod backfiller_tests {
             "did:plc:r7fdhqmw3h2cifeakw5hmvy6",
             &car_bytes,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -94,6 +95,7 @@ mod backfiller_tests {
             "did:plc:someotherdidentirely00000",
             &car_bytes,
             false,
+            None,
         )
         .await;
 
@@ -146,6 +148,7 @@ mod backfiller_tests {
                 record: Some(json!({"text": "test"})),
                 indexed_at: "2024-01-01T00:00:00Z".to_owned(),
                 rev: "test".to_owned(),
+                provenance: None,
             };
             storage.enqueue_firehose_backfill(&job).unwrap();
         }

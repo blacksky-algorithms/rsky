@@ -105,6 +105,8 @@ RUST_LOG=info \
 | `BACKFILLER_TIMEOUT_SECS` | `120` | Timeout for fetching repo CAR from PDS |
 | `INLINE_CONCURRENCY` | `100` | Concurrent inline indexing tasks for firehose events |
 | `DB_POOL_SIZE` | `20` | Connections per pool (4 pools: firehose, labels, indexer, backfiller) |
+| `RECONCILE_PDS_URL` | (none) | The PDS `reindex_did` reads frontiers and exports from, as a fixed address |
+| `RECONCILE_PDS_ADMIN_PASSWORD` | (none) | Admin password for the frontier read on that PDS |
 
 ## Utilities
 
@@ -125,6 +127,24 @@ Manually queue DIDs for backfill from various sources:
 # Show queue status
 ./target/release/queue_backfill status
 ```
+
+### reindex_did
+
+Reconciles one actor's downstream state against its repository under a
+fence, or verifies that a recovery commit was acknowledged:
+
+```bash
+DATABASE_URL=... RECONCILE_PDS_URL=https://pds.example RECONCILE_PDS_ADMIN_PASSWORD=... \
+  reindex_did --did did:plc:... --reconcile [--dry-run] [--reset-to-repo] [--break-glass]
+reindex_did --did did:plc:... --verify-recovery <commit cid>
+```
+
+The report is JSON. Exit code 1 means the run was refused and nothing
+changed: the PDS reported an incomplete history (`--break-glass` proceeds
+but records an obligation that never converges), the export did not match
+the frontier's current commit after three attempts, or the downstream
+state holds records newer than the repository (`--reset-to-repo` deletes
+or overwrites them). See Reconciliation under Operations.
 
 ## Queues
 
@@ -212,6 +232,33 @@ On SIGTERM or SIGINT, wintermute:
 2. Drains all in-flight work
 3. Saves cursor positions
 4. Exits cleanly
+
+### Reconciliation
+
+Every writer takes a shared per-actor advisory lock (`hashtext(did)`) and
+reads the actor's fence, boundary, and generation from the `wintermute`
+schema before it writes; `reindex_did` takes the exclusive lock, so a
+writer cannot check "no fence", pause, and commit after the fence is
+installed. Work for a fenced actor is deferred and retried; work at or
+below the persisted boundary is dropped, deletes included; work stamped
+with an older generation (or none, once the actor has one) is dropped and
+the actor's repository is fetched again under the current generation.
+Every job carries the generation captured before its data was obtained
+(relay sequence for firehose jobs; host and fetch time for backfill jobs).
+
+`wintermute.did_progress` records each actor's highest applied revision
+and the last commit applied, including commits that changed no record. A
+reconciliation fetches the export and a fresh, complete frontier from the
+PDS, persists the boundary (the greatest of the previous boundary, the
+frontier, the export's revision, and the PDS's exposed maximum) with a new
+generation before any change, then deletes phantoms, overwrites differing
+records, and inserts missing ones. When the boundary exceeds the export's
+revision the run ends in the recovery branch: the application fence is
+released so the PDS's recovery commit can be applied, and
+`--verify-recovery` checks that `did_progress.last_commit_cid` names it
+before the PDS mutation fence is released. Otherwise the fence is
+released at once. The `indexer_admission_total{outcome}` metric counts
+gate outcomes.
 
 ### Recovery
 

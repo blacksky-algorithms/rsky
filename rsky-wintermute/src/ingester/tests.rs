@@ -264,6 +264,7 @@ mod ingester_tests {
                 rev: "test-rev-123".to_owned(),
                 ops: vec![],
                 blocks: vec![10, 20, 30],
+                cid: None,
             }),
             identity: None,
             account: None,
@@ -387,6 +388,7 @@ mod ingester_tests {
                     rev: "rev1".to_owned(),
                     ops: vec![],
                     blocks: vec![],
+                    cid: None,
                 }),
                 identity: None,
                 account: None,
@@ -400,6 +402,7 @@ mod ingester_tests {
                     rev: "rev2".to_owned(),
                     ops: vec![],
                     blocks: vec![],
+                    cid: None,
                 }),
                 identity: None,
                 account: None,
@@ -413,6 +416,7 @@ mod ingester_tests {
                     rev: "rev3".to_owned(),
                     ops: vec![],
                     blocks: vec![],
+                    cid: None,
                 }),
                 identity: None,
                 account: None,
@@ -830,6 +834,8 @@ mod ingester_tests {
             time: "2024-01-01T00:00:00Z".to_owned(),
             kind: "commit".to_owned(),
             commit: Some(CommitData {
+                cid: None,
+
                 rev: "rev-abc".to_owned(),
                 ops: vec![
                     RepoOp {
@@ -868,8 +874,8 @@ mod ingester_tests {
             .await
             .unwrap();
 
-        // Should have 3 jobs (one for each operation)
-        assert_eq!(storage.firehose_live_len().unwrap(), 3);
+        // one job per operation, then the commit itself
+        assert_eq!(storage.firehose_live_len().unwrap(), 4);
 
         // Dequeue and verify jobs (order not guaranteed)
         let mut jobs = Vec::new();
@@ -878,7 +884,13 @@ mod ingester_tests {
             storage.remove_firehose_live(&key).unwrap();
         }
 
-        assert_eq!(jobs.len(), 3);
+        assert_eq!(jobs.len(), 4);
+        assert_eq!(
+            jobs.iter()
+                .filter(|j| matches!(j.action, crate::types::WriteAction::Commit))
+                .count(),
+            1
+        );
 
         // Verify we have one of each action type
         assert_eq!(
@@ -933,16 +945,22 @@ mod ingester_tests {
                 rev: "rev-abc".to_owned(),
                 ops: vec![], // No operations
                 blocks: vec![],
+                cid: None,
             }),
             identity: None,
             account: None,
         };
 
-        // Should succeed but not enqueue anything
+        // no record job, but the commit itself is queued so that progress
+        // records it
         IngesterManager::enqueue_event_for_indexing(&storage, &event)
             .await
             .unwrap();
-        assert_eq!(storage.firehose_live_len().unwrap(), 0);
+        assert_eq!(storage.firehose_live_len().unwrap(), 1);
+        let (_, job) = storage.dequeue_firehose_live().unwrap().unwrap();
+        assert!(matches!(job.action, crate::types::WriteAction::Commit));
+        assert_eq!(job.uri, format!("at://{}", event.did));
+        assert_eq!(job.rev, "rev-abc");
     }
 
     #[tokio::test]

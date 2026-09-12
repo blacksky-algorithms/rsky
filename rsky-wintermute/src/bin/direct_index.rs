@@ -209,6 +209,10 @@ async fn process_did(
                 record: Some(record_json),
                 indexed_at: now.clone(),
                 rev: rev.clone(),
+                provenance: Some(rsky_wintermute::reconcile::Provenance {
+                    generation: rsky_wintermute::reconcile::current_generation(pool, did).await?,
+                    source: rsky_wintermute::reconcile::Source::Direct,
+                }),
             };
 
             // Index directly to PostgreSQL

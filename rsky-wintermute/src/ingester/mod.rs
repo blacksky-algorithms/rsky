@@ -511,7 +511,22 @@ impl IngesterManager {
                 // firehose_live processor loop consumes and indexes from the queue.
                 match Self::parse_event_to_jobs(&event).await {
                     Ok(jobs) => {
-                        for job in jobs {
+                        let generation =
+                            match crate::reconcile::current_generation(pool, &event.did).await {
+                                Ok(generation) => generation,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "generation lookup failed for {}: {e}",
+                                        event.did
+                                    );
+                                    None
+                                }
+                            };
+                        for mut job in jobs {
+                            job.provenance = Some(crate::reconcile::Provenance {
+                                generation,
+                                source: crate::reconcile::Source::Firehose { seq: event.seq },
+                            });
                             if let Err(e) = storage.enqueue_firehose_live(&job) {
                                 tracing::error!("failed to enqueue firehose_live job: {e}");
                                 metrics::INGESTER_ERRORS_TOTAL
@@ -705,6 +720,7 @@ impl IngesterManager {
                 rev: body.rev,
                 ops,
                 blocks: body.blocks,
+                cid: Some(body.commit.to_string()),
             }),
             identity: None,
             account: None,
@@ -721,14 +737,9 @@ impl IngesterManager {
 
         let mut jobs = Vec::new();
 
-        // Only process commit events with operations
         let Some(ref commit) = event.commit else {
             return Ok(jobs);
         };
-
-        if commit.ops.is_empty() {
-            return Ok(jobs);
-        }
 
         // Parse CAR blocks into a BlockMap
         let block_map = if commit.blocks.is_empty() {
@@ -813,8 +824,23 @@ impl IngesterManager {
                 record,
                 indexed_at: indexed_at.clone(),
                 rev: commit.rev.clone(),
+                provenance: None,
             });
         }
+
+        // the commit itself, so progress names every commit even one that
+        // changed no record
+        jobs.push(IndexJob {
+            uri: format!("at://{}", event.did),
+            cid: commit.cid.clone().unwrap_or_default(),
+            action: WriteAction::Commit,
+            record: None,
+            indexed_at: chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string(),
+            rev: commit.rev.clone(),
+            provenance: None,
+        });
 
         Ok(jobs)
     }
@@ -825,14 +851,9 @@ impl IngesterManager {
     ) -> Result<(), WintermuteError> {
         use rsky_repo::parse::get_and_parse_record;
 
-        // Only process commit events with operations
         let Some(ref commit) = event.commit else {
             return Ok(());
         };
-
-        if commit.ops.is_empty() {
-            return Ok(());
-        }
 
         // Parse CAR blocks into a BlockMap
         let block_map = if commit.blocks.is_empty() {
@@ -917,10 +938,22 @@ impl IngesterManager {
                 record,
                 indexed_at: indexed_at.clone(),
                 rev: commit.rev.clone(),
+                provenance: None,
             };
 
             storage.enqueue_firehose_live(&job)?;
         }
+        storage.enqueue_firehose_live(&IndexJob {
+            uri: format!("at://{}", event.did),
+            cid: commit.cid.clone().unwrap_or_default(),
+            action: WriteAction::Commit,
+            record: None,
+            indexed_at: chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string(),
+            rev: commit.rev.clone(),
+            provenance: None,
+        })?;
 
         Ok(())
     }

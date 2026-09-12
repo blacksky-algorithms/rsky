@@ -1111,6 +1111,7 @@ mod tests {
                 rev: "rev123".to_owned(),
                 ops: vec![],
                 blocks: vec![],
+                cid: None,
             }),
             identity: None,
             account: None,
@@ -1212,6 +1213,7 @@ mod tests {
             record: Some(serde_json::json!({"test": "data"})),
             indexed_at: "2025-01-01T00:00:00Z".to_owned(),
             rev: "rev123".to_owned(),
+            provenance: None,
         };
 
         storage.enqueue_firehose_live(&job).unwrap();
@@ -1235,6 +1237,7 @@ mod tests {
             record: Some(serde_json::json!({"test": "backfill"})),
             indexed_at: "2025-01-01T00:00:00Z".to_owned(),
             rev: "rev456".to_owned(),
+            provenance: None,
         };
 
         storage.enqueue_firehose_backfill(&job).unwrap();
@@ -1259,6 +1262,7 @@ mod tests {
             record: Some(serde_json::json!({"test": "normal1"})),
             indexed_at: "2025-01-01T00:00:00Z".to_owned(),
             rev: "rev1".to_owned(),
+            provenance: None,
         };
         let normal2 = IndexJob {
             uri: "at://did:plc:normal/app.bsky.feed.post/2".to_owned(),
@@ -1267,6 +1271,7 @@ mod tests {
             record: Some(serde_json::json!({"test": "normal2"})),
             indexed_at: "2025-01-01T00:00:00Z".to_owned(),
             rev: "rev2".to_owned(),
+            provenance: None,
         };
         storage.enqueue_firehose_backfill(&normal1).unwrap();
         storage.enqueue_firehose_backfill(&normal2).unwrap();
@@ -1279,6 +1284,7 @@ mod tests {
             record: Some(serde_json::json!({"test": "priority1"})),
             indexed_at: "2025-01-01T00:00:00Z".to_owned(),
             rev: "rev3".to_owned(),
+            provenance: None,
         };
         let priority2 = IndexJob {
             uri: "at://did:plc:priority/app.bsky.feed.post/2".to_owned(),
@@ -1287,6 +1293,7 @@ mod tests {
             record: Some(serde_json::json!({"test": "priority2"})),
             indexed_at: "2025-01-01T00:00:00Z".to_owned(),
             rev: "rev4".to_owned(),
+            provenance: None,
         };
         storage
             .enqueue_firehose_backfill_priority(&priority1)
@@ -1342,6 +1349,7 @@ mod tests {
                 record: Some(serde_json::json!({"index": i})),
                 indexed_at: "2025-01-01T00:00:00Z".to_owned(),
                 rev: format!("rev{i}"),
+                provenance: None,
             };
             storage.enqueue_firehose_backfill(&job).unwrap();
         }
@@ -1375,6 +1383,7 @@ mod tests {
                 record: Some(serde_json::json!({"index": i})),
                 indexed_at: "2025-01-01T00:00:00Z".to_owned(),
                 rev: format!("rev{i}"),
+                provenance: None,
             };
             storage.enqueue_firehose_backfill(&job).unwrap();
         }
@@ -1430,6 +1439,7 @@ mod tests {
                 record: Some(serde_json::json!({"type": "normal"})),
                 indexed_at: "2025-01-01T00:00:00Z".to_owned(),
                 rev: format!("rev{i}"),
+                provenance: None,
             };
             storage.enqueue_firehose_backfill(&job).unwrap();
         }
@@ -1443,6 +1453,7 @@ mod tests {
                 record: Some(serde_json::json!({"type": "priority"})),
                 indexed_at: "2025-01-01T00:00:00Z".to_owned(),
                 rev: format!("rev_pri{i}"),
+                provenance: None,
             };
             storage.enqueue_firehose_backfill_priority(&job).unwrap();
         }
@@ -1666,6 +1677,7 @@ mod tests {
             record: None,
             indexed_at: "2026-08-01T00:00:00.000Z".to_owned(),
             rev: "3a".to_owned(),
+            provenance: None,
         }
     }
 

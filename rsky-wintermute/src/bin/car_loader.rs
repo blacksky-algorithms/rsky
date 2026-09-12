@@ -246,6 +246,7 @@ async fn parse_repo_to_jobs(
                     record: Some(convert_record_to_ipld(&raw)),
                     indexed_at: now.clone(),
                     rev: rev.clone(),
+                    provenance: None,
                 }),
                 Err(e) => record_failures.push(RecordFailure {
                     uri: uri.to_string(),

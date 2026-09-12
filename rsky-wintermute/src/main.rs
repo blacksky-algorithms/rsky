@@ -81,7 +81,11 @@ fn main() -> Result<()> {
         Arc::clone(&storage),
         args.database_url.clone(),
     )?;
-    let backfiller = BackfillerManager::new(Arc::clone(&storage))?;
+    let generations = rsky_wintermute::config::create_pg_pool(
+        &args.database_url,
+        rsky_wintermute::config::pg_pool_config(4),
+    )?;
+    let backfiller = BackfillerManager::new(Arc::clone(&storage))?.with_generations(generations);
     let indexer = IndexerManager::new(Arc::clone(&storage), &args.database_url)?;
 
     let metrics_port = args.metrics_port;

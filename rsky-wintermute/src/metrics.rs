@@ -375,6 +375,15 @@ pub static INDEXER_RECORDS_FAILED_TOTAL: LazyLock<IntCounter> = LazyLock::new(||
     .unwrap()
 });
 
+pub static INDEXER_ADMISSION_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "indexer_admission_total",
+        "Write gate outcomes by kind: apply, deferred, below_boundary, stale_generation",
+        &["outcome"]
+    )
+    .unwrap()
+});
+
 pub static INDEXER_STALE_WRITES_SKIPPED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
     register_int_counter!(
         "indexer_stale_writes_skipped_total",

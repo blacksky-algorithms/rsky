@@ -8600,7 +8600,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-wintermute"
-version = "0.9.4"
+version = "0.10.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -8635,6 +8635,7 @@ dependencies = [
  "rtrb",
  "rusqlite",
  "rustls 0.23.31",
+ "secp256k1",
  "serde",
  "serde_bytes",
  "serde_ipld_dagcbor",

@@ -111,6 +111,7 @@ async fn test_backfiller_detects_backpressure() {
             record: Some(json!({"text": "test"})),
             indexed_at: "2024-01-01T00:00:00Z".to_owned(),
             rev: "test".to_owned(),
+            provenance: None,
         };
         storage.enqueue_firehose_backfill(&job).unwrap();
     }

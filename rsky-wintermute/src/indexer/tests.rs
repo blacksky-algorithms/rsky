@@ -440,6 +440,7 @@ mod indexer_tests {
             record: Some(serde_json::json!({"text": "test", "createdAt": "2024-01-01T00:00:00Z"})),
             indexed_at: chrono::Utc::now().to_rfc3339(),
             rev: "test".to_owned(),
+            provenance: None,
         };
 
         let result = IndexerManager::process_job(&pool, &valid_job, false).await;
@@ -1254,6 +1255,8 @@ mod indexer_tests {
             time: chrono::Utc::now().to_rfc3339(),
             kind: "commit".to_owned(),
             commit: Some(CommitData {
+                cid: None,
+
                 rev: "test-rev-live".to_owned(),
                 ops: vec![
                     RepoOp {
@@ -1393,6 +1396,7 @@ mod indexer_tests {
             record: None, // Missing record for create
             indexed_at: "2024-01-01T00:00:00Z".to_owned(),
             rev: "test".to_owned(),
+            provenance: None,
         };
 
         let result = IndexerManager::process_job(&pool, &job, false).await;
@@ -1425,6 +1429,7 @@ mod indexer_tests {
             })),
             indexed_at: "2024-01-01T00:00:00Z".to_owned(),
             rev: "rev1".to_owned(),
+            provenance: None,
         };
 
         IndexerManager::process_job(&pool, &create_job, false)
@@ -1448,6 +1453,7 @@ mod indexer_tests {
             record: None,
             indexed_at: "2024-01-01T01:00:00Z".to_owned(),
             rev: "rev2".to_owned(),
+            provenance: None,
         };
 
         IndexerManager::process_job(&pool, &delete_job, false)
@@ -1485,6 +1491,7 @@ mod indexer_tests {
             })),
             indexed_at: "2024-01-01T00:00:00Z".to_owned(),
             rev: "rev2".to_owned(),
+            provenance: None,
         };
 
         IndexerManager::process_job(&pool, &initial_job, false)
@@ -1501,7 +1508,8 @@ mod indexer_tests {
                 "createdAt": "2024-01-01T00:00:00Z"
             })),
             indexed_at: "2024-01-01T00:00:00Z".to_owned(),
-            rev: "rev1".to_owned(), // Older revision
+            rev: "rev1".to_owned(), // Older revision,
+            provenance: None,
         };
 
         // Should succeed but skip the stale write
@@ -1541,6 +1549,7 @@ mod indexer_tests {
                 record: Some(serde_json::json!({"text": "test"})),
                 indexed_at: "2024-01-01T00:00:00Z".to_owned(),
                 rev: "test".to_owned(),
+                provenance: None,
             };
             manager.storage.enqueue_firehose_live(&job).unwrap();
         }
@@ -1583,6 +1592,7 @@ mod indexer_tests {
                 record: Some(serde_json::json!({"text": "live"})),
                 indexed_at: "2024-01-01T00:00:00Z".to_owned(),
                 rev: "test".to_owned(),
+                provenance: None,
             };
             manager.storage.enqueue_firehose_live(&job).unwrap();
         }
@@ -1595,6 +1605,7 @@ mod indexer_tests {
                 record: Some(serde_json::json!({"text": "backfill"})),
                 indexed_at: "2024-01-01T00:00:00Z".to_owned(),
                 rev: "test".to_owned(),
+                provenance: None,
             };
             manager.storage.enqueue_firehose_backfill(&job).unwrap();
         }
@@ -1643,6 +1654,7 @@ mod indexer_tests {
             record: Some(serde_json::json!({"text": "test"})),
             indexed_at: "2024-01-01T00:00:00Z".to_owned(),
             rev: "test".to_owned(),
+            provenance: None,
         };
         manager.storage.enqueue_firehose_live(&job).unwrap();
 
@@ -1760,6 +1772,7 @@ mod indexer_tests {
                 rev: "rev1".to_owned(),
                 record: Some(record),
                 indexed_at: indexed_at.clone(),
+                provenance: None,
             };
 
             let result = IndexerManager::process_job(&pool, &create_job, false).await;
@@ -1777,6 +1790,7 @@ mod indexer_tests {
                 rev: "rev2".to_owned(),
                 record: None,
                 indexed_at: indexed_at.clone(),
+                provenance: None,
             };
 
             let result = IndexerManager::process_job(&pool, &delete_job, false).await;
@@ -1858,6 +1872,7 @@ mod indexer_tests {
                 rev: "rev1".to_owned(),
                 record: Some(record.clone()),
                 indexed_at: indexed_at.clone(),
+                provenance: None,
             };
             let result = IndexerManager::process_job(&pool, &create_job, false).await;
             assert!(
@@ -1874,6 +1889,7 @@ mod indexer_tests {
                 rev: "rev2".to_owned(),
                 record: None,
                 indexed_at: indexed_at.clone(),
+                provenance: None,
             };
             let result = IndexerManager::process_job(&pool, &delete_job, false).await;
             assert!(
@@ -2346,6 +2362,7 @@ mod indexer_tests {
             record: with_record.then(|| like_record.clone()),
             indexed_at: ts.clone(),
             rev: rev.to_owned(),
+            provenance: None,
         };
 
         // like, unlike, re-like within ONE drain batch: the phase split
@@ -2489,6 +2506,7 @@ mod indexer_tests {
                 record: Some(reply_record),
                 indexed_at: ts.clone(),
                 rev: "3g".to_owned(),
+                provenance: None,
             },
         )];
         let (results, batch_failed) =
@@ -2530,6 +2548,7 @@ mod indexer_tests {
             record: None,
             indexed_at: "2026-08-01T00:00:00.000Z".to_owned(),
             rev: "3a".to_owned(),
+            provenance: None,
         };
         let batch: Vec<(Vec<u8>, IndexJob)> = (0u8..40)
             .map(|i| {
@@ -2586,6 +2605,7 @@ mod indexer_tests {
             record: None,
             indexed_at: "2026-08-01T00:00:00.000Z".to_owned(),
             rev: "3a".to_owned(),
+            provenance: None,
         };
 
         // An enqueue from a plain thread stores a permit even with no waiter,
@@ -2709,6 +2729,7 @@ mod indexer_tests {
                     record,
                     indexed_at: ts.clone(),
                     rev: rev.to_owned(),
+                    provenance: None,
                 },
             ));
         };
@@ -2844,6 +2865,7 @@ mod indexer_tests {
             record: Some(record),
             indexed_at: ts.to_owned(),
             rev: "3a".to_owned(),
+            provenance: None,
         };
         let jobs = vec![
             (
@@ -2957,6 +2979,7 @@ mod indexer_tests {
                     })),
                     indexed_at: ts.to_owned(),
                     rev: "3a".to_owned(),
+                    provenance: None,
                 },
             ),
             (
@@ -2972,6 +2995,7 @@ mod indexer_tests {
                     })),
                     indexed_at: ts.to_owned(),
                     rev: "3a".to_owned(),
+                    provenance: None,
                 },
             ),
         ];
@@ -3054,6 +3078,7 @@ mod indexer_tests {
                 record: None,
                 indexed_at: ts.to_owned(),
                 rev: "3b".to_owned(),
+                provenance: None,
             },
         )];
         let (del_results, del_failed) =
