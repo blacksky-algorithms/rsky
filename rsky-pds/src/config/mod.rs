@@ -211,6 +211,8 @@ pub struct CoreConfig {
     /// Serve reads only: every database opens read-only without migrating,
     /// no worker runs, and every mutating request is refused.
     pub read_only: bool,
+    /// How long in-flight requests may finish after a stop signal.
+    pub shutdown_grace_secs: u32,
 }
 
 pub fn env_to_cfg() -> ServerConfig {
@@ -237,6 +239,7 @@ pub fn env_to_cfg() -> ServerConfig {
         coexistence: env_bool("PDS_COEXISTENCE").unwrap_or(false),
         write_allowlist_file: env_str("PDS_WRITE_ALLOWLIST_FILE"),
         read_only: env_bool("PDS_READ_ONLY").unwrap_or(false),
+        shutdown_grace_secs: env_int("PDS_SHUTDOWN_GRACE_SECS").unwrap_or(100) as u32,
     };
     let service_handle_domains: Vec<String>;
     if !env_list("PDS_SERVICE_HANDLE_DOMAINS").is_empty() {

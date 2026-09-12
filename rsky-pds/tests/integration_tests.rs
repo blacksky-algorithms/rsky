@@ -195,9 +195,12 @@ async fn test_liveness_options_and_catcher() {
         Some("*")
     );
 
-    // unhandled paths fall through to the default catcher
+    // unhandled paths fall through to the default catcher, which answers
+    // the status it was given
     let response = client.get("/does-not-exist").dispatch().await;
-    assert_eq!(response.status(), Status::InternalServerError);
+    assert_eq!(response.status(), Status::NotFound);
+    let body: serde_json::Value = response.into_json().await.unwrap();
+    assert_eq!(body["error"], "NotFound");
 }
 
 async fn get_access_token(client: &rocket::local::asynchronous::Client) -> String {

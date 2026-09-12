@@ -311,11 +311,14 @@ struct InflightGuard {
 
 impl InflightGuard {
     fn new(did: &str, inflight: &Arc<Mutex<HashMap<String, usize>>>) -> Self {
-        *inflight
-            .lock()
-            .expect("inflight counts poisoned")
-            .entry(did.to_owned())
-            .or_insert(0) += 1;
+        let count = {
+            let mut inflight = inflight.lock().expect("inflight counts poisoned");
+            let count = inflight.entry(did.to_owned()).or_insert(0);
+            *count += 1;
+            *count
+        };
+        crate::metrics::METRICS.set_inflight(did, count);
+        crate::metrics::METRICS.write_attempts.inc();
         InflightGuard {
             did: did.to_owned(),
             inflight: inflight.clone(),
@@ -325,13 +328,20 @@ impl InflightGuard {
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
-        let mut inflight = self.inflight.lock().expect("inflight counts poisoned");
-        match inflight.get_mut(&self.did) {
-            Some(count) if *count > 1 => *count -= 1,
-            _ => {
-                inflight.remove(&self.did);
+        let remaining = {
+            let mut inflight = self.inflight.lock().expect("inflight counts poisoned");
+            match inflight.get_mut(&self.did) {
+                Some(count) if *count > 1 => {
+                    *count -= 1;
+                    *count
+                }
+                _ => {
+                    inflight.remove(&self.did);
+                    0
+                }
             }
-        }
+        };
+        crate::metrics::METRICS.set_inflight(&self.did, remaining);
     }
 }
 

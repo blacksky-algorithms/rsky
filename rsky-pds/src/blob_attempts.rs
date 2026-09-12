@@ -100,6 +100,7 @@ impl AttemptJournal {
 
     /// Records an attempt before the request is sent and returns its id.
     pub async fn begin(&self, did: &str, key: &str, operation: &str) -> Result<i64> {
+        crate::metrics::METRICS.control_journal_write("attempt");
         let (did, key, operation) = (did.to_owned(), key.to_owned(), operation.to_owned());
         let now = rsky_common::now();
         let coexistence = self.coexistence;
@@ -126,6 +127,7 @@ impl AttemptJournal {
     }
 
     pub async fn resolve(&self, id: i64, outcome: AttemptOutcome) -> Result<()> {
+        crate::metrics::METRICS.control_journal_write("attempt");
         let now = rsky_common::now();
         let outcome = outcome.as_text();
         self.db

@@ -33,6 +33,22 @@ fn get_backfill_limit(ms: u64) -> String {
 /// Repository event stream, aka Firehose endpoint. Outputs repo commits with diff data,
 /// and identity update events, for all repositories on the current server. See the atproto
 /// specifications for details around stream sequencing, repo versioning, CAR diff format, and more.
+/// Counts the connection for as long as its stream lives.
+struct SubscriberGauge;
+
+impl SubscriberGauge {
+    fn new() -> Self {
+        crate::metrics::METRICS.firehose_subscribers.inc();
+        SubscriberGauge
+    }
+}
+
+impl Drop for SubscriberGauge {
+    fn drop(&mut self) {
+        crate::metrics::METRICS.firehose_subscribers.dec();
+    }
+}
+
 /// Public and does not require auth; implemented by PDS and Relay.
 #[allow(clippy::needless_lifetimes)]
 #[rocket::get("/xrpc/com.atproto.sync.subscribeRepos?<cursor>")]
@@ -45,6 +61,7 @@ pub async fn subscribe_repos<'a>(
     ws: ws::WebSocket,
 ) -> ws::Stream!['a] {
     ws::Stream! { ws =>
+        let _subscriber = SubscriberGauge::new();
         let sequencer_lock = sequencer.sequencer.read().await.clone();
         let outbox = Outbox::new(sequencer_lock.clone());
 

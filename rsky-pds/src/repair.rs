@@ -207,6 +207,7 @@ impl RepairStore {
     }
 
     pub async fn create(&self, id: &str, did: &str, kind: &RepairKind) -> Result<()> {
+        crate::metrics::METRICS.control_journal_write("repair");
         let (id, did) = (id.to_owned(), did.to_owned());
         let name = kind.name().to_owned();
         let payload = serde_json::to_string(kind)?;
@@ -289,6 +290,20 @@ impl RepairStore {
     }
 
     /// Repairs for `did` that are not terminal.
+    /// Repairs across every actor that are not yet terminal.
+    pub async fn open_count(&self) -> Result<i64> {
+        self.db
+            .run(|conn| {
+                Ok(conn.query_row(
+                    "SELECT count(*) FROM repair \
+                     WHERE state NOT IN ('done', 'client-superseded', 'failed')",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+    }
+
     pub async fn pending_for(&self, did: &str) -> Result<Vec<String>> {
         let did = did.to_owned();
         self.db
@@ -312,6 +327,7 @@ impl RepairStore {
         kind: &str,
         linked_repairs: &[String],
     ) -> Result<()> {
+        crate::metrics::METRICS.control_journal_write("quarantine");
         let (did, kind) = (did.to_owned(), kind.to_owned());
         let linked = serde_json::to_string(linked_repairs)?;
         let now = rsky_common::now();
@@ -388,6 +404,7 @@ impl RepairStore {
 
     /// The operator's own reconciliation of the local index ran clean.
     pub async fn mark_local_reconciled(&self, seq: i64) -> Result<()> {
+        crate::metrics::METRICS.control_journal_write("quarantine");
         self.db
             .run(move |conn| {
                 let changed = conn.execute(

@@ -28,7 +28,9 @@ pub mod image;
 pub mod lexicon;
 pub mod lifecycle;
 pub mod locks;
+pub mod logging;
 pub mod mailer;
+pub mod metrics;
 pub mod models;
 pub mod oauth;
 pub mod oauth_scope;
@@ -100,6 +102,94 @@ use tokio::sync::RwLock;
 
 pub struct CORS;
 
+/// Records every request in the metrics and the request log, and marks
+/// the process as draining when shutdown is triggered.
+pub struct Telemetry;
+
+/// When the request arrived and its number in this process.
+#[derive(Clone, Copy)]
+struct RequestStart {
+    at: std::time::Instant,
+    id: u64,
+}
+
+static REQUEST_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl RequestStart {
+    fn now() -> Self {
+        RequestStart {
+            at: std::time::Instant::now(),
+            id: REQUEST_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+}
+
+#[rocket::async_trait]
+impl Fairing for Telemetry {
+    fn info(&self) -> Info {
+        Info {
+            name: "Request metrics, request log, and drain state",
+            kind: Kind::Request | Kind::Response | Kind::Shutdown,
+        }
+    }
+
+    async fn on_request(&self, request: &mut Request<'_>, _data: &mut rocket::Data<'_>) {
+        request.local_cache(RequestStart::now);
+    }
+
+    async fn on_response<'r>(&self, request: &'r Request<'_>, response: &mut Response<'r>) {
+        let start = *request.local_cache(RequestStart::now);
+        let elapsed = start.at.elapsed();
+        let route = request
+            .route()
+            .map(|route| route.uri.to_string())
+            .unwrap_or_else(|| "unrouted".to_string());
+        let status = response.status().code;
+        metrics::METRICS.record_request(
+            &route,
+            request.method().as_str(),
+            status,
+            elapsed.as_secs_f64(),
+        );
+        tracing::info!(
+            req.id = start.id,
+            req.method = request.method().as_str(),
+            req.url = %request.uri(),
+            req.route = %route,
+            req.remoteAddress = request.client_ip().map(|ip| ip.to_string()).unwrap_or_default(),
+            res.statusCode = status,
+            responseTime = elapsed.as_secs_f64() * 1000.0,
+            "request completed"
+        );
+    }
+
+    async fn on_shutdown(&self, rocket: &rocket::Rocket<rocket::Orbit>) {
+        metrics::METRICS.begin_shutdown();
+        tracing::warn!("shutdown requested; draining");
+        if let Some(sequencer) = rocket.state::<SharedSequencer>() {
+            sequencer.sequencer.write().await.destroy().await;
+        }
+        if let Some(actor_store) = rocket.state::<ActorStore>() {
+            actor_store.background_queue.process_all().await;
+        }
+        tracing::warn!("drained; exiting");
+    }
+}
+
+#[get("/metrics")]
+async fn metrics_route(
+    actor_store: &State<ActorStore>,
+    lifecycle: &State<lifecycle::LifecycleStore>,
+    repairs: &State<repair::RepairStore>,
+    sequencer: &State<SharedSequencer>,
+) -> Result<String, ApiError> {
+    let sequencer = sequencer.sequencer.read().await;
+    metrics::METRICS
+        .refresh(actor_store, lifecycle, repairs, &sequencer)
+        .await?;
+    Ok(metrics::METRICS.render()?)
+}
+
 #[get("/")]
 async fn index() -> &'static str {
     r#"
@@ -132,6 +222,15 @@ async fn robots() -> &'static str {
 async fn health(
     account_manager: AccountManager,
 ) -> Result<Json<ServerVersion>, status::Custom<Json<ErrorMessageResponse>>> {
+    if metrics::METRICS.is_shutting_down() {
+        return Err(status::Custom(
+            Status::ServiceUnavailable,
+            Json(ErrorMessageResponse {
+                code: Some(ErrorCode::ServiceUnavailable),
+                message: Some("shutting_down".to_string()),
+            }),
+        ));
+    }
     let result = account_manager
         .db
         .run(|conn| Ok(conn.query_row("SELECT 1", [], |row| row.get::<_, i32>(0))?))
@@ -220,11 +319,12 @@ async fn drain_status(
 
 #[tracing::instrument(skip_all)]
 #[catch(default)]
-async fn default_catcher(_status: Status, request: &Request<'_>) -> ApiError {
+async fn default_catcher(status: Status, request: &Request<'_>) -> ApiError {
     let api_error: &Option<ApiError> = request.local_cache(|| None);
     match api_error {
-        None => ApiError::RuntimeError,
         Some(error) => error.clone(),
+        None if status == Status::NotFound => ApiError::NotFound,
+        None => ApiError::RuntimeError,
     }
 }
 
@@ -267,9 +367,21 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
 
     let mut cfg = env_to_cfg();
     // the reference PDS listens on PDS_PORT on every interface
+    // SIGTERM and SIGINT stop accepting connections and let in-flight
+    // requests finish within the grace period, as the reference PDS's
+    // stop timeout does
+    let shutdown = rocket::config::Shutdown {
+        ctrlc: true,
+        signals: [rocket::config::Sig::Term].into_iter().collect(),
+        grace: cfg.service.shutdown_grace_secs,
+        mercy: 15,
+        force: true,
+        ..Default::default()
+    };
     let figment = rocket::Config::figment()
         .merge(("port", cfg.service.port as u16))
         .merge(("address", "0.0.0.0"))
+        .merge(("shutdown", shutdown))
         .merge(("limits", Limits::default().limit("file", 100.mebibytes())));
     if let Some(rocket_cfg) = rocket_cfg {
         if let Some(service_db) = rocket_cfg.service_db {
@@ -466,6 +578,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 robots,
                 health,
                 health_live,
+                metrics_route,
                 drain_status,
                 custom_routes::tls_check,
                 custom_routes::custom_well_known_did,
@@ -599,6 +712,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
             ],
         )
         .register("/", catchers![default_catcher])
+        .attach(Telemetry)
         .attach(CORS)
         .attach(oauth::OAuthHeaders)
         .attach(shield)

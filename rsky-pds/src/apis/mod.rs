@@ -203,6 +203,8 @@ pub enum ApiError {
     NotAdmitted(String),
     /// This server serves reads only.
     ReadOnly,
+    /// No route answers the path.
+    NotFound,
 }
 
 #[derive(Serialize)]
@@ -286,6 +288,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 res.set_header(Header::new("Retry-After", "1"));
                 Ok(res)
             }
+            ApiError::NotFound => json_error(404, "NotFound", "Not Found".to_string(), __req),
             ApiError::ReadOnly => json_error(
                 503,
                 "ReadOnly",
@@ -681,6 +684,8 @@ mod tests {
 /// verification or scope is `InvalidToken`, and no credentials is `AuthMissing`.
 impl From<&AuthError> for ApiError {
     fn from(error: &AuthError) -> Self {
+        let rendered = error.to_string();
+        crate::metrics::METRICS.auth_failure(rendered.split(':').next().unwrap_or("unknown"));
         match error {
             AuthError::ExpiredToken => ApiError::ExpiredToken,
             AuthError::AuthMissing => ApiError::AuthMissing,

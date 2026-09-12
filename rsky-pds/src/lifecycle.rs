@@ -175,6 +175,7 @@ impl LifecycleStore {
     /// Records, before a write commits, that `did` may have undelivered
     /// intents or unfinished blob work afterwards.
     pub async fn mark_pending_work(&self, did: &str) -> Result<()> {
+        crate::metrics::METRICS.control_journal_write("pending_work");
         let did = did.to_owned();
         let now = rsky_common::now();
         self.db
@@ -192,6 +193,7 @@ impl LifecycleStore {
     /// Forgets the mark once the actor's intents are delivered and its
     /// blob work is terminal.
     pub async fn clear_pending_work(&self, did: &str) -> Result<()> {
+        crate::metrics::METRICS.control_journal_write("pending_work");
         let did = did.to_owned();
         self.db
             .run(move |conn| {
@@ -284,6 +286,7 @@ impl LifecycleStore {
         seq: i64,
         creation: bool,
     ) -> Result<()> {
+        crate::metrics::METRICS.control_journal_write("frontier_watermark");
         let rev = rev.to_owned();
         self.update_watermark(did, move |mut mark| {
             mark.max_rev = Some(max_rev(mark.max_rev.take(), &rev));
@@ -298,6 +301,7 @@ impl LifecycleStore {
     /// Records, before the first response byte, the highest revision a
     /// read is about to serve or an import has accepted.
     pub async fn record_exposure(&self, did: &str, rev: &str) -> Result<()> {
+        crate::metrics::METRICS.control_journal_write("frontier_watermark");
         let rev = rev.to_owned();
         self.update_watermark(did, move |mut mark| {
             mark.exposed_max_rev = Some(max_rev(mark.exposed_max_rev.take(), &rev));
@@ -309,6 +313,7 @@ impl LifecycleStore {
     /// Records the highest published revision before a deletion prunes the
     /// actor's history; a later re-creation is complete only above it.
     pub async fn record_pre_deletion_max(&self, did: &str, rev: Option<&str>) -> Result<()> {
+        crate::metrics::METRICS.control_journal_write("frontier_watermark");
         let rev = rev.map(str::to_owned);
         self.update_watermark(did, move |mut mark| {
             let candidate = [mark.max_rev.clone(), rev.clone()]
@@ -327,6 +332,7 @@ impl LifecycleStore {
     /// Records that the actor's store was restored or rewritten to
     /// `resulting_rev` outside the ordinary write path.
     pub async fn record_restore_event(&self, did: &str, resulting_rev: &str) -> Result<()> {
+        crate::metrics::METRICS.control_journal_write("restore_event");
         let (did, resulting_rev) = (did.to_owned(), resulting_rev.to_owned());
         let now = rsky_common::now();
         self.db
@@ -356,6 +362,7 @@ impl LifecycleStore {
     /// Every later commit for the actor must exceed `rev`. The floor only
     /// ever rises.
     pub async fn raise_revision_floor(&self, did: &str, rev: &str) -> Result<()> {
+        crate::metrics::METRICS.control_journal_write("revision_floor");
         let (did, rev) = (did.to_owned(), rev.to_owned());
         self.db
             .run(move |conn| {
@@ -408,6 +415,7 @@ impl LifecycleStore {
 
     /// Step 1 of a deletion: from this moment the DID is non-writable.
     pub async fn tombstone(&self, did: &str) -> Result<()> {
+        crate::metrics::METRICS.control_journal_write("tombstone");
         let now = rsky_common::now();
         let did_owned = did.to_owned();
         self.db
@@ -428,6 +436,7 @@ impl LifecycleStore {
     }
 
     pub async fn record_deletion_seq(&self, did: &str, seq: i64) -> Result<()> {
+        crate::metrics::METRICS.control_journal_write("tombstone");
         let did = did.to_owned();
         self.db
             .run(move |conn| {
@@ -441,6 +450,7 @@ impl LifecycleStore {
     }
 
     pub async fn record_purge_obligation(&self, obligation: &PurgeObligation) -> Result<()> {
+        crate::metrics::METRICS.control_journal_write("purge_obligation");
         let obligation = obligation.clone();
         let prefixes = serde_json::to_string(&obligation.namespace_prefixes)
             .expect("a list of strings serializes");
@@ -462,6 +472,7 @@ impl LifecycleStore {
     /// The final step: the account is gone logically, and the DID may be
     /// created again; the purge obligation stays until the objects are.
     pub async fn mark_logically_deleted(&self, did: &str) -> Result<()> {
+        crate::metrics::METRICS.control_journal_write("tombstone");
         let now = rsky_common::now();
         let did_owned = did.to_owned();
         self.db
@@ -482,6 +493,7 @@ impl LifecycleStore {
 
     /// Forgets a completed deletion when the DID is created again.
     pub async fn clear_tombstone(&self, did: &str) -> Result<()> {
+        crate::metrics::METRICS.control_journal_write("tombstone");
         let did = did.to_owned();
         self.db
             .run(move |conn| {

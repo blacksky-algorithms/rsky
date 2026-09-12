@@ -8327,6 +8327,7 @@ dependencies = [
  "lru 0.14.0",
  "mailchecker",
  "mailgun-rs",
+ "prometheus",
  "rand 0.8.5",
  "rand_core 0.6.4",
  "redis",

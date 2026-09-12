@@ -7,8 +7,7 @@ async fn main() {
     let _ = &*rsky_pds::account_manager::helpers::auth::PDS_JWT_SIGNER;
     let _ = &*rsky_pds::apis::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 
-    let subscriber = tracing_subscriber::FmtSubscriber::new();
-    tracing::subscriber::set_global_default(subscriber).unwrap();
+    rsky_pds::logging::init(rsky_pds::logging::LogFormat::from_env());
     match cli::parse_args(std::env::args().skip(1)) {
         Ok(None) => {
             let _ = build_rocket(None).await.launch().await;

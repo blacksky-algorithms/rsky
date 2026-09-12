@@ -47,6 +47,7 @@ fn retry_sqlite<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
             Ok(res) => return Ok(res),
             Err(err) if is_busy_error(&err) => match retry_wait_ms(attempt, RETRY_TIMEOUT_MS) {
                 Some(wait_ms) => {
+                    crate::metrics::METRICS.sqlite_busy_retries.inc();
                     std::thread::sleep(Duration::from_millis(wait_ms));
                     attempt += 1;
                 }
