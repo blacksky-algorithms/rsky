@@ -244,11 +244,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        let source = ResolverDocSource::new(DidResolver::new(DidResolverOpts {
-            timeout: None,
-            plc_url: None,
-            did_cache: Arc::new(MemoryCache::new(None, None)),
-        }));
+        // the mock lives on loopback, which the public policy refuses
+        let source = ResolverDocSource::new(
+            DidResolver::new(DidResolverOpts {
+                timeout: None,
+                plc_url: None,
+                did_cache: Arc::new(MemoryCache::new(None, None)),
+            })
+            .with_network(rsky_identity::safe_fetch::NetworkPolicy::PERMISSIVE),
+        );
         let got = source.did_document(&did).await.unwrap();
         assert_eq!(signing_did_key_from_doc(&got).unwrap(), key);
 

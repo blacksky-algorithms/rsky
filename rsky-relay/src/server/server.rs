@@ -486,7 +486,7 @@ impl Server {
                     Ok((
                         row.get::<_, i64>("rowid")?,
                         row.get::<_, String>("host")?,
-                        row.get::<_, u64>("cursor")?,
+                        u64::try_from(row.get::<_, i64>("cursor")?).unwrap_or_default(),
                     ))
                 },
             )?
@@ -533,7 +533,7 @@ impl Server {
             .query_one(named_params! { ":host": hostname.clone() }, |row| {
                 Ok(GetHostStatus {
                     hostname: hostname.clone(),
-                    seq: row.get("cursor")?,
+                    seq: u64::try_from(row.get::<_, i64>("cursor")?).unwrap_or_default(),
                     status: if is_banned { HostStatus::Banned } else { HostStatus::Active },
                 })
             })

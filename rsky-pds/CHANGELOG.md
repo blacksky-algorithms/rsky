@@ -273,6 +273,11 @@ services (the PLC directory, the app view, relays, mail) keep their own
 transports and never take a resolved destination. `PDS_DEV_MODE=true`
 relaxes the policy for local services.
 
+### Changed — bundled SQLite 3.53.2
+
+`rusqlite` 0.40 bundles SQLite 3.53.2, past the 3.51.3 release that fixed
+a write-ahead-log reset defect a shared data directory must not carry.
+
 ### Fixed — responses that differed from the reference PDS
 
 - `com.atproto.sync.*` reads of a missing, taken-down, or deactivated
