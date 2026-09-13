@@ -108,22 +108,7 @@ pub async fn populate_backfill_queue(
         None
     };
 
-    // Preserve the scheme (http:// or https://) from the original URL for testing
-    let (scheme, clean_hostname) = if relay_host.starts_with("http://") {
-        (
-            "http",
-            relay_host
-                .trim_start_matches("http://")
-                .trim_end_matches('/'),
-        )
-    } else {
-        (
-            "https",
-            relay_host
-                .trim_start_matches("https://")
-                .trim_end_matches('/'),
-        )
-    };
+    let (scheme, clean_hostname) = crate::ingester::relay_http_endpoint(&relay_host);
 
     let mut total_enumerated = 0u64;
     let mut last_log_count = 0u64;

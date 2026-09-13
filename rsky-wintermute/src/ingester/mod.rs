@@ -1214,17 +1214,28 @@ async fn delete_cursor_from_postgres(pool: &Pool, service: &str) -> Result<(), W
     Ok(())
 }
 
-/// The firehose endpoint of a relay host. A bare host is reached over
-/// `wss`; a host written with a scheme keeps it, so a relay on a private
-/// network can be reached over plain `ws` (`http` and `https` map to their
-/// websocket forms).
-fn subscribe_url(hostname: &str) -> Result<url::Url, url::ParseError> {
+/// The HTTP scheme and bare host of a relay host string.
+///
+/// A bare host is reached over TLS; a host written with a scheme keeps its
+/// security (`ws`/`http` stay plain, `wss`/`https` stay TLS), so a relay on
+/// a private network can be reached without a certificate.
+#[must_use]
+pub fn relay_http_endpoint(hostname: &str) -> (&'static str, &str) {
     let (scheme, host) = match hostname.split_once("://") {
-        Some(("ws" | "http", host)) => ("ws", host),
-        Some((_, host)) => ("wss", host),
-        None => ("wss", hostname),
+        Some(("ws" | "http", host)) => ("http", host),
+        Some((_, host)) => ("https", host),
+        None => ("https", hostname),
     };
-    let host = host.trim_end_matches('/');
+    (scheme, host.trim_end_matches('/'))
+}
+
+/// The firehose endpoint of a relay host, over the websocket form of the
+/// scheme [`relay_http_endpoint`] chose.
+fn subscribe_url(hostname: &str) -> Result<url::Url, url::ParseError> {
+    let (scheme, host) = match relay_http_endpoint(hostname) {
+        ("http", host) => ("ws", host),
+        (_, host) => ("wss", host),
+    };
     if host.is_empty() {
         return Err(url::ParseError::EmptyHost);
     }
@@ -1264,6 +1275,14 @@ mod cursor_tests {
             assert_eq!(subscribe_url(given).unwrap().as_str(), expected, "{given}");
         }
         assert!(subscribe_url("ws://").is_err());
+        assert_eq!(
+            super::relay_http_endpoint("ws://127.0.0.1:9000/"),
+            ("http", "127.0.0.1:9000")
+        );
+        assert_eq!(
+            super::relay_http_endpoint("relay.example"),
+            ("https", "relay.example")
+        );
     }
 
     fn sample_url() -> url::Url {

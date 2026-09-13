@@ -226,18 +226,7 @@ async fn queue_from_pds(storage: &Storage, host: &str, priority: bool) -> Result
         .timeout(Duration::from_secs(30))
         .build()?;
 
-    // Preserve scheme or default to https
-    let (scheme, clean_hostname) = if host.starts_with("http://") {
-        (
-            "http",
-            host.trim_start_matches("http://").trim_end_matches('/'),
-        )
-    } else {
-        (
-            "https",
-            host.trim_start_matches("https://").trim_end_matches('/'),
-        )
-    };
+    let (scheme, clean_hostname) = rsky_wintermute::ingester::relay_http_endpoint(host);
 
     let mut cursor: Option<String> = None;
     let mut total_queued = 0;
