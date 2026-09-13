@@ -385,10 +385,30 @@ impl ActorStore {
             inflight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
-
     pub fn with_read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
         self
+    }
+
+    /// Every actor with a directory under the store, in no particular order.
+    pub async fn list_dids(&self) -> Result<Vec<String>> {
+        let mut dids = Vec::new();
+        let Ok(mut shards) = tokio::fs::read_dir(&self.directory).await else {
+            return Ok(dids);
+        };
+        while let Some(shard) = shards.next_entry().await? {
+            if !shard.file_type().await?.is_dir() || shard.path() == self.reserved_key_dir {
+                continue;
+            }
+            let mut actors = tokio::fs::read_dir(shard.path()).await?;
+            while let Some(actor) = actors.next_entry().await? {
+                let name = actor.file_name().to_string_lossy().to_string();
+                if actor.file_type().await?.is_dir() && name.starts_with("did:") {
+                    dids.push(name);
+                }
+            }
+        }
+        Ok(dids)
     }
 
     pub fn is_read_only(&self) -> bool {

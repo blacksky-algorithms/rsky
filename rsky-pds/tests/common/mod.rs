@@ -197,6 +197,7 @@ pub async fn get_client_in(dir: &std::path::Path) -> Client {
             lifecycle_db_location: path("rsky/lifecycle.sqlite"),
             lock_dir: path("rsky/locks"),
             blob_attempts_db_location: path("rsky/blob-attempts.sqlite"),
+            blob_generations_db_location: path("rsky/blob-generations.sqlite"),
             repair_db_location: path("rsky/repair.sqlite"),
         }),
         actor_store_directory: Some(path("actors")),
@@ -485,6 +486,7 @@ pub async fn get_client_with_fixture() -> (&'static Fixture, Client) {
             lifecycle_db_location: path("rsky/lifecycle.sqlite"),
             lock_dir: path("rsky/locks"),
             blob_attempts_db_location: path("rsky/blob-attempts.sqlite"),
+            blob_generations_db_location: path("rsky/blob-generations.sqlite"),
             repair_db_location: path("rsky/repair.sqlite"),
         }),
         actor_store_directory: Some(path("actors")),
@@ -520,6 +522,7 @@ pub async fn get_client_with_fixture_copy() -> (&'static Fixture, TempDir, Clien
             lifecycle_db_location: path("rsky/lifecycle.sqlite"),
             lock_dir: path("rsky/locks"),
             blob_attempts_db_location: path("rsky/blob-attempts.sqlite"),
+            blob_generations_db_location: path("rsky/blob-generations.sqlite"),
             repair_db_location: path("rsky/repair.sqlite"),
         }),
         actor_store_directory: Some(path("actors")),
@@ -578,6 +581,10 @@ pub fn pds_binary(dir: &std::path::Path) -> std::process::Command {
         .env("PDS_LIFECYCLE_DB", path("rsky/lifecycle.sqlite"))
         .env("PDS_LOCK_DIR", path("rsky/locks"))
         .env("PDS_BLOB_ATTEMPTS_DB", path("rsky/blob-attempts.sqlite"))
+        .env(
+            "PDS_BLOB_GENERATIONS_DB",
+            path("rsky/blob-generations.sqlite"),
+        )
         .env("PDS_REPAIR_DB", path("rsky/repair.sqlite"));
     if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
         command.env("LLVM_PROFILE_FILE", profile);

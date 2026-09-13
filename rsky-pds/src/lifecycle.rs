@@ -75,6 +75,12 @@ const LIFECYCLE_MIGRATIONS: &[Migration] = &[
             rev TEXT NOT NULL\
           );",
     },
+    // Namespaces observed empty after legacy writes are listed again on a
+    // schedule; the next listing's time lives with the obligation.
+    Migration {
+        name: "004",
+        sql: "ALTER TABLE purge_obligation ADD COLUMN \"nextRelistAt\" TEXT;",
+    },
 ];
 
 const LIFECYCLE_MIGRATION_SET: MigrationSet = MigrationSet {
@@ -123,13 +129,22 @@ fn max_rev(current: Option<String>, candidate: &str) -> String {
         _ => candidate.to_owned(),
     }
 }
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct PurgeObligation {
     pub did: String,
     pub requested_at: String,
     pub namespace_prefixes: Vec<String>,
     pub manifest: serde_json::Value,
+}
+
+/// How far a purge obligation has come. `physically_purged_at` is set only
+/// by a collector outcome that proves every object gone; `observed_empty_at`
+/// records an empty listing that a delayed legacy write could still undo.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PurgeProgress {
+    pub observed_empty_at: Option<String>,
+    pub physically_purged_at: Option<String>,
+    pub next_relist_at: Option<String>,
 }
 
 /// The journal of deletions, purge obligations, and actors with work
@@ -533,6 +548,86 @@ impl LifecycleStore {
                     .query_map([], tombstone_from_row)?
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(rows)
+            })
+            .await
+    }
+    /// Obligations whose objects are not yet proven gone.
+    pub async fn open_purge_obligations(&self) -> Result<Vec<PurgeObligation>> {
+        self.db
+            .run(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT did, \"requestedAt\", \"namespacePrefixes\", manifest \
+                     FROM purge_obligation WHERE \"physicallyPurgedAt\" IS NULL ORDER BY \"requestedAt\"",
+                )?;
+                let rows = stmt
+                    .query_and_then([], |row| {
+                        let prefixes: String = row.get(2)?;
+                        let manifest: String = row.get(3)?;
+                        Ok::<PurgeObligation, anyhow::Error>(PurgeObligation {
+                            did: row.get(0)?,
+                            requested_at: row.get(1)?,
+                            namespace_prefixes: serde_json::from_str(&prefixes)?,
+                            manifest: serde_json::from_str(&manifest)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .await
+    }
+
+    pub async fn purge_progress_of(&self, did: &str) -> Result<Option<PurgeProgress>> {
+        let did = did.to_owned();
+        self.db
+            .run(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT \"observedEmptyAt\", \"physicallyPurgedAt\", \"nextRelistAt\" \
+                         FROM purge_obligation WHERE did = ?1",
+                        [&did],
+                        |row| {
+                            Ok(PurgeProgress {
+                                observed_empty_at: row.get(0)?,
+                                physically_purged_at: row.get(1)?,
+                                next_relist_at: row.get(2)?,
+                            })
+                        },
+                    )
+                    .optional()?)
+            })
+            .await
+    }
+
+    /// Records an empty listing that legacy writes could still undo, and
+    /// when to list again.
+    pub async fn mark_observed_empty(&self, did: &str, next_relist_at: &str) -> Result<()> {
+        crate::metrics::METRICS.control_journal_write("purge_obligation");
+        let (did, next) = (did.to_owned(), next_relist_at.to_owned());
+        let now = rsky_common::now();
+        self.db
+            .run(move |conn| {
+                conn.execute(
+                    "UPDATE purge_obligation SET \"observedEmptyAt\" = COALESCE(\"observedEmptyAt\", ?1), \
+                     \"nextRelistAt\" = ?2 WHERE did = ?3",
+                    params![now, next, did],
+                )?;
+                Ok(())
+            })
+            .await
+    }
+
+    /// Records the proof that every object of the namespace is gone.
+    pub async fn mark_physically_purged(&self, did: &str) -> Result<()> {
+        crate::metrics::METRICS.control_journal_write("purge_obligation");
+        let did = did.to_owned();
+        let now = rsky_common::now();
+        self.db
+            .run(move |conn| {
+                conn.execute(
+                    "UPDATE purge_obligation SET \"physicallyPurgedAt\" = ?1 WHERE did = ?2",
+                    params![now, did],
+                )?;
+                Ok(())
             })
             .await
     }

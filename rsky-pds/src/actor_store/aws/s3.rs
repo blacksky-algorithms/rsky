@@ -1,5 +1,5 @@
 // based on https://github.com/bluesky-social/atproto/blob/main/packages/aws/src/s3.ts
-use crate::actor_store::blobstore::BlobStore;
+use crate::actor_store::blobstore::{BlobStore, DeleteError, ObjectKind};
 use crate::blob_attempts::{AttemptJournal, AttemptOutcome};
 use anyhow::Result;
 use aws_config::retry::RetryConfig;
@@ -33,6 +33,26 @@ impl std::fmt::Debug for S3BlobStore {
             .field("did", &self.did)
             .field("bucket", &self.bucket)
             .finish_non_exhaustive()
+    }
+}
+
+/// A request the service never confirmed: it may still take effect.
+#[derive(Debug, thiserror::Error)]
+#[error("unconfirmed: {0}")]
+pub struct Unconfirmed(String);
+
+/// Tells a refusal the service sent from a request that got no answer.
+fn classify<
+    E: std::error::Error + Send + Sync + 'static,
+    R: std::fmt::Debug + Send + Sync + 'static,
+>(
+    err: SdkError<E, R>,
+) -> anyhow::Error {
+    match &err {
+        SdkError::DispatchFailure(_) | SdkError::TimeoutError(_) | SdkError::ResponseError(_) => {
+            anyhow::Error::new(Unconfirmed(err.to_string()))
+        }
+        _ => anyhow::Error::new(err),
     }
 }
 
@@ -97,6 +117,9 @@ impl S3BlobStore {
         let result = request.await;
         let outcome = match &result {
             Ok(_) => AttemptOutcome::Succeeded,
+            Err(err) if err.downcast_ref::<Unconfirmed>().is_some() => {
+                AttemptOutcome::Ambiguous(err.to_string())
+            }
             Err(err) => AttemptOutcome::Failed(err.to_string()),
         };
         journal.resolve(id, outcome).await?;
@@ -131,7 +154,10 @@ impl S3BlobStore {
         let key = self.gen_key();
         let path = self.get_tmp_path(&key);
         self.attempt(&path, "put", async {
-            self.put_object_request(path.clone(), bytes).send().await?;
+            self.put_object_request(path.clone(), bytes)
+                .send()
+                .await
+                .map_err(classify)?;
             Ok(())
         })
         .await?;
@@ -148,7 +174,8 @@ impl S3BlobStore {
                 .bucket(&self.bucket)
                 .key(object.clone())
                 .send()
-                .await?;
+                .await
+                .map_err(classify)?;
             Ok(())
         })
         .await?;
@@ -172,7 +199,10 @@ impl S3BlobStore {
     pub async fn put_permanent(&self, cid: Cid, bytes: Vec<u8>) -> Result<()> {
         let path = self.get_stored_path(cid);
         self.attempt(&path, "put", async {
-            self.put_object_request(path.clone(), bytes).send().await?;
+            self.put_object_request(path.clone(), bytes)
+                .send()
+                .await
+                .map_err(classify)?;
             Ok(())
         })
         .await
@@ -239,6 +269,51 @@ impl S3BlobStore {
         Ok(self.has_key(self.get_tmp_path(&key)).await)
     }
 
+    /// Every key under `prefix`, across pages.
+    pub async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+        let mut keys = Vec::new();
+        let mut token: Option<String> = None;
+        loop {
+            let mut request = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(prefix);
+            if let Some(token) = &token {
+                request = request.continuation_token(token);
+            }
+            let page = request.send().await.map_err(classify)?;
+            keys.extend(
+                page.contents()
+                    .iter()
+                    .filter_map(|object| object.key().map(str::to_owned)),
+            );
+            match page.next_continuation_token() {
+                Some(next) if page.is_truncated().unwrap_or(false) => token = Some(next.to_owned()),
+                _ => return Ok(keys),
+            }
+        }
+    }
+    /// One unjournaled delete by physical key; the collector journals the
+    /// attempt around it and classifies the answer.
+    async fn delete_physical(&self, key: String) -> std::result::Result<(), DeleteError> {
+        let sent = self
+            .client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(classify);
+        match sent {
+            Ok(_) => Ok(()),
+            Err(err) if err.downcast_ref::<Unconfirmed>().is_some() => {
+                Err(DeleteError::Ambiguous(err.to_string()))
+            }
+            Err(err) => Err(DeleteError::Definitive(err.to_string())),
+        }
+    }
+
     async fn has_key(&self, key: String) -> bool {
         let res = self
             .client
@@ -257,7 +332,8 @@ impl S3BlobStore {
                 .bucket(&self.bucket)
                 .key(key.clone())
                 .send()
-                .await?;
+                .await
+                .map_err(classify)?;
             Ok(())
         })
         .await
@@ -283,7 +359,8 @@ impl S3BlobStore {
             .bucket(&self.bucket)
             .delete(deletes)
             .send()
-            .await?;
+            .await
+            .map_err(classify)?;
         Ok(())
     }
 
@@ -296,7 +373,8 @@ impl S3BlobStore {
                 .copy_source(format!("{0}/{1}", self.bucket, keys.from))
                 .key(keys.to)
                 .send()
-                .await?;
+                .await
+                .map_err(classify)?;
             Ok(())
         })
         .await
@@ -336,6 +414,55 @@ impl S3BlobStore {
 }
 
 impl BlobStore for S3BlobStore {
+    fn namespace_prefixes(&self) -> Vec<String> {
+        vec![
+            format!("blocks/{}/", self.did),
+            format!("tmp/{}/", self.did),
+            format!("quarantine/{}/", self.did),
+        ]
+    }
+    fn object_key(&self, kind: ObjectKind, name: &str, generation: u32) -> String {
+        let name = crate::blob_generations::generation_name(name, generation);
+        match kind {
+            ObjectKind::Permanent => format!("blocks/{}/{name}", self.did),
+            ObjectKind::Temp => format!("tmp/{}/{name}", self.did),
+            ObjectKind::Quarantine => format!("quarantine/{}/{name}", self.did),
+        }
+    }
+    fn list_objects(&self, prefix: String) -> BoxFuture<'_, Result<Vec<String>>> {
+        Box::pin(async move { self.list_prefix(&prefix).await })
+    }
+    fn delete_object(&self, key: String) -> BoxFuture<'_, std::result::Result<(), DeleteError>> {
+        Box::pin(async move { self.delete_physical(key).await })
+    }
+    fn object_exists(&self, key: String) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async move { Ok(self.has_key(key).await) })
+    }
+    fn get_object(&self, key: String) -> BoxFuture<'_, Result<Vec<u8>>> {
+        Box::pin(async move {
+            let object = self
+                .client
+                .get_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .send()
+                .await
+                .map_err(classify)?;
+            Ok(object.body.collect().await?.into_bytes().to_vec())
+        })
+    }
+    fn put_object(&self, key: String, bytes: Vec<u8>) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            self.attempt(&key.clone(), "put-object", async {
+                self.put_object_request(key.clone(), bytes)
+                    .send()
+                    .await
+                    .map_err(classify)?;
+                Ok(())
+            })
+            .await
+        })
+    }
     fn put_temp(&self, bytes: Vec<u8>) -> BoxFuture<'_, Result<String>> {
         Box::pin(S3BlobStore::put_temp(self, bytes))
     }
@@ -491,16 +618,62 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["put", "delete", "delete", "copy"]
         );
+        // an endpoint that never answers leaves every attempt unconfirmed:
+        // the request may still take effect
         assert!(attempts.iter().all(|attempt| attempt
             .outcome
             .as_deref()
             .unwrap_or("")
-            .starts_with("failed")));
-        assert!(journal
-            .unresolved("did:example:alice")
+            .starts_with("ambiguous")));
+        let unresolved = journal.unresolved("did:example:alice").await.unwrap();
+        assert_eq!(unresolved.len(), 5, "{unresolved:?}");
+        assert!(unresolved.iter().all(|attempt| attempt.is_unresolved()));
+        assert_eq!(
+            unresolved
+                .iter()
+                .filter(|attempt| attempt.is_write())
+                .count(),
+            3
+        );
+        // the physical-key operations the collector uses
+        assert_eq!(
+            store.namespace_prefixes(),
+            [
+                "blocks/did:example:alice/",
+                "tmp/did:example:alice/",
+                "quarantine/did:example:alice/"
+            ]
+        );
+        assert_eq!(
+            store.object_key(ObjectKind::Permanent, "bafy", 1),
+            "blocks/did:example:alice/bafy.g1"
+        );
+        assert_eq!(
+            store.object_key(ObjectKind::Temp, "t", 0),
+            "tmp/did:example:alice/t"
+        );
+        assert_eq!(
+            store.object_key(ObjectKind::Quarantine, "q", 0),
+            "quarantine/did:example:alice/q"
+        );
+        assert!(store.list_objects("blocks/".to_owned()).await.is_err());
+        assert!(matches!(
+            store.delete_object(stored.clone()).await,
+            Err(DeleteError::Ambiguous(_))
+        ));
+        assert!(!store.object_exists(stored.clone()).await.unwrap());
+        assert!(BlobStore::get_object(&store, stored.clone()).await.is_err());
+        assert!(store
+            .put_object(stored.clone(), b"x".to_vec())
+            .await
+            .is_err());
+        let latest = journal
+            .latest("did:example:alice", &stored)
             .await
             .unwrap()
-            .is_empty());
+            .unwrap();
+        assert_eq!(latest.operation, "put-object");
+        assert!(latest.is_unresolved());
         // without a journal the bulk delete goes out as one request
         let bare = S3BlobStore::new(
             "did:example:alice".to_owned(),

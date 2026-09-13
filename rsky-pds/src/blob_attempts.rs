@@ -44,7 +44,11 @@ const MIGRATION_SET: MigrationSet = MigrationSet {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttemptOutcome {
     Succeeded,
+    /// The service answered and refused; the request did not happen.
     Failed(String),
+    /// No answer arrived (a timeout, a lost connection, an unreadable
+    /// response): the request may still happen later.
+    Ambiguous(String),
 }
 
 impl AttemptOutcome {
@@ -52,9 +56,14 @@ impl AttemptOutcome {
         match self {
             AttemptOutcome::Succeeded => "succeeded".to_owned(),
             AttemptOutcome::Failed(reason) => format!("failed: {reason}"),
+            AttemptOutcome::Ambiguous(reason) => format!("ambiguous: {reason}"),
         }
     }
 }
+
+/// Operations that create or copy an object; a delayed one can bring an
+/// object back after a namespace was listed empty.
+pub const WRITE_OPERATIONS: [&str; 3] = ["put", "copy", "put-object"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attempt {
@@ -67,6 +76,21 @@ pub struct Attempt {
     /// `None` while the request is in flight, or forever if the process
     /// died before recording an outcome.
     pub outcome: Option<String>,
+}
+
+impl Attempt {
+    /// Whether the request may still take effect: no outcome, or an
+    /// outcome the service never confirmed.
+    pub fn is_unresolved(&self) -> bool {
+        match &self.outcome {
+            None => true,
+            Some(outcome) => outcome.starts_with("ambiguous"),
+        }
+    }
+
+    pub fn is_write(&self) -> bool {
+        WRITE_OPERATIONS.contains(&self.operation.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,8 +165,7 @@ impl AttemptJournal {
             })
             .await
     }
-
-    /// Attempts with no recorded outcome; while any exists for a namespace
+    /// Attempts with no confirmed outcome; while any exists for a namespace
     /// nothing about that namespace can be declared.
     pub async fn unresolved(&self, did: &str) -> Result<Vec<Attempt>> {
         let did = did.to_owned();
@@ -150,7 +173,29 @@ impl AttemptJournal {
             .run(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT id, did, key, operation, \"attemptNo\", \"issuedAt\", outcome \
-                     FROM upload_attempt WHERE did = ?1 AND outcome IS NULL ORDER BY id",
+                     FROM upload_attempt WHERE did = ?1 \
+                     AND (outcome IS NULL OR outcome LIKE 'ambiguous%') ORDER BY id",
+                )?;
+                let rows = stmt
+                    .query_map([&did], attempt_from_row)?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await
+    }
+    /// The newest attempt against a key, if any.
+    pub async fn latest(&self, did: &str, key: &str) -> Result<Option<Attempt>> {
+        Ok(self.attempts(did, key).await?.pop())
+    }
+
+    /// Every attempt journaled for the actor, oldest first.
+    pub async fn all(&self, did: &str) -> Result<Vec<Attempt>> {
+        let did = did.to_owned();
+        self.db
+            .run(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, did, key, operation, \"attemptNo\", \"issuedAt\", outcome \
+                     FROM upload_attempt WHERE did = ?1 ORDER BY id",
                 )?;
                 let rows = stmt
                     .query_map([&did], attempt_from_row)?
@@ -218,6 +263,7 @@ mod tests {
     #[tokio::test]
     async fn attempts_are_journaled_before_and_resolved_after() {
         let dir = tempfile::tempdir().unwrap();
+        assert!(AttemptJournal::open("/", true).await.is_err());
         let journal = AttemptJournal::open(dir.path().join("rsky/blob-attempts.sqlite"), true)
             .await
             .unwrap();

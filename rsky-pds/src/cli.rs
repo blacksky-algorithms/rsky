@@ -37,7 +37,9 @@ pub const USAGE: &str = "usage: rsky-pds [<maintenance command>]\n\
   --quarantine-close <seq> --external verified|accepted [--justification <text>]\n\
   --quarantine-status <seq>\n\
   --converge <did>\n\
-  --converge-file <file>               one DID per line; reports the ones that diverge";
+  --converge-file <file>               one DID per line; reports the ones that diverge\n\
+  --collect <did>                      run the blob collector for one actor (never in coexistence)\n\
+  --collect-all                        run the blob collector over every actor and open purge";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -78,6 +80,10 @@ pub enum Command {
     ConvergeFile {
         file: PathBuf,
     },
+    Collect {
+        did: String,
+    },
+    CollectAll,
 }
 
 /// `None` means run the server.
@@ -128,6 +134,8 @@ pub fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Option<Comma
         "--quarantine-status",
         "--converge",
         "--converge-file",
+        "--collect",
+        "--collect-all",
         "--timeout-secs",
         "--did",
         "--kind",
@@ -178,6 +186,10 @@ pub fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Option<Comma
         Command::Converge { did }
     } else if let Some(file) = value("--converge-file")? {
         Command::ConvergeFile { file: file.into() }
+    } else if let Some(did) = value("--collect")? {
+        Command::Collect { did }
+    } else if args.iter().any(|arg| arg == "--collect-all") {
+        Command::CollectAll
     } else {
         bail!("no command given\n{USAGE}");
     };
@@ -194,6 +206,8 @@ pub struct Maintenance {
     pub repairs: RepairStore,
     pub lock_dir: LockDir,
     blobstores: BlobstoreFactory,
+    generations_location: String,
+    coexistence: bool,
 }
 
 impl Maintenance {
@@ -243,7 +257,45 @@ impl Maintenance {
             repairs,
             lock_dir,
             blobstores,
+            generations_location: cfg.service_db.blob_generations_db_location.clone(),
+            coexistence: cfg.service.coexistence,
         })
+    }
+
+    /// The collector over this data directory; the registry must exist.
+    pub async fn collector(&self) -> Result<crate::collector::Collector> {
+        let attempts = self
+            .blobstores
+            .attempts()
+            .cloned()
+            .context("the attempt journal is not open")?;
+        let generations =
+            crate::blob_generations::Generations::open_existing(&self.generations_location).await?;
+        Ok(crate::collector::Collector {
+            lifecycle: self.lifecycle.clone(),
+            attempts,
+            generations,
+            coexistence: self.coexistence,
+        })
+    }
+
+    /// Runs the collector over every actor; the report names each outcome.
+    pub async fn collect_all(&self) -> Result<Vec<crate::collector::ActorReport>> {
+        let collector = self.collector().await?;
+        let factory = self.blobstores_with_generations(&collector.generations);
+        collector.collect_all(&self.actor_store, &factory).await
+    }
+
+    fn blobstores_with_generations(
+        &self,
+        generations: &crate::blob_generations::Generations,
+    ) -> BlobstoreFactory {
+        let mut factory = BlobstoreFactory::from_attempts(
+            self.blobstores.clone_config(),
+            self.blobstores.attempts().cloned(),
+        );
+        factory = factory.with_generations(generations.clone());
+        factory
     }
 
     pub fn blobstore(&self, did: &str) -> Arc<dyn BlobStore> {
@@ -375,6 +427,36 @@ pub async fn run(command: Command) -> Result<(serde_json::Value, i32)> {
             .await?;
             let code = if report.converged { 0 } else { 1 };
             Ok((serde_json::to_value(report)?, code))
+        }
+        Command::Collect { did } => {
+            let collector = maintenance.collector().await?;
+            let factory = maintenance.blobstores_with_generations(&collector.generations);
+            let report = collector
+                .collect_actor(
+                    &maintenance.actor_store,
+                    factory.blobstore(did.clone()),
+                    &did,
+                )
+                .await?;
+            let code = i32::from(
+                report.failed > 0
+                    || matches!(
+                        report.purge,
+                        Some(crate::collector::PurgeOutcome::Open { .. })
+                    ),
+            );
+            Ok((serde_json::to_value(report)?, code))
+        }
+        Command::CollectAll => {
+            let reports = maintenance.collect_all().await?;
+            let code = i32::from(reports.iter().any(|report| {
+                report.failed > 0
+                    || matches!(
+                        report.purge,
+                        Some(crate::collector::PurgeOutcome::Open { .. })
+                    )
+            }));
+            Ok((serde_json::to_value(reports)?, code))
         }
         Command::ConvergeFile { file } => {
             let text = std::fs::read_to_string(&file)
@@ -512,6 +594,16 @@ mod tests {
         assert_eq!(
             parse(&["--quarantine-status", "7"]).unwrap().unwrap(),
             Command::QuarantineStatus { seq: 7 }
+        );
+        assert_eq!(
+            parse(&["--collect", "did:plc:a"]).unwrap().unwrap(),
+            Command::Collect {
+                did: "did:plc:a".to_owned()
+            }
+        );
+        assert_eq!(
+            parse(&["--collect-all"]).unwrap().unwrap(),
+            Command::CollectAll
         );
         assert_eq!(
             parse(&["--converge-file", "dids.txt"]).unwrap().unwrap(),

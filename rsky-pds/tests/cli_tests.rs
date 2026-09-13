@@ -195,3 +195,127 @@ async fn drain_mode_reports_and_exits_by_outcome() {
     assert_eq!(blocked.status.code(), Some(2));
     drop(held);
 }
+
+/// Waits for the process to exit, killing it if it outlives the budget.
+fn wait_bounded(mut child: std::process::Child) -> std::process::Output {
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(60) {
+        if child.try_wait().unwrap().is_some() {
+            return child.wait_with_output().unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    child.kill().unwrap();
+    panic!("the server did not exit within the budget");
+}
+
+#[tokio::test]
+async fn collect_commands_report_and_exit_by_outcome() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // the collector refuses to run without its registry
+    let missing = binary(dir.path())
+        .args(["--collect", DID])
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(2));
+    rsky_pds::blob_generations::Generations::open(dir.path().join("rsky/blob-generations.sqlite"))
+        .await
+        .unwrap();
+    // and while another implementation shares the store
+    let shared = binary(dir.path())
+        .env("PDS_COEXISTENCE", "true")
+        .args(["--collect-all"])
+        .output()
+        .unwrap();
+    assert_eq!(shared.status.code(), Some(2));
+    let booted = binary(dir.path())
+        .env("PDS_COEXISTENCE", "true")
+        .env("PDS_BLOB_GC_ENABLED", "true")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let refused = wait_bounded(booted);
+    assert_ne!(refused.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("PDS_BLOB_GC_ENABLED is set while PDS_COEXISTENCE is true"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+
+    // an actor this server never wrote owes nothing
+    let clean = binary(dir.path())
+        .args(["--collect", DID])
+        .output()
+        .unwrap();
+    assert_eq!(
+        clean.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&clean.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&clean.stdout).unwrap();
+    assert_eq!(report["did"], DID);
+    assert_eq!(report["checked"], 0);
+    assert!(report["purge"].is_null());
+
+    // a deleted account whose namespace has an unconfirmed write stays open
+    let lifecycle =
+        rsky_pds::lifecycle::LifecycleStore::open(dir.path().join("rsky/lifecycle.sqlite"))
+            .await
+            .unwrap();
+    lifecycle
+        .record_purge_obligation(&rsky_pds::lifecycle::PurgeObligation {
+            did: DID.to_owned(),
+            requested_at: rsky_common::now(),
+            namespace_prefixes: vec![],
+            manifest: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    drop(lifecycle);
+    let attempts = rsky_pds::blob_attempts::AttemptJournal::open(
+        dir.path().join("rsky/blob-attempts.sqlite"),
+        false,
+    )
+    .await
+    .unwrap();
+    let pending = attempts.begin(DID, "blocks/x", "put").await.unwrap();
+    let open = binary(dir.path())
+        .args(["--collect", DID])
+        .output()
+        .unwrap();
+    assert_eq!(open.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&open.stdout).unwrap();
+    assert_eq!(report["purge"]["outcome"], "open");
+    let all = binary(dir.path()).args(["--collect-all"]).output().unwrap();
+    assert_eq!(all.status.code(), Some(1));
+    let reports: serde_json::Value = serde_json::from_slice(&all.stdout).unwrap();
+    assert_eq!(reports.as_array().unwrap().len(), 1);
+    assert_eq!(reports[0]["purge"]["outcome"], "open");
+
+    // with the write confirmed and no other writer, the purge is proven
+    attempts
+        .resolve(pending, rsky_pds::blob_attempts::AttemptOutcome::Succeeded)
+        .await
+        .unwrap();
+    drop(attempts);
+    let purged = binary(dir.path()).args(["--collect-all"]).output().unwrap();
+    assert_eq!(
+        purged.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&purged.stderr)
+    );
+    let reports: serde_json::Value = serde_json::from_slice(&purged.stdout).unwrap();
+    assert_eq!(reports[0]["purge"]["outcome"], "verified-purged");
+    let done = binary(dir.path())
+        .args(["--collect", DID])
+        .output()
+        .unwrap();
+    assert_eq!(done.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&done.stdout).unwrap();
+    assert!(report["purge"].is_null());
+}

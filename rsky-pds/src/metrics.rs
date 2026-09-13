@@ -26,6 +26,7 @@ pub struct Metrics {
     pub control_journal_writes: IntCounterVec,
     pub auth_failures: IntCounterVec,
     pub rate_limit_store_errors: IntCounter,
+    pub blob_collector_outcomes: IntCounterVec,
     pub sequencer_last_seq: IntGauge,
     pub inflight_mutations: IntGaugeVec,
     pub publish_intents_pending: IntGaugeVec,
@@ -139,6 +140,12 @@ impl Metrics {
                 &registry,
                 "pds_rate_limit_store_errors_total",
                 "Rate limit consumptions allowed because the shared store did not answer",
+            ),
+            blob_collector_outcomes: counter_vec(
+                &registry,
+                "pds_blob_collector_outcomes_total",
+                "Blob collector decisions by outcome",
+                &["outcome"],
             ),
             sequencer_last_seq: gauge(
                 &registry,

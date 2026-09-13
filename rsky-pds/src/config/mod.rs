@@ -84,6 +84,8 @@ pub struct ServiceDbConfig {
     pub lock_dir: String,
     /// The journal of every physical object-storage write.
     pub blob_attempts_db_location: String,
+    /// The append-only registry of retired object keys, never restored.
+    pub blob_generations_db_location: String,
     /// The repair and quarantine journal.
     pub repair_db_location: String,
 }
@@ -99,6 +101,7 @@ pub struct StorageOverrides {
     pub lifecycle_db_location: Option<String>,
     pub lock_dir: Option<String>,
     pub blob_attempts_db_location: Option<String>,
+    pub blob_generations_db_location: Option<String>,
     pub repair_db_location: Option<String>,
 }
 
@@ -133,6 +136,9 @@ pub fn storage_cfg_from(
         blob_attempts_db_location: overrides
             .blob_attempts_db_location
             .unwrap_or_else(|| db_loc("rsky/blob-attempts.sqlite")),
+        blob_generations_db_location: overrides
+            .blob_generations_db_location
+            .unwrap_or_else(|| db_loc("rsky/blob-generations.sqlite")),
         repair_db_location: overrides
             .repair_db_location
             .unwrap_or_else(|| db_loc("rsky/repair.sqlite")),
@@ -326,6 +332,7 @@ pub fn env_to_cfg() -> ServerConfig {
             lifecycle_db_location: env_str("PDS_LIFECYCLE_DB"),
             lock_dir: env_str("PDS_LOCK_DIR"),
             blob_attempts_db_location: env_str("PDS_BLOB_ATTEMPTS_DB"),
+            blob_generations_db_location: env_str("PDS_BLOB_GENERATIONS_DB"),
             repair_db_location: env_str("PDS_REPAIR_DB"),
         },
     );
@@ -650,6 +657,7 @@ mod tests {
                 lifecycle_db_location: Some("/dbs/lifecycle.sqlite".to_owned()),
                 lock_dir: Some("/dbs/locks".to_owned()),
                 blob_attempts_db_location: Some("/dbs/attempts.sqlite".to_owned()),
+                blob_generations_db_location: None,
                 repair_db_location: Some("/dbs/repair.sqlite".to_owned()),
             },
         );

@@ -273,6 +273,37 @@ Moderation mail from `com.atproto.admin.sendEmail` uses
 set. Without an SMTP URL, Mailgun is used when `PDS_MAILGUN_API_KEY` is
 set; without either, messages are logged and the token flows complete.
 
+### After decommission: the blob collector
+
+While `PDS_COEXISTENCE=true` nothing is ever deleted from object storage:
+dereferenced objects and deleted accounts leave `gc-deferred` rows and
+purge obligations in the journals. Once no other implementation can read
+the store, `PDS_BLOB_GC_ENABLED=true` (refused while `PDS_COEXISTENCE` is
+set) runs the collector every `PDS_BLOB_GC_INTERVAL_SECS` (3600), and
+`rsky-pds --collect <did>` or `--collect-all` runs it once by hand.
+
+Every physical delete is one journaled attempt bound to the exact key it
+names, persisted before the request is sent, with the SDK's own retries
+disabled. A request the store never confirmed stays `ambiguous`; for a
+permanent object the collector then retires the key in the registry at
+`PDS_BLOB_GENERATIONS_DB` (`rsky/blob-generations.sqlite`, append-only,
+never part of a restore) and the next upload of the same content lands at
+a generation key (`blocks/<did>/<cid>.g1`) the old delete never named.
+Reads resolve through the registry, and a content whose key has an
+unconfirmed delete answers `BlobNotFound` until it does. The collector
+refuses to run without the registry, or with a registry that does not know
+a retirement the journal records.
+
+A deleted account's namespaces are listed by prefix and every object is
+deleted the same way. The obligation reaches `verified-purged` only when
+every prefix is empty and every write this process ever made to the
+namespace has a confirmed outcome; a namespace another implementation may
+have written, or one with no attempt history, is only ever
+`observed-empty-legacy-uncertain` and is listed again weekly for the first
+quarter after the deletion request and monthly after that, deleting
+whatever reappeared. Outcomes are counted in
+`pds_blob_collector_outcomes_total{outcome}`.
+
 ### Account management without the reference OAuth UI API
 
 The reference PDS serves account mutations to its own authorization UI

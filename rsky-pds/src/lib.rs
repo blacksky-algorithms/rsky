@@ -6,6 +6,8 @@ extern crate serde;
 use crate::read_after_write::viewer::{LocalViewer, LocalViewerCreator, LocalViewerCreatorParams};
 use crate::sequencer::Sequencer;
 use atrium_xrpc_client::reqwest::ReqwestClient;
+use rsky_common::env::{env_bool, env_int};
+
 pub mod account_manager;
 pub mod actor_store;
 pub mod admission;
@@ -13,7 +15,9 @@ pub mod apis;
 pub mod auth_verifier;
 pub mod background;
 pub mod blob_attempts;
+pub mod blob_generations;
 pub mod cli;
+pub mod collector;
 pub mod config;
 pub mod context;
 pub mod convergence;
@@ -540,9 +544,44 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
     )
     .await
     .expect("Failed to open the blob attempt journal");
+    let generations =
+        blob_generations::Generations::open(&cfg.service_db.blob_generations_db_location)
+            .await
+            .expect("Failed to open the blob generation registry");
     let blobstore_factory = BlobstoreFactory::from_config(cfg.blobstore.clone())
         .await
-        .with_attempts(blob_attempts);
+        .with_attempts(blob_attempts)
+        .with_generations(generations);
+    if env_bool("PDS_BLOB_GC_ENABLED").unwrap_or(false) {
+        assert!(
+            !cfg.service.coexistence,
+            "PDS_BLOB_GC_ENABLED is set while PDS_COEXISTENCE is true; the collector never runs while another implementation shares the store"
+        );
+        if !read_only {
+            let interval = std::time::Duration::from_secs(
+                env_int("PDS_BLOB_GC_INTERVAL_SECS")
+                    .map(|secs| secs.max(60) as u64)
+                    .unwrap_or(3600),
+            );
+            tokio::spawn(async move {
+                loop {
+                    match cli::Maintenance::from_env().await {
+                        Ok(maintenance) => match maintenance.collect_all().await {
+                            Ok(reports) => tracing::info!(
+                                actors = reports.len(),
+                                "blob collector pass complete"
+                            ),
+                            Err(error) => tracing::error!(%error, "blob collector pass failed"),
+                        },
+                        Err(error) => {
+                            tracing::error!(%error, "blob collector could not open the data directory")
+                        }
+                    }
+                    tokio::time::sleep(interval).await;
+                }
+            });
+        }
+    }
 
     let id_resolver = SharedIdResolver {
         id_resolver: RwLock::new(

@@ -55,15 +55,34 @@ pub enum BlobWorkState {
     /// A newer moderation decision made the row moot.
     Superseded,
     Done,
+    /// The collector is confirming the object is still unreferenced.
+    Checking,
+    /// The collector has journaled a delete attempt and sent it.
+    Issuing,
+    /// The delete's outcome is unknown; the key must not be reused.
+    Ambiguous,
+    /// The store refused the delete; the collector tries again later.
+    Failed,
+    /// The key was retired to the generation registry after an ambiguous
+    /// delete; the next upload of the content lands at a new generation.
+    Retired,
+    /// An operator recorded that the object is abandoned where it is.
+    Orphaned,
 }
 
 impl BlobWorkState {
-    pub const ALL: [BlobWorkState; 5] = [
+    pub const ALL: [BlobWorkState; 11] = [
         BlobWorkState::DeletePending,
         BlobWorkState::GcDeferred,
         BlobWorkState::RestorePending,
         BlobWorkState::Superseded,
         BlobWorkState::Done,
+        BlobWorkState::Checking,
+        BlobWorkState::Issuing,
+        BlobWorkState::Ambiguous,
+        BlobWorkState::Failed,
+        BlobWorkState::Retired,
+        BlobWorkState::Orphaned,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -73,6 +92,12 @@ impl BlobWorkState {
             BlobWorkState::RestorePending => "restore-pending",
             BlobWorkState::Superseded => "superseded",
             BlobWorkState::Done => "done",
+            BlobWorkState::Checking => "checking",
+            BlobWorkState::Issuing => "issuing",
+            BlobWorkState::Ambiguous => "ambiguous",
+            BlobWorkState::Failed => "failed",
+            BlobWorkState::Retired => "retired",
+            BlobWorkState::Orphaned => "orphaned",
         }
     }
 
@@ -87,8 +112,17 @@ impl BlobWorkState {
     /// hand-back, or convergence check waits only on non-terminal rows.
     pub fn is_terminal(self) -> bool {
         match self {
-            BlobWorkState::DeletePending | BlobWorkState::RestorePending => false,
-            BlobWorkState::GcDeferred | BlobWorkState::Superseded | BlobWorkState::Done => true,
+            BlobWorkState::DeletePending
+            | BlobWorkState::RestorePending
+            | BlobWorkState::Checking
+            | BlobWorkState::Issuing
+            | BlobWorkState::Ambiguous
+            | BlobWorkState::Failed => false,
+            BlobWorkState::GcDeferred
+            | BlobWorkState::Superseded
+            | BlobWorkState::Done
+            | BlobWorkState::Retired
+            | BlobWorkState::Orphaned => true,
         }
     }
 }
@@ -164,8 +198,7 @@ fn blob_work_from_row(row: &rusqlite::Row) -> Result<BlobWork> {
         created_at: row.get(6)?,
     })
 }
-
-fn insert_blob_work_in(
+pub(crate) fn insert_blob_work_in(
     conn: &rusqlite::Connection,
     kind: BlobWorkKind,
     key: &str,
@@ -802,6 +835,35 @@ impl BlobReader {
                     .query_and_then([], blob_work_from_row)?
                     .collect::<Result<Vec<BlobWork>>>()?;
                 Ok(rows)
+            })
+            .await
+    }
+    /// Moves one journaled row to `state`.
+    pub async fn set_blob_work_state(&self, id: i64, state: BlobWorkState) -> Result<()> {
+        let stamp = now();
+        self.db
+            .run(move |conn| {
+                conn.execute(
+                    "UPDATE blob_work SET state = ?1, \"updatedAt\" = ?2 WHERE id = ?3",
+                    rusqlite::params![state.as_str(), stamp, id],
+                )?;
+                Ok(())
+            })
+            .await
+    }
+
+    /// Whether any record or registration still names the content.
+    pub async fn is_referenced(&self, cid: &str) -> Result<bool> {
+        let cid = cid.to_owned();
+        self.db
+            .run(move |conn| {
+                let referenced: bool = conn.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM record_blob WHERE \"blobCid\" = ?1) \
+                     OR EXISTS (SELECT 1 FROM blob WHERE cid = ?1)",
+                    [cid.as_str()],
+                    |row| row.get(0),
+                )?;
+                Ok(referenced)
             })
             .await
     }
