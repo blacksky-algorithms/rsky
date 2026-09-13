@@ -107,10 +107,8 @@ async fn inner_put_record(
             }
         };
 
-        if let Some(commit) = commit {
-            publication::publish_pending(actor_store, sequencer, &did, None).await?;
-            account_manager
-                .update_repo_root(did, commit.commit_data.cid, commit.commit_data.rev)
+        if commit.is_some() {
+            publication::publish_pending(actor_store, sequencer, &account_manager, &did, None)
                 .await?;
             record_repo_write(match &write {
                 PreparedWrite::Create(_) => "create",

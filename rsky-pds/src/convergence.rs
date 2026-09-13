@@ -453,9 +453,15 @@ mod tests {
                 .await
                 .unwrap();
         }
-        publish_pending(&world.actor_store, &world.sequencer, DID, None)
-            .await
-            .unwrap();
+        publish_pending(
+            &world.actor_store,
+            &world.sequencer,
+            &world.account_manager,
+            DID,
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -499,9 +505,15 @@ mod tests {
         assert!(behind.reasons.iter().any(|r| r.contains("roots differ")));
 
         // publishing and recording the root restores convergence
-        publish_pending(&world.actor_store, &world.sequencer, DID, None)
-            .await
-            .unwrap();
+        publish_pending(
+            &world.actor_store,
+            &world.sequencer,
+            &world.account_manager,
+            DID,
+            None,
+        )
+        .await
+        .unwrap();
         let root = world
             .actor_store
             .read(DID.to_owned(), world.blobstore.clone())

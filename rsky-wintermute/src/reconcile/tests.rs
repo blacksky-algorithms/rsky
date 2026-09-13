@@ -51,7 +51,14 @@ async fn pool() -> Pool {
         .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned());
     let pool = crate::config::create_pg_pool(&url, crate::config::pg_pool_config(8)).unwrap();
     let client = pool.get().await.unwrap();
-    client.batch_execute(TABLES_DDL).await.unwrap();
+    // concurrent CREATE TABLE IF NOT EXISTS races in Postgres; one test at a
+    // time creates the shared tables
+    client
+        .batch_execute(&format!(
+            "SELECT pg_advisory_lock(720901); {TABLES_DDL} SELECT pg_advisory_unlock(720901);"
+        ))
+        .await
+        .unwrap();
     pool
 }
 
@@ -68,7 +75,6 @@ async fn reset_actor(pool: &Pool, did: &str) {
     ] {
         client.execute(statement, &[&did]).await.unwrap();
     }
-    super::forget_generation(did);
 }
 
 fn keypair() -> Keypair {
@@ -357,7 +363,7 @@ async fn the_gate_admits_defers_and_refuses_by_rule() {
         super::current_generation(&pool, did).await.unwrap(),
         Some(1)
     );
-    // the cache answers until it is forgotten
+    // a bump made elsewhere is seen by the next stamp, with no cache between
     client
         .execute(
             "UPDATE wintermute.did_generation SET generation = 2 WHERE did = $1",
@@ -365,11 +371,6 @@ async fn the_gate_admits_defers_and_refuses_by_rule() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        super::current_generation(&pool, did).await.unwrap(),
-        Some(1)
-    );
-    super::forget_generation(did);
     assert_eq!(
         super::current_generation(&pool, did).await.unwrap(),
         Some(2)
@@ -929,5 +930,240 @@ async fn an_unreachable_frontier_fails_closed_and_releases_the_fence() {
             .await
             .is_err()
     );
+    reset_actor(&pool, did).await;
+}
+
+const REFUSE_FN: &str = "CREATE OR REPLACE FUNCTION wintermute_test_refuse() RETURNS trigger \
+    LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected write failure'; END $$;";
+
+async fn fence_holder(pool: &Pool, did: &str) -> Option<String> {
+    let client = pool.get().await.unwrap();
+    client
+        .query_opt(
+            "SELECT workflow_id FROM wintermute.reconcile_fence WHERE did = $1",
+            &[&did],
+        )
+        .await
+        .unwrap()
+        .map(|row| row.get(0))
+}
+
+/// A fence belongs to the workflow that installed it: another workflow is
+/// refused, a dry run touches nothing, and only the holder resumes.
+#[tokio::test]
+async fn a_fence_held_by_another_workflow_is_never_taken_over() {
+    let pool = pool().await;
+    let did = "did:plc:wintermute-held";
+    reset_actor(&pool, did).await;
+    let repo = TestRepo::create(did, &[("aaa", "one")]).await;
+    let pds = MockPds::serving(
+        did,
+        repo.car().await,
+        &frontier(did, &repo.root(), &repo.rev(), true),
+    )
+    .await;
+    let client = pool.get().await.unwrap();
+    client
+        .execute(
+            "INSERT INTO wintermute.reconcile_fence (did, workflow_id) VALUES ($1, 'wf-other')",
+            &[&did],
+        )
+        .await
+        .unwrap();
+    let err = reconcile(&pool, &pds.client, &options(did))
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("fenced by workflow wf-other"),
+        "{err}"
+    );
+    let report = reconcile(
+        &pool,
+        &pds.client,
+        &ReconcileOptions {
+            dry_run: true,
+            ..options(did)
+        },
+    )
+    .await
+    .unwrap();
+    assert!(report.dry_run);
+    assert_eq!(fence_holder(&pool, did).await.as_deref(), Some("wf-other"));
+    let report = reconcile(
+        &pool,
+        &pds.client,
+        &ReconcileOptions {
+            workflow_id: "wf-other".to_owned(),
+            ..options(did)
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.branch, Some(Branch::Ordinary));
+    drop(pds);
+    assert_eq!(fence_holder(&pool, did).await, None);
+    reset_actor(&pool, did).await;
+}
+
+/// A write that fails after the boundary was persisted leaves the actor
+/// fenced with its boundary; only the same workflow finishes the job.
+#[tokio::test]
+async fn a_failed_write_after_the_boundary_keeps_the_fence_for_the_workflow() {
+    let pool = pool().await;
+    let did = "did:plc:wintermute-failed-write";
+    reset_actor(&pool, did).await;
+    let repo = TestRepo::create(did, &[("aaa", "one")]).await;
+    let pds = MockPds::serving(
+        did,
+        repo.car().await,
+        &frontier(did, &repo.root(), &repo.rev(), true),
+    )
+    .await;
+    let client = pool.get().await.unwrap();
+    client
+        .batch_execute(&format!(
+            "{REFUSE_FN} DROP TRIGGER IF EXISTS wintermute_test_refuse_record ON record; \
+             CREATE TRIGGER wintermute_test_refuse_record BEFORE INSERT ON record FOR EACH ROW \
+             WHEN (NEW.did = '{did}') EXECUTE FUNCTION wintermute_test_refuse();"
+        ))
+        .await
+        .unwrap();
+    let err = reconcile(&pool, &pds.client, &options(did))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("stays fenced"), "{err}");
+    assert_eq!(fence_holder(&pool, did).await.as_deref(), Some("wf-test"));
+    assert_eq!(
+        super::workflow::persisted_boundary(&client, did)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(repo.rev().as_str())
+    );
+    assert_eq!(
+        super::workflow::journal_of(&client, did).await.unwrap(),
+        Some(("boundary".to_owned(), "wf-test".to_owned()))
+    );
+    client
+        .batch_execute("DROP TRIGGER wintermute_test_refuse_record ON record")
+        .await
+        .unwrap();
+    let err = reconcile(
+        &pool,
+        &pds.client,
+        &ReconcileOptions {
+            workflow_id: "wf-late".to_owned(),
+            ..options(did)
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("fenced by workflow wf-test"),
+        "{err}"
+    );
+    let report = reconcile(&pool, &pds.client, &options(did)).await.unwrap();
+    assert_eq!(report.records_inserted, 1);
+    drop(pds);
+    assert_eq!(fence_holder(&pool, did).await, None);
+    reset_actor(&pool, did).await;
+}
+
+/// A commit is acknowledged only once its event's writes and the
+/// acknowledgement row are durable; anything less hands the job back.
+#[tokio::test]
+async fn a_commit_acknowledgement_is_retried_until_it_is_durable() {
+    let pool = pool().await;
+    let did = "did:plc:wintermute-ack";
+    reset_actor(&pool, did).await;
+    let client = pool.get().await.unwrap();
+    client
+        .batch_execute(&format!(
+            "{REFUSE_FN} DROP TRIGGER IF EXISTS wintermute_test_refuse_ack ON wintermute.did_progress; \
+             CREATE TRIGGER wintermute_test_refuse_ack BEFORE INSERT OR UPDATE ON wintermute.did_progress \
+             FOR EACH ROW WHEN (NEW.did = '{did}') EXECUTE FUNCTION wintermute_test_refuse();"
+        ))
+        .await
+        .unwrap();
+    let commit = IndexJob {
+        uri: format!("at://{did}"),
+        cid: "bafyack".to_owned(),
+        action: WriteAction::Commit,
+        record: None,
+        indexed_at: "2026-01-01T00:00:00.000Z".to_owned(),
+        rev: "3ack".to_owned(),
+        provenance: None,
+    };
+    let err = IndexerManager::process_job(&pool, &commit, false)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("injected write failure"), "{err}");
+    assert!(progress_of(&client, did).await.unwrap().is_none());
+    client
+        .batch_execute("DROP TRIGGER wintermute_test_refuse_ack ON wintermute.did_progress")
+        .await
+        .unwrap();
+    IndexerManager::process_job(&pool, &commit, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        progress_of(&client, did)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_commit_cid
+            .as_deref(),
+        Some("bafyack")
+    );
+
+    // a record write that fails in the same batch withholds the acknowledgement
+    client
+        .batch_execute(&format!(
+            "DROP TRIGGER IF EXISTS wintermute_test_refuse_record ON record; \
+             CREATE TRIGGER wintermute_test_refuse_record BEFORE INSERT ON record FOR EACH ROW \
+             WHEN (NEW.did = '{did}') EXECUTE FUNCTION wintermute_test_refuse();"
+        ))
+        .await
+        .unwrap();
+    let record = job(
+        &format!("at://{did}/com.example.note/aaa"),
+        "bafyrecord",
+        "3ack2",
+        WriteAction::Create,
+        None,
+    );
+    let later = IndexJob {
+        cid: "bafyack2".to_owned(),
+        rev: "3ack2".to_owned(),
+        ..commit.clone()
+    };
+    let (results, _) = IndexerManager::process_jobs_batch_with(
+        &pool,
+        &[(b"r".to_vec(), record), (b"c".to_vec(), later)],
+        false,
+        false,
+        GateMode::Normal,
+    )
+    .await;
+    let commit_result = results
+        .iter()
+        .find(|(key, _)| key == b"c")
+        .map(|(_, result)| result)
+        .unwrap();
+    let err = commit_result.as_ref().unwrap_err();
+    assert!(err.to_string().contains("before the commit"), "{err}");
+    assert_eq!(
+        progress_of(&client, did)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_commit_cid
+            .as_deref(),
+        Some("bafyack")
+    );
+    client
+        .batch_execute("DROP TRIGGER wintermute_test_refuse_record ON record")
+        .await
+        .unwrap();
     reset_actor(&pool, did).await;
 }

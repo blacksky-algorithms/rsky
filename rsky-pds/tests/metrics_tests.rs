@@ -51,7 +51,7 @@ async fn xrpc_requests_are_counted_by_method_and_status() {
         .body(json!({"identifier": "nobody.test", "password": "wrong"}).to_string())
         .dispatch()
         .await;
-    assert_eq!(login_response.status(), Status::BadRequest);
+    assert_eq!(login_response.status(), Status::Unauthorized);
 
     let metrics_response = client.get("/metrics").dispatch().await;
     let body = metrics_response.into_string().await.expect("response body");
@@ -113,7 +113,7 @@ async fn account_created_is_counted_by_source() {
 
     assert!(
         body.contains(
-            r#"pds_accounts_created_total{source="admin",invited="true",deactivated="true"} 1"#
+            r#"pds_accounts_created_total{deactivated="true",invited="true",source="admin"} 1"#
         ),
         "{body}"
     );

@@ -527,7 +527,9 @@ impl ActorStore {
             let Some(db) = db else { return Ok(()) };
             let blob = BlobReader::new(blobstore, db.clone(), background_queue, coexistence);
             blob.run_blob_work().await?;
-            settle_pending_work(&lifecycle, &db, &blob, &did).await
+            // queued only after a publication that brought the account root
+            // up to date, so the root is current here
+            settle_pending_work(&lifecycle, &db, &blob, &did, true).await
         });
     }
 
@@ -607,8 +609,10 @@ impl ActorStore {
         did: String,
         blobstore: Arc<dyn BlobStore>,
     ) -> Result<ActorStoreTransactor> {
-        self.admission.admit_mutation(&did)?;
-        self.transact_admitted(did, blobstore).await
+        self.transact_admitted(did, blobstore, |admission, did| {
+            admission.admit_mutation(did)
+        })
+        .await
     }
 
     /// A write by the maintenance workflow the actor's allowlist entry
@@ -619,22 +623,32 @@ impl ActorStore {
         blobstore: Arc<dyn BlobStore>,
         workflow_id: &str,
     ) -> Result<ActorStoreTransactor> {
-        self.admission.admit_maintenance(&did, workflow_id)?;
-        self.transact_admitted(did, blobstore).await
+        self.transact_admitted(did, blobstore, |admission, did| {
+            admission.admit_maintenance(did, workflow_id)
+        })
+        .await
     }
 
+    /// Admission is checked before and after waiting for the actor's locks:
+    /// a request that waited is counted in flight the whole time, so a drain
+    /// sees it, and it never commits on authority that was withdrawn while
+    /// it waited.
     async fn transact_admitted(
         &self,
         did: String,
         blobstore: Arc<dyn BlobStore>,
+        admit: impl Fn(&crate::admission::Admission, &str) -> Result<(), crate::admission::NotAdmitted>,
     ) -> Result<ActorStoreTransactor> {
+        admit(&self.admission, &did)?;
         crate::lifecycle::assert_not_deleting(&self.tombstones, &did)?;
+        let inflight = InflightGuard::new(&did, &self.inflight);
         let guard = self.did_lock(&did).lock_owned().await;
         let file_lock = match &self.lock_dir {
             Some(lock_dir) => Some(lock_dir.shared(&did).await?),
             None => None,
         };
-        let inflight = InflightGuard::new(&did, &self.inflight);
+        admit(&self.admission, &did)?;
+        crate::lifecycle::assert_not_deleting(&self.tombstones, &did)?;
         let db = self.open_db(&did, OpenMode::Write).await?;
         let key_location = self.get_location(&did)?.key_location;
         let reader = ActorStoreReader::new(

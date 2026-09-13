@@ -8509,7 +8509,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-pds"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -8589,7 +8589,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-pds-router"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -8848,7 +8848,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-wintermute"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",

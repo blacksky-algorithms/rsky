@@ -95,10 +95,20 @@ impl Journal {
 
     /// Records the upstream's answer to a started mutation.
     pub fn end(&self, id: u64, status: u16) -> std::io::Result<()> {
+        self.close(id, "end", status)
+    }
+
+    /// Records that the upstream's outcome is unknown: the request was sent
+    /// and no answer came back, so the mutation may still complete.
+    pub fn ambiguous(&self, id: u64, status: u16) -> std::io::Result<()> {
+        self.close(id, "ambiguous", status)
+    }
+
+    fn close(&self, id: u64, phase: &'static str, status: u16) -> std::io::Result<()> {
         let line = serde_json::to_string(&End {
             t: now(),
             id,
-            phase: "end",
+            phase,
             status,
         })
         .expect("journal line serializes");

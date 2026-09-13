@@ -1,6 +1,7 @@
 //! What an actor still owes this process, and the maintenance drain that
 //! finishes it under an exclusive lock.
 
+use crate::account_manager::AccountManager;
 use crate::actor_store::blob::BlobReader;
 use crate::actor_store::blobstore::{unavailable, BlobStore};
 use crate::actor_store::{pending_intents_in, ActorStore};
@@ -101,9 +102,11 @@ pub async fn drain_status(
 /// Waits for the actor's in-flight writes to finish, then delivers its
 /// intents and runs its blob work while holding the actor's lock
 /// exclusively, so nothing new starts underneath.
+#[allow(clippy::too_many_arguments)]
 pub async fn drain_did(
     actor_store: &ActorStore,
     sequencer: &SharedSequencer,
+    account_manager: &AccountManager,
     repairs: &RepairStore,
     lock_dir: &LockDir,
     blobstore: Arc<dyn BlobStore>,
@@ -112,7 +115,7 @@ pub async fn drain_did(
 ) -> Result<DrainStatus> {
     let _exclusive = lock_dir.exclusive_within(did, timeout).await?;
     if actor_store.admission.admit_worker(did).is_ok() {
-        publish_pending(actor_store, sequencer, did, None).await?;
+        publish_pending(actor_store, sequencer, account_manager, did, None).await?;
         if actor_store.exists(did).await? {
             let db = actor_store.write_db(did).await?;
             let blob = BlobReader::new(
@@ -122,7 +125,7 @@ pub async fn drain_did(
                 actor_store.coexistence,
             );
             blob.run_blob_work().await?;
-            settle_pending_work(&actor_store.lifecycle, &db, &blob, did).await?;
+            settle_pending_work(&actor_store.lifecycle, &db, &blob, did, true).await?;
         }
     }
     drain_status(actor_store, repairs, did).await
@@ -148,6 +151,7 @@ mod tests {
         dir: tempfile::TempDir,
         actor_store: ActorStore,
         sequencer: SharedSequencer,
+        account_manager: AccountManager,
         repairs: RepairStore,
         lock_dir: LockDir,
         blobstore: Arc<MemoryBlobStore>,
@@ -183,10 +187,16 @@ mod tests {
         let repairs = RepairStore::open(dir.path().join("rsky/repair.sqlite"))
             .await
             .unwrap();
+        let account_manager = AccountManager::new(
+            crate::account_manager::db::get_migrated_db(dir.path().join("account.sqlite"))
+                .await
+                .unwrap(),
+        );
         World {
             dir,
             actor_store,
             sequencer,
+            account_manager,
             repairs,
             lock_dir,
             blobstore: Arc::new(MemoryBlobStore::default()),
@@ -265,6 +275,7 @@ mod tests {
         let drained = drain_did(
             &world.actor_store,
             &world.sequencer,
+            &world.account_manager,
             &world.repairs,
             &world.lock_dir,
             world.blobstore.clone(),
@@ -325,6 +336,7 @@ mod tests {
         let err = drain_did(
             &world.actor_store,
             &world.sequencer,
+            &world.account_manager,
             &world.repairs,
             &world.lock_dir,
             world.blobstore.clone(),
@@ -340,6 +352,7 @@ mod tests {
         let absent = drain_did(
             &world.actor_store,
             &world.sequencer,
+            &world.account_manager,
             &world.repairs,
             &world.lock_dir,
             world.blobstore.clone(),

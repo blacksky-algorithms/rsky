@@ -1297,3 +1297,61 @@ fn inflight_counts_stack_and_unwind() {
     drop(second);
     assert!(inflight.lock().unwrap().get(TEST_DID).is_none());
 }
+
+/// A request queued behind the actor's lock is counted in flight while it
+/// waits, and re-reads its authority once it holds the lock: an entry
+/// withdrawn in the meantime refuses the commit.
+#[tokio::test]
+async fn a_queued_transaction_rechecks_its_authority_under_the_lock() {
+    let (dir, store) = admitted_store().await;
+    store.create(TEST_DID, &test_keypair()).await.unwrap();
+    let store = Arc::new(store);
+    let locks = crate::locks::LockDir::new(dir.path().join("locks")).unwrap();
+    let held = locks.try_exclusive(TEST_DID).unwrap().unwrap();
+
+    let queued = {
+        let store = Arc::clone(&store);
+        tokio::spawn(async move { store.transact(TEST_DID.to_owned(), blobstore()).await })
+    };
+    for _ in 0..200 {
+        if store.inflight_mutations(TEST_DID) == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        store.inflight_mutations(TEST_DID),
+        1,
+        "the waiter is visible to a drain"
+    );
+
+    std::fs::write(
+        dir.path().join("write-allowlist.toml"),
+        "version = 1\ndefault = \"absent\"\n[entries]\n",
+    )
+    .unwrap();
+    assert!(store.admission.reload().unwrap());
+    drop(held);
+    let refused = queued.await.unwrap().map(drop).unwrap_err();
+    assert_eq!(not_admitted(&refused).unwrap().state, "absent");
+    assert_eq!(store.inflight_mutations(TEST_DID), 0);
+
+    // a tombstone written while the request waited refuses it as well
+    std::fs::write(dir.path().join("write-allowlist.toml"), ALLOWLIST).unwrap();
+    assert!(store.admission.reload().unwrap());
+    let held = locks.try_exclusive(TEST_DID).unwrap().unwrap();
+    let queued = {
+        let store = Arc::clone(&store);
+        tokio::spawn(async move { store.transact(TEST_DID.to_owned(), blobstore()).await })
+    };
+    for _ in 0..200 {
+        if store.inflight_mutations(TEST_DID) == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    store.lifecycle.tombstone(TEST_DID).await.unwrap();
+    drop(held);
+    let refused = queued.await.unwrap().map(drop).unwrap_err();
+    assert!(refused.to_string().contains("delet"), "{refused}");
+}

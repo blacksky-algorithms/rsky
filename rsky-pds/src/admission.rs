@@ -125,9 +125,6 @@ impl Allowlist {
             Some(name) => parse_named(&name)?,
             None => AdmissionState::Absent,
         };
-        if matches!(default, AdmissionState::Draining) {
-            bail!("the default state cannot be draining");
-        }
         let mut entries = HashMap::new();
         for (did, entry) in file.entries {
             if !did.starts_with("did:") {
@@ -318,7 +315,6 @@ default = "absent"
         for (text, needle) in [
             ("not toml [", "valid TOML"),
             ("version = 2\n", "version"),
-            ("version = 1\ndefault = \"draining\"\n", "default"),
             ("version = 1\ndefault = \"whatever\"\n", "unknown admission state"),
             (
                 "version = 1\n[entries]\n\"did:plc:a\" = \"maintenance\"\n",
@@ -448,5 +444,35 @@ default = "absent"
             .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(admission.admit_mutation("did:plc:other").is_ok());
+    }
+
+    /// A fleet rollback drains every actor at once: the default refuses
+    /// new mutations while workers finish, and an explicit entry still
+    /// overrides it.
+    #[test]
+    fn a_draining_default_refuses_mutations_and_keeps_workers_running() {
+        let list = Allowlist::parse(
+            "version = 1\ndefault = \"draining\"\n[entries]\n\"did:plc:a\" = \"active\"\n",
+        )
+        .unwrap();
+        assert_eq!(list.default, AdmissionState::Draining);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("allowlist.toml");
+        std::fs::write(
+            &path,
+            "version = 1\ndefault = \"draining\"\n[entries]\n\"did:plc:a\" = \"active\"\n",
+        )
+        .unwrap();
+        let admission = Admission::from_file(&path).unwrap();
+        assert_eq!(
+            admission
+                .admit_mutation("did:plc:anyone")
+                .unwrap_err()
+                .state,
+            "draining"
+        );
+        assert!(admission.admit_worker("did:plc:anyone").is_ok());
+        assert!(admission.admit_mutation("did:plc:a").is_ok());
+        assert_eq!(admission.state_of("did:plc:zzz"), AdmissionState::Draining);
     }
 }

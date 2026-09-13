@@ -318,6 +318,7 @@ impl Maintenance {
         drain_did(
             &self.actor_store,
             &self.sequencer,
+            &self.account_manager,
             &self.repairs,
             &self.lock_dir,
             self.blobstore(did),

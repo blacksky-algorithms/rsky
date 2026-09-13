@@ -164,7 +164,7 @@ pub async fn create_session(
         }
         Err(error) => {
             let reason = match &error {
-                ApiError::InvalidLogin => "invalid_credentials",
+                ApiError::InvalidLogin | ApiError::AuthRequiredError(_) => "invalid_credentials",
                 ApiError::AccountTakendown => "account_takedown",
                 _ => "internal_error",
             };

@@ -95,14 +95,11 @@ async fn inner_create_record(
         for delete in backlink_deletions {
             writes.push(PreparedWrite::Delete(delete));
         }
-        let commit = actor_txn
+        actor_txn
             .process_writes(writes.clone(), swap_commit_cid)
             .await?;
 
-        publication::publish_pending(actor_store, sequencer, &did, None).await?;
-        account_manager
-            .update_repo_root(did, commit.commit_data.cid, commit.commit_data.rev)
-            .await?;
+        publication::publish_pending(actor_store, sequencer, &account_manager, &did, None).await?;
         record_repo_write("create");
 
         Ok(CreateRecordOutput {

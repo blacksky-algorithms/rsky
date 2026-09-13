@@ -6,7 +6,7 @@
 //! application fence in the order the completion branch requires.
 
 use super::frontier::{Frontier, FrontierClient};
-use super::{GateMode, forget_generation, progress_of};
+use super::{GateMode, progress_of};
 use crate::indexer::IndexerManager;
 use crate::types::{IndexJob, WintermuteError, WriteAction};
 use deadpool_postgres::{Client, Pool};
@@ -195,6 +195,9 @@ fn greatest<'a>(revs: impl IntoIterator<Item = Option<&'a str>>) -> Option<Strin
         .map(std::borrow::ToOwned::to_owned)
 }
 
+/// Fences the actor for one workflow. A fence another workflow holds is
+/// never taken over: the actor stays as that workflow left it until it
+/// finishes or an operator resumes it under the same id.
 async fn install_fence(
     client: &mut Client,
     did: &str,
@@ -203,6 +206,18 @@ async fn install_fence(
     let txn = client.transaction().await?;
     txn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", &[&did])
         .await?;
+    let held: Option<String> = txn
+        .query_opt(
+            "SELECT workflow_id FROM wintermute.reconcile_fence WHERE did = $1",
+            &[&did],
+        )
+        .await?
+        .map(|row| row.get(0));
+    if let Some(held) = held.filter(|held| held != workflow_id) {
+        return Err(WintermuteError::Other(format!(
+            "{did} is fenced by workflow {held}; it stays fenced"
+        )));
+    }
     txn.execute(
         "INSERT INTO wintermute.reconcile_fence (did, workflow_id) VALUES ($1, $2) \
          ON CONFLICT (did) DO UPDATE SET workflow_id = EXCLUDED.workflow_id, installed_at = now()",
@@ -221,15 +236,34 @@ async fn install_fence(
     Ok(())
 }
 
-/// Removes the application fence so queued events for the actor apply.
-pub async fn release_fence(client: &Client, did: &str) -> Result<(), WintermuteError> {
-    client
+/// Removes the application fence the named workflow holds so queued events
+/// for the actor apply; a fence held by another workflow is left alone.
+pub async fn release_fence(
+    client: &Client,
+    did: &str,
+    workflow_id: &str,
+) -> Result<bool, WintermuteError> {
+    let removed = client
         .execute(
-            "DELETE FROM wintermute.reconcile_fence WHERE did = $1",
+            "DELETE FROM wintermute.reconcile_fence WHERE did = $1 AND workflow_id = $2",
+            &[&did, &workflow_id],
+        )
+        .await?;
+    Ok(removed > 0)
+}
+
+/// The journal's step and workflow for an actor, if a workflow ever ran.
+pub async fn journal_of(
+    client: &Client,
+    did: &str,
+) -> Result<Option<(String, String)>, WintermuteError> {
+    let row = client
+        .query_opt(
+            "SELECT step, workflow_id FROM wintermute.reconcile_journal WHERE did = $1",
             &[&did],
         )
         .await?;
-    Ok(())
+    Ok(row.map(|row| (row.get(0), row.get(1))))
 }
 
 async fn journal_step(
@@ -284,7 +318,6 @@ async fn persist_boundary(
         .await?
         .get(0);
     txn.commit().await?;
-    forget_generation(did);
     Ok(generation)
 }
 
@@ -414,8 +447,13 @@ fn plan(
     plan
 }
 
-/// Runs the workflow for one actor. A refusal leaves the actor as it was,
-/// with the fence released.
+/// Runs the workflow for one actor.
+///
+/// A refusal before anything durable happened leaves the actor as it was,
+/// with the fence released; a failure after the boundary was persisted
+/// keeps the fence, and the recovery branch keeps it until
+/// `verify_recovery` lets the recovery commit through. A dry run installs
+/// and releases nothing.
 pub async fn reconcile(
     pool: &Pool,
     pds: &FrontierClient,
@@ -427,18 +465,18 @@ pub async fn reconcile(
         install_fence(&mut client, did, &opts.workflow_id).await?;
     }
     let outcome = reconcile_fenced(pool, &mut client, pds, opts).await;
-    match &outcome {
-        Ok(report) if report.branch == Some(Branch::Recovery) => {
-            // the recovery commit is applied through the ordinary queue, so
-            // the application fence is released while the PDS mutation
-            // fence stays until the acknowledgement is verified
-            release_fence(&client, did).await?;
-        }
-        Ok(_) | Err(_) => {
-            if !opts.dry_run {
-                release_fence(&client, did).await?;
-            }
-        }
+    if opts.dry_run {
+        return outcome;
+    }
+    let release = match &outcome {
+        Ok(report) => report.branch != Some(Branch::Recovery),
+        Err(_) => matches!(
+            journal_of(&client, did).await?,
+            Some((step, _)) if step == "fenced"
+        ),
+    };
+    if release {
+        release_fence(&client, did, &opts.workflow_id).await?;
     }
     outcome
 }
@@ -681,6 +719,13 @@ pub async fn verify_recovery(
     expected_commit_cid: &str,
 ) -> Result<Verification, WintermuteError> {
     let client = pool.get().await?;
+    // the recovery commit was published while the application fence held;
+    // lifting the workflow's own fence lets the queued commit apply
+    if let Some((step, workflow_id)) = journal_of(&client, did).await? {
+        if step == "awaiting-recovery" && release_fence(&client, did, &workflow_id).await? {
+            tracing::info!(%did, %workflow_id, "application fence released for the recovery commit");
+        }
+    }
     let progress = progress_of(&client, did).await?;
     let last_commit_cid = progress
         .as_ref()

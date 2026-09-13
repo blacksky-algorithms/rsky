@@ -208,8 +208,14 @@ pub async fn server_create_account(
         drop(lock);
         // the repository's first commit and its sync event were committed
         // as intents with the store; deliver them after the account events
-        if let Err(error) =
-            crate::publication::publish_pending(actor_store, sequencer, &did, None).await
+        if let Err(error) = crate::publication::publish_pending(
+            actor_store,
+            sequencer,
+            &account_manager,
+            &did,
+            None,
+        )
+        .await
         {
             tracing::error!("Sequence commit failed\n{error}");
             return Err(ApiError::RuntimeError);

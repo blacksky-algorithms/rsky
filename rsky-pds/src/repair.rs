@@ -519,14 +519,14 @@ async fn commit_step(
     {
         Ok(commit) => {
             drop(txn);
-            publish_pending(ctx.actor_store, ctx.sequencer, did, None).await?;
-            ctx.account_manager
-                .update_repo_root(
-                    did.to_owned(),
-                    commit.commit_data.cid,
-                    commit.commit_data.rev.clone(),
-                )
-                .await?;
+            publish_pending(
+                ctx.actor_store,
+                ctx.sequencer,
+                ctx.account_manager,
+                did,
+                None,
+            )
+            .await?;
             Ok(Ok((
                 commit.commit_data.cid.to_string(),
                 commit.commit_data.rev,
@@ -988,9 +988,15 @@ mod tests {
             .await
             .unwrap();
         drop(txn);
-        publish_pending(&world.actor_store, &world.sequencer, DID, None)
-            .await
-            .unwrap();
+        publish_pending(
+            &world.actor_store,
+            &world.sequencer,
+            &world.account_manager,
+            DID,
+            None,
+        )
+        .await
+        .unwrap();
         world
     }
 
@@ -1124,9 +1130,15 @@ mod tests {
             .await
             .unwrap();
         drop(txn);
-        publish_pending(&world.actor_store, &world.sequencer, DID, None)
-            .await
-            .unwrap();
+        publish_pending(
+            &world.actor_store,
+            &world.sequencer,
+            &world.account_manager,
+            DID,
+            None,
+        )
+        .await
+        .unwrap();
         let clients = world.record_cid().await.unwrap();
 
         let resumed = run_repair(&world.ctx(), "r3", Duration::from_secs(5), None)

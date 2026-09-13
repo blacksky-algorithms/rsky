@@ -208,6 +208,18 @@ impl AccountManager {
         repo::update_root(did, cid, rev, &self.db).await
     }
 
+    /// The root update the publisher owes after a commit; allowed while the
+    /// actor drains, like every other piece of its outstanding work.
+    pub async fn update_repo_root_as_worker(
+        &self,
+        did: String,
+        cid: Cid,
+        rev: String,
+    ) -> Result<()> {
+        self.admission.admit_worker(&did)?;
+        repo::update_root(did, cid, rev, &self.db).await
+    }
+
     /// Deletes the account and revokes its OAuth sessions, returning how
     /// many OAuth sessions (`token` rows) were revoked.
     pub async fn delete_account(&self, did: &str) -> Result<u64> {

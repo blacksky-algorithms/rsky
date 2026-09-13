@@ -684,11 +684,12 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 "resumed incomplete account deletions"
             );
         }
-        let republished = publication::resume_pending_work(&actor_store, &sequencer, |did| {
-            blobstore_factory.blobstore(did.to_owned())
-        })
-        .await
-        .expect("Failed to resume publication");
+        let republished =
+            publication::resume_pending_work(&actor_store, &sequencer, &account_manager, |did| {
+                blobstore_factory.blobstore(did.to_owned())
+            })
+            .await
+            .expect("Failed to resume publication");
         if !republished.is_empty() {
             tracing::warn!(count = republished.len(), "resumed publication");
         }

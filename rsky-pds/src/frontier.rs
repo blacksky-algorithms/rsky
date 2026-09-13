@@ -435,6 +435,11 @@ mod tests {
             lifecycle.clone(),
         );
         let plc = plc::Client::new(mock_directory(HERE));
+        let account_manager = crate::account_manager::AccountManager::new(
+            crate::account_manager::db::get_migrated_db(dir.path().join("account.sqlite"))
+                .await
+                .unwrap(),
+        );
         let did = "did:plc:x";
 
         // nothing known yet
@@ -492,7 +497,7 @@ mod tests {
             .await
             .unwrap();
         }
-        crate::publication::publish_pending(&actor_store, &sequencer, did, None)
+        crate::publication::publish_pending(&actor_store, &sequencer, &account_manager, did, None)
             .await
             .unwrap();
         lifecycle

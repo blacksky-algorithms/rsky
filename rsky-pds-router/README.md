@@ -104,6 +104,14 @@ line with the same `id`:
 {"t":"1757000000.456","id":0,"phase":"end","status":200}
 ```
 
+A mutation the upstream never answered (a timeout, or a connection that
+failed after the request was sent) may still complete there, so its
+second line is `"phase":"ambiguous"` instead of `end`; the audit keeps
+such an account dirty until the TypeScript processes have been observed
+quiescent after that line. A mutation whose account lookup fails is
+refused with `503 RouterLookupUnavailable` rather than routed as if it
+named no account.
+
 If the journal cannot be written the mutation is refused with
 `503 RouterJournalUnavailable` and `router_journal_failures_total` is
 incremented. Each router instance owns one journal file; the default is

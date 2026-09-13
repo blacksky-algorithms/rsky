@@ -115,14 +115,7 @@ async fn inner_apply_writes(
 
         let commit_cid = commit.commit_data.cid.to_string();
         let commit_rev = commit.commit_data.rev.clone();
-        publication::publish_pending(actor_store, sequencer, did, None).await?;
-        account_manager
-            .update_repo_root(
-                did.to_string(),
-                commit.commit_data.cid,
-                commit.commit_data.rev,
-            )
-            .await?;
+        publication::publish_pending(actor_store, sequencer, &account_manager, did, None).await?;
         for write in &writes {
             record_repo_write(match write {
                 PreparedWrite::Create(_) => "create",

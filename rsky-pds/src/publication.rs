@@ -7,8 +7,10 @@
 //! and it acknowledges the row in the store only after the sequencer has
 //! made it durable.
 
+use crate::account_manager::AccountManager;
 use crate::actor_store::blob::BlobReader;
 use crate::actor_store::db::ActorDb;
+use crate::actor_store::repo::sql_repo::SqlRepoReader;
 use crate::actor_store::{pending_intents_in, ActorStore, StoredIntent};
 use crate::lifecycle::LifecycleStore;
 use crate::models::models::RepoSeq;
@@ -80,6 +82,7 @@ async fn acknowledge(db: &ActorDb, intent_id: i64, seq: i64) -> Result<()> {
 pub async fn publish_pending(
     actor_store: &ActorStore,
     sequencer: &SharedSequencer,
+    account_manager: &AccountManager,
     did: &str,
     stop_after: Option<PublishStep>,
 ) -> Result<Vec<i64>> {
@@ -144,26 +147,54 @@ pub async fn publish_pending(
         }
         seqs.push(seq);
     }
+    let root_current = sync_account_root(&db, account_manager, did).await?;
     let blob = BlobReader::new(
         crate::actor_store::blobstore::unavailable(),
         db.clone(),
         actor_store.background_queue.clone(),
         actor_store.coexistence,
     );
-    settle_pending_work(&actor_store.lifecycle, &db, &blob, did).await?;
+    settle_pending_work(&actor_store.lifecycle, &db, &blob, did, root_current).await?;
     Ok(seqs)
 }
 
-/// Clears the actor's pending mark when no intent is undelivered and no
-/// blob work is outstanding.
+/// Brings the account database's root up to the actor store's, which a
+/// crash between the actor commit and that update leaves behind. Returns
+/// whether the two agree afterwards.
+pub async fn sync_account_root(
+    db: &ActorDb,
+    account_manager: &AccountManager,
+    did: &str,
+) -> Result<bool> {
+    let storage = SqlRepoReader::new(did.to_owned(), None, db.clone());
+    let Ok(store_root) = storage.get_root_detailed().await else {
+        return Ok(false);
+    };
+    let account_root = account_manager.get_repo_root(did).await?;
+    let current = account_root
+        .as_ref()
+        .is_some_and(|(cid, rev)| *cid == store_root.cid.to_string() && *rev == store_root.rev);
+    if current {
+        return Ok(true);
+    }
+    tracing::info!(%did, rev = %store_root.rev, "advancing the account root to the actor store's");
+    account_manager
+        .update_repo_root_as_worker(did.to_owned(), store_root.cid, store_root.rev)
+        .await?;
+    Ok(true)
+}
+
+/// Clears the actor's pending mark when no intent is undelivered, no blob
+/// work is outstanding, and the account root is current.
 pub async fn settle_pending_work(
     lifecycle: &LifecycleStore,
     db: &ActorDb,
     blob: &BlobReader,
     did: &str,
+    root_current: bool,
 ) -> Result<()> {
     let pending = db.run(|conn| pending_intents_in(conn)).await?;
-    if pending.is_empty() && blob.nonterminal_blob_work().await? == 0 {
+    if root_current && pending.is_empty() && blob.nonterminal_blob_work().await? == 0 {
         lifecycle.clear_pending_work(did).await?;
     }
     Ok(())
@@ -173,6 +204,7 @@ pub async fn settle_pending_work(
 pub async fn resume_pending_work(
     actor_store: &ActorStore,
     sequencer: &SharedSequencer,
+    account_manager: &AccountManager,
     blobstore_for: impl Fn(&str) -> std::sync::Arc<dyn crate::actor_store::blobstore::BlobStore>,
 ) -> Result<Vec<String>> {
     let mut resumed = Vec::new();
@@ -182,7 +214,7 @@ pub async fn resume_pending_work(
             tracing::warn!(%refused, "publication left for the actor's writer");
             continue;
         }
-        publish_pending(actor_store, sequencer, &did, None).await?;
+        publish_pending(actor_store, sequencer, account_manager, &did, None).await?;
         if actor_store.exists(&did).await? {
             actor_store.queue_blob_work(&did, blobstore_for(&did));
         }
@@ -194,7 +226,7 @@ pub async fn resume_pending_work(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actor_store::blobstore::MemoryBlobStore;
+    use crate::actor_store::blobstore::{BlobStore, MemoryBlobStore};
     use crate::actor_store::ActorStore;
     use crate::background::BackgroundQueue;
     use crate::config::ActorStoreConfig;
@@ -210,6 +242,7 @@ mod tests {
         _dir: tempfile::TempDir,
         actor_store: ActorStore,
         sequencer: SharedSequencer,
+        account_manager: AccountManager,
         blobstore: Arc<MemoryBlobStore>,
     }
 
@@ -242,10 +275,16 @@ mod tests {
             &SecretKey::from_slice(&[9u8; 32]).unwrap(),
         );
         actor_store.create(DID, &keypair).await.unwrap();
+        let account_manager = AccountManager::new(
+            crate::account_manager::db::get_migrated_db(dir.path().join("account.sqlite"))
+                .await
+                .unwrap(),
+        );
         World {
             _dir: dir,
             actor_store,
             sequencer,
+            account_manager,
             blobstore: Arc::new(MemoryBlobStore::default()),
         }
     }
@@ -324,9 +363,15 @@ mod tests {
         );
         assert!(event_types(&world).await.is_empty());
 
-        let seqs = publish_pending(&world.actor_store, &world.sequencer, DID, None)
-            .await
-            .unwrap();
+        let seqs = publish_pending(
+            &world.actor_store,
+            &world.sequencer,
+            &world.account_manager,
+            DID,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(seqs, [1, 2]);
         assert_eq!(event_types(&world).await, ["append", "sync"]);
         let delivered = intents(&world).await;
@@ -352,9 +397,15 @@ mod tests {
         assert_eq!(mark.max_rev.as_deref(), Some(delivered[0].rev.as_str()));
 
         // nothing left to publish
-        let again = publish_pending(&world.actor_store, &world.sequencer, DID, None)
-            .await
-            .unwrap();
+        let again = publish_pending(
+            &world.actor_store,
+            &world.sequencer,
+            &world.account_manager,
+            DID,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(again.is_empty());
         assert_eq!(event_types(&world).await.len(), 2);
 
@@ -376,14 +427,21 @@ mod tests {
     async fn a_crash_after_the_floor_delivers_exactly_once() {
         let world = world().await;
         init_repo(&world).await;
-        publish_pending(&world.actor_store, &world.sequencer, DID, None)
-            .await
-            .unwrap();
+        publish_pending(
+            &world.actor_store,
+            &world.sequencer,
+            &world.account_manager,
+            DID,
+            None,
+        )
+        .await
+        .unwrap();
         write_post(&world, "3lfixtureaa2a").await;
 
         let stopped = publish_pending(
             &world.actor_store,
             &world.sequencer,
+            &world.account_manager,
             DID,
             Some(PublishStep::Floored),
         )
@@ -395,9 +453,15 @@ mod tests {
         assert_eq!(pending[2].seq_floor, Some(2));
         assert_eq!(event_types(&world).await.len(), 2);
 
-        let seqs = publish_pending(&world.actor_store, &world.sequencer, DID, None)
-            .await
-            .unwrap();
+        let seqs = publish_pending(
+            &world.actor_store,
+            &world.sequencer,
+            &world.account_manager,
+            DID,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(seqs, [3]);
         assert_eq!(event_types(&world).await, ["append", "sync", "append"]);
     }
@@ -406,14 +470,21 @@ mod tests {
     async fn a_crash_after_sequencing_recognises_the_row() {
         let world = world().await;
         init_repo(&world).await;
-        publish_pending(&world.actor_store, &world.sequencer, DID, None)
-            .await
-            .unwrap();
+        publish_pending(
+            &world.actor_store,
+            &world.sequencer,
+            &world.account_manager,
+            DID,
+            None,
+        )
+        .await
+        .unwrap();
         write_post(&world, "3lfixtureaa2b").await;
 
         publish_pending(
             &world.actor_store,
             &world.sequencer,
+            &world.account_manager,
             DID,
             Some(PublishStep::Sequenced),
         )
@@ -422,9 +493,15 @@ mod tests {
         assert_eq!(event_types(&world).await.len(), 3);
         assert_eq!(intents(&world).await[2].state, "pending");
 
-        let seqs = publish_pending(&world.actor_store, &world.sequencer, DID, None)
-            .await
-            .unwrap();
+        let seqs = publish_pending(
+            &world.actor_store,
+            &world.sequencer,
+            &world.account_manager,
+            DID,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(seqs, [3]);
         assert_eq!(event_types(&world).await.len(), 3);
         let delivered = intents(&world).await;
@@ -445,10 +522,14 @@ mod tests {
             .await
             .unwrap();
         let blobstore = world.blobstore.clone();
-        let mut resumed =
-            resume_pending_work(&world.actor_store, &world.sequencer, |_| blobstore.clone())
-                .await
-                .unwrap();
+        let mut resumed = resume_pending_work(
+            &world.actor_store,
+            &world.sequencer,
+            &world.account_manager,
+            |_| blobstore.clone(),
+        )
+        .await
+        .unwrap();
         resumed.sort();
         assert_eq!(resumed, ["did:plc:gone", DID]);
         world.actor_store.background_queue.process_all().await;
@@ -484,16 +565,27 @@ mod tests {
             world.actor_store.lifecycle.clone(),
         )
         .with_admission(admission);
-        let refused = publish_pending(&restricted, &world.sequencer, DID, None)
-            .await
-            .unwrap_err();
+        let refused = publish_pending(
+            &restricted,
+            &world.sequencer,
+            &world.account_manager,
+            DID,
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(refused
             .downcast_ref::<crate::admission::NotAdmitted>()
             .is_some());
         let blobstore = world.blobstore.clone();
-        let resumed = resume_pending_work(&restricted, &world.sequencer, |_| blobstore.clone())
-            .await
-            .unwrap();
+        let resumed = resume_pending_work(
+            &restricted,
+            &world.sequencer,
+            &world.account_manager,
+            |_| blobstore.clone(),
+        )
+        .await
+        .unwrap();
         assert!(resumed.is_empty());
         assert_eq!(restricted.lifecycle.pending_work().await.unwrap(), [DID]);
         assert!(event_types(&world).await.is_empty());
@@ -570,5 +662,61 @@ mod tests {
             ..opaque
         };
         assert!(!row_matches(&garbage_append, &append_intent));
+    }
+
+    /// A crash between the actor commit and the account root update leaves
+    /// the root behind; startup finishes it before the pending mark clears.
+    #[tokio::test]
+    async fn resume_advances_the_account_root_left_behind_by_a_crash() {
+        let world = world().await;
+        init_repo(&world).await;
+        write_post(&world, "3lfixtureaa2c").await;
+        assert!(world
+            .account_manager
+            .get_repo_root(DID)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            world.actor_store.lifecycle.pending_work().await.unwrap(),
+            vec![DID.to_owned()]
+        );
+        let blobstore: Arc<dyn BlobStore> = world.blobstore.clone();
+        let resumed = resume_pending_work(
+            &world.actor_store,
+            &world.sequencer,
+            &world.account_manager,
+            |_| blobstore.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resumed, vec![DID.to_owned()]);
+        let store_root = world
+            .actor_store
+            .read(DID.to_owned(), world.blobstore.clone())
+            .await
+            .unwrap()
+            .storage
+            .read()
+            .await
+            .get_root_detailed()
+            .await
+            .unwrap();
+        assert_eq!(
+            world.account_manager.get_repo_root(DID).await.unwrap(),
+            Some((store_root.cid.to_string(), store_root.rev.clone()))
+        );
+        assert!(world
+            .actor_store
+            .lifecycle
+            .pending_work()
+            .await
+            .unwrap()
+            .is_empty());
+        // a second run finds the root current and touches nothing
+        let db = world.actor_store.write_db(DID).await.unwrap();
+        assert!(sync_account_root(&db, &world.account_manager, DID)
+            .await
+            .unwrap());
     }
 }

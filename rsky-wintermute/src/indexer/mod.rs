@@ -1700,7 +1700,7 @@ impl IndexerManager {
         let mut results: Vec<(Vec<u8>, Result<(), WintermuteError>)> =
             Vec::with_capacity(jobs.len());
         let mut admitted: Vec<(Vec<u8>, IndexJob)> = Vec::with_capacity(jobs.len());
-        let mut commits: Vec<&IndexJob> = Vec::new();
+        let mut commits: Vec<(&Vec<u8>, &IndexJob)> = Vec::new();
         for (key, job) in jobs {
             let did = Self::job_did(job);
             let admission = gate.admit(did, &job.rev, job.provenance.as_ref());
@@ -1709,8 +1709,7 @@ impl IndexerManager {
                 .inc();
             match admission {
                 Admission::Apply if matches!(job.action, WriteAction::Commit) => {
-                    commits.push(job);
-                    results.push((key.clone(), Ok(())));
+                    commits.push((key, job));
                 }
                 Admission::Apply => admitted.push((key.clone(), job.clone())),
                 Admission::Deferred => {
@@ -1741,20 +1740,48 @@ impl IndexerManager {
             .iter()
             .map(|(did, rev)| ((*did).to_owned(), (*rev).to_owned()))
             .collect();
+        // a commit is acknowledged only once every write of its event
+        // landed and the acknowledgement itself is durable; anything short
+        // of that hands the commit job back to the queue
+        let failed_dids: std::collections::HashSet<&str> = applied
+            .iter()
+            .filter(|(_, result)| result.is_err())
+            .filter_map(|(key, _)| admitted.iter().find(|(k, _)| k == key))
+            .map(|(_, job)| Self::job_did(job))
+            .collect();
         results.extend(applied);
         let mut batch_failed = batch_failed;
         if let Err(e) = crate::reconcile::record_progress(&gate_client, &progress).await {
             tracing::error!("progress record failed: {e}");
             batch_failed = true;
         }
-        for job in commits {
+        for (key, job) in commits {
             let did = Self::job_did(job);
-            if let Err(e) =
-                crate::reconcile::record_commit_progress(&gate_client, did, &job.rev, &job.cid)
-                    .await
+            if failed_dids.contains(did) {
+                results.push((
+                    key.clone(),
+                    Err(WintermuteError::Other(format!(
+                        "writes of the event failed before the commit {} could be acknowledged",
+                        job.cid
+                    ))),
+                ));
+                continue;
+            }
+            match crate::reconcile::record_commit_progress(&gate_client, did, &job.rev, &job.cid)
+                .await
             {
-                tracing::error!("commit progress record failed for {did}: {e}");
-                batch_failed = true;
+                Ok(()) => results.push((key.clone(), Ok(()))),
+                Err(e) => {
+                    tracing::error!("commit progress record failed for {did}: {e}");
+                    batch_failed = true;
+                    results.push((
+                        key.clone(),
+                        Err(WintermuteError::Other(format!(
+                            "commit acknowledgement for {} was not recorded: {e}",
+                            job.cid
+                        ))),
+                    ));
+                }
             }
         }
         if let Err(e) = gate.close(&gate_client).await {

@@ -169,7 +169,7 @@ enum RawEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Allowlist {
-    default_active: bool,
+    default: AdmissionState,
     entries: BTreeMap<String, AdmissionState>,
 }
 
@@ -177,7 +177,7 @@ impl Default for Allowlist {
     /// Nothing admitted until the file is read.
     fn default() -> Self {
         Self {
-            default_active: false,
+            default: AdmissionState::Absent,
             entries: BTreeMap::new(),
         }
     }
@@ -190,13 +190,14 @@ impl Allowlist {
         if raw.version != 1 {
             return Err(PolicyError::Version(raw.version));
         }
-        let default_active = match raw.default.as_deref().unwrap_or("absent") {
-            "active" => true,
-            "absent" => false,
+        let default = match raw.default.as_deref().unwrap_or("absent") {
+            "active" => AdmissionState::Active,
+            "absent" => AdmissionState::Absent,
+            "draining" => AdmissionState::Draining,
             other => {
                 return Err(PolicyError::Parse(
                     origin.to_path_buf(),
-                    format!("default {other:?} is neither active nor absent"),
+                    format!("default {other:?} is not active, absent, or draining"),
                 ))
             }
         };
@@ -226,17 +227,13 @@ impl Allowlist {
             };
             entries.insert(did, state);
         }
-        Ok(Self {
-            default_active,
-            entries,
-        })
+        Ok(Self { default, entries })
     }
 
     pub fn state_of(&self, did: &str) -> AdmissionState {
         match self.entries.get(did) {
             Some(state) => state.clone(),
-            None if self.default_active => AdmissionState::Active,
-            None => AdmissionState::Absent,
+            None => self.default.clone(),
         }
     }
 }
@@ -412,6 +409,13 @@ default = "absent"
         let open =
             Allowlist::parse("version = 1\ndefault = \"active\"", Path::new("a.toml")).unwrap();
         assert_eq!(open.state_of("did:plc:none"), AdmissionState::Active);
+        let draining = Allowlist::parse(
+            "version = 1\ndefault = \"draining\"\n[entries]\n\"did:plc:a\" = \"active\"",
+            Path::new("a.toml"),
+        )
+        .unwrap();
+        assert_eq!(draining.state_of("did:plc:none"), AdmissionState::Draining);
+        assert_eq!(draining.state_of("did:plc:a"), AdmissionState::Active);
         assert_eq!(
             Allowlist::default().state_of("did:plc:none"),
             AdmissionState::Absent

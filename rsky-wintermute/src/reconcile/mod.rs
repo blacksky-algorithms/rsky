@@ -12,12 +12,9 @@ pub mod frontier;
 pub mod workflow;
 
 use crate::types::WintermuteError;
-use dashmap::DashMap;
 use deadpool_postgres::{Client, Pool};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::LazyLock;
-use std::time::{Duration, Instant};
 
 /// Everything reconciliation persists lives in its own schema, beside the
 /// appview's.
@@ -318,29 +315,14 @@ pub async fn generation_of(client: &Client, did: &str) -> Result<Option<i64>, Wi
     Ok(row.map(|row| row.get(0)))
 }
 
-const GENERATION_TTL: Duration = Duration::from_secs(2);
-
-static GENERATION_CACHE: LazyLock<DashMap<String, (Option<i64>, Instant)>> =
-    LazyLock::new(DashMap::new);
-
-/// The generation to stamp on work obtained now for `did`, from a short
-/// cache in front of the table. A stale answer only ever rejects more.
+/// The generation to stamp on work obtained now for `did`.
+///
+/// Read from the table every time: a reconcile in another process bumps
+/// it, and a stamp taken from a stale copy would reject the very commit
+/// that acknowledges the recovery.
 pub async fn current_generation(pool: &Pool, did: &str) -> Result<Option<i64>, WintermuteError> {
-    if let Some(cached) = GENERATION_CACHE.get(did) {
-        let (generation, at) = *cached;
-        if at.elapsed() < GENERATION_TTL {
-            return Ok(generation);
-        }
-    }
     let client = pool.get().await?;
-    let generation = generation_of(&client, did).await?;
-    GENERATION_CACHE.insert(did.to_owned(), (generation, Instant::now()));
-    Ok(generation)
-}
-
-/// Forgets a cached generation, for a workflow that just changed it.
-pub fn forget_generation(did: &str) {
-    GENERATION_CACHE.remove(did);
+    generation_of(&client, did).await
 }
 
 #[cfg(test)]

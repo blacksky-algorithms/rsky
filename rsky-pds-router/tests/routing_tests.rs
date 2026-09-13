@@ -539,8 +539,10 @@ async fn a_truncated_mutation_body_is_refused_without_forwarding() {
     assert!(h.journal().is_empty());
 }
 
+/// With the account database gone, a read cannot be pinned and takes the
+/// default backend; a mutation that needs the lookup is refused.
 #[tokio::test]
-async fn a_failing_account_database_pins_nothing_and_attributes_nothing() {
+async fn a_failing_account_database_pins_nothing_and_refuses_attributed_mutations() {
     let h = Harness::start().await;
     h.set_policy(&format!(
         "version = 1\n[reads]\npin_rsky = [\"{ALICE}\"]\n[writes]\n"
@@ -565,7 +567,10 @@ async fn a_failing_account_database_pins_nothing_and_attributes_nothing() {
             json!({ "token": "alice-token", "password": "p" }),
         )
         .await;
-    assert_eq!(by_token.served_by(), "ts-main");
+    assert_eq!(
+        (by_token.status, by_token.error()),
+        (503, "RouterLookupUnavailable")
+    );
 }
 
 #[tokio::test]
@@ -1398,4 +1403,92 @@ async fn metrics_render_every_family_after_traffic() {
         assert!(text.contains(family), "{family} missing from\n{text}");
     }
     assert!(text.contains("router_writes_rejected_total{reason=\"unknown\"}"));
+}
+
+/// A mutation whose account lookup fails is refused, never routed as if it
+/// named no account: a fenced DID stays fenced while the lookup is down.
+#[tokio::test]
+async fn a_failed_account_lookup_refuses_attributed_mutations() {
+    let h = Harness::start().await;
+    h.set_policy("version = 1\n[reads]\n[writes]\ncanary_fence = [\"did:plc:canary\"]\n");
+    let conn = rusqlite::Connection::open(h.dir.path().join("account.sqlite")).unwrap();
+    conn.execute_batch("DROP TABLE actor; DROP TABLE email_token;")
+        .unwrap();
+    drop(conn);
+    let before = rsky_pds_router::metrics::METRICS
+        .writes_rejected
+        .with_label_values(&["lookup"])
+        .get();
+    let create = h
+        .post_as(
+            "/xrpc/com.atproto.repo.createRecord",
+            CANARY,
+            json!({ "repo": "canary.test", "collection": "app.bsky.feed.post", "record": { "text": "hi" } }),
+        )
+        .await;
+    assert_eq!(
+        (create.status, create.error(), create.reason.as_str()),
+        (503, "RouterLookupUnavailable", "lookup")
+    );
+    let reset = h
+        .post(
+            "/xrpc/com.atproto.server.resetPassword",
+            json!({ "token": "CANARY-TOKEN", "password": "new-password" }),
+        )
+        .await;
+    assert_eq!(
+        (reset.status, reset.error()),
+        (503, "RouterLookupUnavailable")
+    );
+    assert_eq!(h.ts_main.hits(), 0);
+    assert_eq!(
+        rsky_pds_router::metrics::METRICS
+            .writes_rejected
+            .with_label_values(&["lookup"])
+            .get(),
+        before + 2
+    );
+    // an unattributed mutation still needs no lookup
+    let invite = h
+        .post(
+            "/xrpc/com.atproto.server.createInviteCode",
+            json!({ "useCount": 1 }),
+        )
+        .await;
+    assert_eq!((invite.status, invite.served_by()), (200, "ts-main"));
+}
+
+/// A mutation the upstream never answered may still complete there, so
+/// its journal line says the outcome is unknown rather than closing it.
+#[tokio::test]
+async fn an_unanswered_mutation_is_journaled_as_ambiguous() {
+    let h = Harness::start().await;
+    let held = h
+        .send(
+            h.client
+                .post(format!(
+                    "{}/xrpc/com.atproto.server.createInviteCode",
+                    h.url
+                ))
+                .header("x-mock-hold", "1")
+                .json(&json!({ "useCount": 1 })),
+        )
+        .await;
+    assert_eq!((held.status, held.error()), (504, "UpstreamTimeout"));
+    let lines = h.journal();
+    let last = lines.last().unwrap();
+    assert_eq!(last["phase"], "ambiguous");
+    assert_eq!(last["status"], 504);
+    assert_eq!(lines[lines.len() - 2]["phase"], "start");
+    assert_eq!(lines[lines.len() - 2]["id"], last["id"]);
+    h.ts_main.release.notify_one();
+    // an answered mutation closes its line as before
+    let answered = h
+        .post(
+            "/xrpc/com.atproto.server.createInviteCode",
+            json!({ "useCount": 1 }),
+        )
+        .await;
+    assert_eq!(answered.status, 200);
+    assert_eq!(h.journal().last().unwrap()["phase"], "end");
 }

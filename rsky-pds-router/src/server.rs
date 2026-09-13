@@ -84,14 +84,11 @@ impl Router {
     }
 
     /// The DID an identity names, through the account tables when it is a
-    /// handle or email; an unknown identity pins nothing.
-    fn did_of(&self, identity: &str) -> Option<String> {
-        self.lookup
-            .did_for_identifier(identity)
-            .unwrap_or_else(|err| {
-                tracing::warn!(%err, "account lookup failed");
-                None
-            })
+    /// handle or email; an unknown identity pins nothing. A lookup that
+    /// cannot be made is an error the caller decides on: a read falls back
+    /// to the default backend, a mutation is refused.
+    fn did_of(&self, identity: &str) -> rusqlite::Result<Option<String>> {
+        self.lookup.did_for_identifier(identity)
     }
 
     /// Every DID a mutation names, resolved; `Err` carries the refusal.
@@ -99,23 +96,25 @@ impl Router {
         let policy = self.routing.policy();
         match attribution {
             Attribution::None => Ok(Vec::new()),
-            Attribution::Identifier(identifier) => {
-                Ok(self.did_of(&identifier).into_iter().collect())
-            }
+            Attribution::Identifier(identifier) => Ok(self
+                .did_of(&identifier)
+                .map_err(|err| lookup_unavailable("account lookup failed", &err))?
+                .into_iter()
+                .collect()),
             Attribution::Identifiers(identifiers) => {
                 let mut dids = Vec::new();
                 for identifier in identifiers {
-                    dids.extend(self.did_of(&identifier));
+                    dids.extend(
+                        self.did_of(&identifier)
+                            .map_err(|err| lookup_unavailable("account lookup failed", &err))?,
+                    );
                 }
                 Ok(dids)
             }
             Attribution::EmailToken(token) => Ok(self
                 .lookup
                 .did_for_email_token(&token)
-                .unwrap_or_else(|err| {
-                    tracing::warn!(%err, "token lookup failed");
-                    None
-                })
+                .map_err(|err| lookup_unavailable("token lookup failed", &err))?
                 .into_iter()
                 .collect()),
             Attribution::Malformed(reason) => Err(refused(
@@ -234,9 +233,12 @@ impl Router {
         path_and_query: &str,
         headers: &HeaderMap,
     ) -> Response<Body> {
-        let did = identity
-            .as_deref()
-            .and_then(|identity| self.did_of(identity));
+        let did = identity.as_deref().and_then(|identity| {
+            self.did_of(identity).unwrap_or_else(|err| {
+                tracing::warn!(%err, "account lookup failed; the read takes the default backend");
+                None
+            })
+        });
         let backend = self.routing.policy().read_backend(did.as_deref());
         let deadline = match class {
             ReadClass::Sync => self.deadlines.sync,
@@ -436,6 +438,12 @@ impl Router {
                 self.deadlines.write,
             )
             .await;
+        // a request that was sent and never answered may still complete
+        // upstream; the journal says so instead of claiming an outcome
+        let outcome_unknown = matches!(
+            result,
+            Err(ProxyError::Timeout(_)) | Err(ProxyError::Upstream(..))
+        );
         let response = self.finish(result, backend.as_str(), reason, "write", started);
         if backend == Backend::Ts {
             let now = self.routing.policy();
@@ -447,7 +455,12 @@ impl Router {
                 METRICS.misroutes.inc();
             }
         }
-        if let Err(err) = self.journal.end(id, response.status().as_u16()) {
+        let closed = if outcome_unknown {
+            self.journal.ambiguous(id, response.status().as_u16())
+        } else {
+            self.journal.end(id, response.status().as_u16())
+        };
+        if let Err(err) = closed {
             tracing::error!(%err, "journal end line failed");
             METRICS.journal_failures.inc();
         }
@@ -548,6 +561,19 @@ fn class_label(class: ReadClass) -> &'static str {
         ReadClass::Bsky => "bsky",
         ReadClass::Main => "main",
     }
+}
+
+/// A mutation whose target could not be resolved is refused, never routed
+/// as if it named no account.
+fn lookup_unavailable(what: &str, err: &rusqlite::Error) -> Response<Body> {
+    tracing::error!(%err, "{what}; refusing the mutation");
+    METRICS.writes_rejected.with_label_values(&["lookup"]).inc();
+    refused(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "RouterLookupUnavailable",
+        "the account lookup is unavailable",
+        "lookup",
+    )
 }
 
 fn refused(status: StatusCode, error: &str, message: &str, reason: &str) -> Response<Body> {

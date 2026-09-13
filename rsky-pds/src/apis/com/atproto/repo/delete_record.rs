@@ -75,7 +75,7 @@ async fn inner_delete_record(
                 .record
                 .get_record(&write_at_uri, None, Some(true))
                 .await?;
-            let commit = match record {
+            match record {
                 None => return Ok(()), // No-op if record already doesn't exist
                 Some(_) => {
                     actor_txn
@@ -84,9 +84,7 @@ async fn inner_delete_record(
                 }
             };
 
-            publication::publish_pending(actor_store, sequencer, &did, None).await?;
-            account_manager
-                .update_repo_root(did, commit.commit_data.cid, commit.commit_data.rev)
+            publication::publish_pending(actor_store, sequencer, &account_manager, &did, None)
                 .await?;
             record_repo_write("delete");
 
