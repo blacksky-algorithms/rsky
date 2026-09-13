@@ -118,7 +118,8 @@ impl Resolver {
             .user_agent("rsky-relay")
             .timeout(REQ_TIMEOUT)
             .tcp_keepalive(Some(TCP_KEEPALIVE))
-            .https_only(true)
+            // a private directory may be reached without TLS; the public one never is
+            .https_only(!PLC_URL.starts_with("http://"))
             .build()?;
         let inflight = HashSet::new();
         let futures = FuturesUnordered::new();
