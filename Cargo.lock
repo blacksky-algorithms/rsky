@@ -8848,7 +8848,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-wintermute"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",

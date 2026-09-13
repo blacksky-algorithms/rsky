@@ -232,14 +232,7 @@ impl IngesterManager {
         };
         let start_cursor = resolve_start_cursor(saved, *crate::config::FIREHOSE_INITIAL_CURSOR);
 
-        let clean_hostname = hostname
-            .trim_start_matches("https://")
-            .trim_start_matches("http://")
-            .trim_end_matches('/');
-
-        let url = match url::Url::parse(&format!(
-            "wss://{clean_hostname}/xrpc/com.atproto.sync.subscribeRepos"
-        )) {
+        let url = match subscribe_url(hostname) {
             Ok(mut u) => {
                 append_cursor_param(&mut u, start_cursor);
                 u
@@ -1221,11 +1214,59 @@ async fn delete_cursor_from_postgres(pool: &Pool, service: &str) -> Result<(), W
     Ok(())
 }
 
+/// The firehose endpoint of a relay host. A bare host is reached over
+/// `wss`; a host written with a scheme keeps it, so a relay on a private
+/// network can be reached over plain `ws` (`http` and `https` map to their
+/// websocket forms).
+fn subscribe_url(hostname: &str) -> Result<url::Url, url::ParseError> {
+    let (scheme, host) = match hostname.split_once("://") {
+        Some(("ws" | "http", host)) => ("ws", host),
+        Some((_, host)) => ("wss", host),
+        None => ("wss", hostname),
+    };
+    let host = host.trim_end_matches('/');
+    if host.is_empty() {
+        return Err(url::ParseError::EmptyHost);
+    }
+    url::Url::parse(&format!(
+        "{scheme}://{host}/xrpc/com.atproto.sync.subscribeRepos"
+    ))
+}
+
 #[cfg(test)]
 mod cursor_tests {
-    use super::{append_cursor_param, resolve_start_cursor};
+    use super::{append_cursor_param, resolve_start_cursor, subscribe_url};
 
-    fn subscribe_url() -> url::Url {
+    #[test]
+    fn relay_hosts_keep_an_explicit_scheme() {
+        for (given, expected) in [
+            (
+                "relay.example",
+                "wss://relay.example/xrpc/com.atproto.sync.subscribeRepos",
+            ),
+            (
+                "https://relay.example/",
+                "wss://relay.example/xrpc/com.atproto.sync.subscribeRepos",
+            ),
+            (
+                "wss://relay.example",
+                "wss://relay.example/xrpc/com.atproto.sync.subscribeRepos",
+            ),
+            (
+                "ws://127.0.0.1:9000",
+                "ws://127.0.0.1:9000/xrpc/com.atproto.sync.subscribeRepos",
+            ),
+            (
+                "http://127.0.0.1:9000/",
+                "ws://127.0.0.1:9000/xrpc/com.atproto.sync.subscribeRepos",
+            ),
+        ] {
+            assert_eq!(subscribe_url(given).unwrap().as_str(), expected, "{given}");
+        }
+        assert!(subscribe_url("ws://").is_err());
+    }
+
+    fn sample_url() -> url::Url {
         url::Url::parse("wss://relay.example/xrpc/com.atproto.sync.subscribeRepos").unwrap()
     }
 
@@ -1244,21 +1285,21 @@ mod cursor_tests {
 
     #[test]
     fn append_cursor_param_emits_zero_explicitly() {
-        let mut u = subscribe_url();
+        let mut u = sample_url();
         append_cursor_param(&mut u, Some(0));
         assert_eq!(u.query(), Some("cursor=0"));
     }
 
     #[test]
     fn append_cursor_param_omits_when_none() {
-        let mut u = subscribe_url();
+        let mut u = sample_url();
         append_cursor_param(&mut u, None);
         assert_eq!(u.query(), None);
     }
 
     #[test]
     fn append_cursor_param_sets_positive_seq() {
-        let mut u = subscribe_url();
+        let mut u = sample_url();
         append_cursor_param(&mut u, Some(12345));
         assert_eq!(u.query(), Some("cursor=12345"));
     }

@@ -87,7 +87,7 @@ RUST_LOG=info \
 
 | Variable | Description                                                                                                     |
 |----------|-----------------------------------------------------------------------------------------------------------------|
-| `RELAY_HOSTS` | Comma-separated relay hosts (e.g., `bsky.network` or `relay1.us-east.bsky.network,relay1.us-west.bsky.network`) |
+| `RELAY_HOSTS` | Comma-separated relay hosts (e.g., `bsky.network` or `relay1.us-east.bsky.network,relay1.us-west.bsky.network`); a host written with `ws://` is reached without TLS |
 | `DATABASE_URL` | PostgreSQL connection string                                                                                    |
 
 ### Optional Environment Variables
