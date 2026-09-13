@@ -86,8 +86,10 @@ async fn check_space_proof(
                 dpop_headers: &refs,
                 access_token,
             },
+            None,
             now_secs(),
         )
+        .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     proof.ok_or_else(|| anyhow::anyhow!("missing DPoP proof"))
 }
@@ -245,7 +247,7 @@ impl<'r> FromRequest<'r> for SpaceCredentialAuth {
             Ok(auth) => Outcome::Success(auth),
             Err(error) => {
                 tracing::debug!(%error, "space credential rejected");
-                let error = ApiError::InvalidToken;
+                let error = ApiError::InvalidToken("Token is invalid".to_string());
                 req.local_cache(|| Some(error.clone()));
                 Outcome::Error((Status::Unauthorized, error))
             }
@@ -281,7 +283,7 @@ impl<'r> FromRequest<'r> for SpaceReadAuth {
                 Ok(auth) => Outcome::Success(SpaceReadAuth::Credential(auth)),
                 Err(error) => {
                     tracing::debug!(%error, "space credential rejected");
-                    let error = ApiError::InvalidToken;
+                    let error = ApiError::InvalidToken("Token is invalid".to_string());
                     req.local_cache(|| Some(error.clone()));
                     Outcome::Error((Status::Unauthorized, error))
                 }
@@ -384,7 +386,7 @@ pub fn authorize_space_read(
             if credential.space_uri == space.uri() {
                 Ok(())
             } else {
-                Err(ApiError::InvalidToken)
+                Err(ApiError::InvalidToken("Token is invalid".to_string()))
             }
         }
         SpaceReadAuth::Session { did, credentials } => {
@@ -741,12 +743,17 @@ mod tests {
     async fn service_token_roundtrip_and_rejections() {
         // A local-account issuer resolves through the actor store.
         let dir = tempfile::tempdir().unwrap();
+        let lifecycle =
+            crate::lifecycle::LifecycleStore::open(dir.path().join("rsky/lifecycle.sqlite"))
+                .await
+                .unwrap();
         let actor_store = ActorStore::new(
             &crate::config::ActorStoreConfig {
-                directory: dir.path().to_str().unwrap().to_string(),
+                directory: dir.path().join("actors").to_str().unwrap().to_string(),
                 cache_size: 10,
             },
             crate::background::BackgroundQueue::default(),
+            lifecycle,
         );
         let keypair = keypair();
         actor_store

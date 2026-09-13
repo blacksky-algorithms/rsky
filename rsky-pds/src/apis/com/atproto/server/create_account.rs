@@ -11,7 +11,7 @@ use crate::handle::{normalize_and_validate_handle, HandleValidationContext, Hand
 use crate::metrics::record_account_created;
 use crate::plc::operations::{create_op, CreateAtprotoOpInput};
 use crate::plc::types::{OpOrTombstone, Operation};
-use crate::sequencer::events::sync_evt_data_from_commit;
+use crate::rate_limits::{Caller, RateLimits};
 use crate::SharedSequencer;
 use crate::{plc, SharedIdResolver};
 use email_address::*;
@@ -54,7 +54,18 @@ pub async fn server_create_account(
     id_resolver: &State<SharedIdResolver>,
     account_manager: AccountManager,
     actor_store: &State<ActorStore>,
+    lifecycle_store: &State<crate::lifecycle::LifecycleStore>,
+    limits: &State<RateLimits>,
+    caller: Caller,
 ) -> Result<Json<CreateAccountOutput>, ApiError> {
+    limits
+        .consume_all(
+            &crate::rate_limits::CREATE_ACCOUNT,
+            &caller.ip,
+            1,
+            caller.bypass,
+        )
+        .await?;
     tracing::info!("Creating new user account");
     let requester = match auth.access {
         Some(access) if access.credentials.is_some() => access.credentials.unwrap().iss,
@@ -85,7 +96,7 @@ pub async fn server_create_account(
     let blobstore = blobstore_factory.blobstore(did.clone());
     if let Err(error) = actor_store.create(&did, &signing_key).await {
         tracing::error!("Failed to create actor store\n{:?}", error);
-        return Err(ApiError::RuntimeError);
+        return Err(ApiError::from(error));
     }
     let commit = {
         let actor_txn = match actor_store.transact(did.clone(), blobstore.clone()).await {
@@ -96,7 +107,7 @@ pub async fn server_create_account(
                 return Err(ApiError::RuntimeError);
             }
         };
-        match actor_txn.create_repo(Vec::new()).await {
+        match actor_txn.create_repo(Vec::new(), !deactivated).await {
             Ok(commit) => commit,
             Err(error) => {
                 tracing::error!("Failed to create repo\n{:?}", error);
@@ -194,29 +205,14 @@ pub async fn server_create_account(
                 return Err(ApiError::RuntimeError);
             }
         }
-        match lock.sequence_commit(did.clone(), commit.clone()).await {
-            Ok(_) => {
-                tracing::debug!("Sequence commit succeeded");
-            }
-            Err(error) => {
-                tracing::error!("Sequence Commit failed\n{error}");
-                return Err(ApiError::RuntimeError);
-            }
-        }
-        match lock
-            .sequence_sync_evt(
-                did.clone(),
-                sync_evt_data_from_commit(commit.clone()).await?,
-            )
-            .await
+        drop(lock);
+        // the repository's first commit and its sync event were committed
+        // as intents with the store; deliver them after the account events
+        if let Err(error) =
+            crate::publication::publish_pending(actor_store, sequencer, &did, None).await
         {
-            Ok(_) => {
-                tracing::debug!("Sequence sync event data from commit succeeded");
-            }
-            Err(error) => {
-                tracing::error!("Sequence sync event data from commit failed\n{error}");
-                return Err(ApiError::RuntimeError);
-            }
+            tracing::error!("Sequence commit failed\n{error}");
+            return Err(ApiError::RuntimeError);
         }
     }
     match account_manager
@@ -244,6 +240,9 @@ pub async fn server_create_account(
         },
     }
 
+    // a DID deleted here earlier may be created again; its purge
+    // obligation, if any, stays until the objects are gone
+    lifecycle_store.clear_tombstone(&did).await?;
     Ok(Json(CreateAccountOutput {
         access_jwt,
         refresh_jwt,

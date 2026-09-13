@@ -2,7 +2,7 @@ use crate::account_manager::AccountManager;
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
-use anyhow::{bail, Result};
+use anyhow::Result;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::repo::{ListRecordsOutput, Record};
@@ -26,9 +26,11 @@ async fn inner_list_records(
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
-) -> Result<ListRecordsOutput> {
+) -> Result<ListRecordsOutput, ApiError> {
     if limit > 100 {
-        bail!("Error: limit can not be greater than 100")
+        return Err(ApiError::InvalidRequest(format!(
+            "Invalid com.atproto.repo.listRecords params: integer too big (maximum 100, got {limit})"
+        )));
     }
     let did = account_manager.get_did_for_actor(&repo, None).await?;
     if let Some(did) = did {
@@ -78,7 +80,9 @@ async fn inner_list_records(
         };
         Ok(ListRecordsOutput { records, cursor })
     } else {
-        bail!("Could not find repo: {repo}")
+        Err(ApiError::InvalidRequest(format!(
+            "Could not find repo: {repo}"
+        )))
     }
 }
 
@@ -122,8 +126,8 @@ pub async fn list_records(
     {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            tracing::error!("@LOG: ERROR: {error}");
-            Err(ApiError::RuntimeError)
+            tracing::error!("@LOG: ERROR: {error:?}");
+            Err(error)
         }
     }
 }

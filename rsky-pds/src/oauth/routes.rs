@@ -334,6 +334,7 @@ fn sign_in_page(
     page: &AuthorizePageData,
     session: &DeviceSession,
     error: Option<String>,
+    otp_hint: Option<String>,
 ) -> SignInPage {
     SignInPage {
         client_display: client_display(page),
@@ -342,6 +343,7 @@ fn sign_in_page(
         csrf: session.csrf.clone(),
         login_hint: page.login_hint.clone().unwrap_or_default(),
         error,
+        otp_hint,
         signup_url: env_str("PDS_OAUTH_SIGNUP_URL"),
         sessions: page
             .sessions
@@ -396,10 +398,12 @@ async fn device_session(
 }
 
 #[tracing::instrument(skip_all)]
-#[rocket::get("/oauth/authorize?<client_id>&<request_uri>")]
+#[rocket::get("/oauth/authorize?<client_id>&<request_uri>&<otp_hint>&<otp_error>")]
 pub async fn oauth_authorize(
     client_id: Option<String>,
     request_uri: Option<String>,
+    otp_hint: Option<String>,
+    otp_error: Option<bool>,
     jar: &CookieJar<'_>,
     info: OAuthRequestInfo,
     shared: &State<SharedOAuthProvider>,
@@ -417,7 +421,15 @@ pub async fn oauth_authorize(
         .authorize(&client_id, &request_uri, &session.device_id, now)
         .await
     {
-        Ok(page) => render(Status::Ok, &sign_in_page(&page, &session, None)),
+        Ok(page) => {
+            // a second-factor gate in front of this route sends the browser
+            // back here with the address hint and, after a bad code, an error
+            let error = otp_error
+                .unwrap_or(false)
+                .then(|| "The sign-in code was not accepted".to_string());
+            let otp_hint = otp_hint.filter(|hint| !hint.is_empty());
+            render(Status::Ok, &sign_in_page(&page, &session, error, otp_hint))
+        }
         Err(error) => oauth_error_page(error),
     }
 }
@@ -429,6 +441,8 @@ pub struct SignInFormData {
     pub csrf: String,
     pub identifier: String,
     pub password: String,
+    /// Consumed by a second-factor gate in front of this route; ignored here.
+    pub email_otp: Option<String>,
 }
 
 #[tracing::instrument(skip_all)]
@@ -470,7 +484,12 @@ pub async fn oauth_authorize_sign_in(
         Ok(account) => render(Status::Ok, &consent_page(&page, &session, &account)),
         Err(error) => render(
             Status::Ok,
-            &sign_in_page(&page, &session, Some(error.error_description().to_string())),
+            &sign_in_page(
+                &page,
+                &session,
+                Some(error.error_description().to_string()),
+                None,
+            ),
         ),
     }
 }

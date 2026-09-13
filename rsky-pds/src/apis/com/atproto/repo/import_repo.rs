@@ -3,6 +3,7 @@ use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::scope::{AccountRepo, Scoped};
 use crate::auth_verifier::AccessFullImport;
+use crate::config::ServerConfig;
 use crate::repo::prepare::{
     prepare_create, prepare_delete, prepare_update, PrepareCreateOpts, PrepareDeleteOpts,
     PrepareUpdateOpts,
@@ -32,7 +33,9 @@ impl<'r> FromData<'r> for ImportRepoInput {
 
     #[tracing::instrument(skip_all)]
     async fn from_data(req: &'r Request<'_>, data: Data<'r>) -> Outcome<'r, Self, Self::Error> {
-        let max_import_size = env_int("IMPORT_REPO_LIMIT").unwrap_or(100).megabytes();
+        let max_import_size = env_int("PDS_MAX_REPO_IMPORT_SIZE")
+            .map(|bytes| bytes.bytes())
+            .unwrap_or_else(|| 100.mebibytes());
         match req.headers().get_one(header::CONTENT_LENGTH.as_ref()) {
             None => {
                 let error = ApiError::InvalidRequest("Missing content-length header".to_string());
@@ -78,9 +81,15 @@ pub async fn import_repo(
     import_repo_input: ImportRepoInput,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
+    cfg: &State<ServerConfig>,
 ) -> Result<(), ApiError> {
+    if !cfg.service.accepting_imports {
+        return Err(ApiError::InvalidRequest(
+            "Service is not accepting repo imports".to_string(),
+        ));
+    }
     let requester = auth.did().await?;
-    let mut actor_store = actor_store
+    let mut actor_txn = actor_store
         .transact(
             requester.clone(),
             blobstore_factory.blobstore(requester.clone()),
@@ -88,10 +97,10 @@ pub async fn import_repo(
         .await?;
 
     // Get current repo if it exists
-    let curr_root: Option<Cid> = actor_store.get_repo_root().await;
+    let curr_root: Option<Cid> = actor_txn.get_repo_root().await;
     let curr_repo: Option<Repo> = match curr_root {
         None => None,
-        Some(_root) => Some(Repo::load(actor_store.storage.clone(), curr_root).await?),
+        Some(_root) => Some(Repo::load(actor_txn.storage.clone(), curr_root).await?),
     };
 
     // Process imported car
@@ -122,9 +131,10 @@ pub async fn import_repo(
     };
 
     let commit_data = diff.commit;
+    let imported_rev = commit_data.rev.clone();
     let prepared_writes: Vec<PreparedWrite> =
-        prepare_import_repo_writes(requester, diff.writes, &imported_blocks).await?;
-    match actor_store
+        prepare_import_repo_writes(requester.clone(), diff.writes, &imported_blocks).await?;
+    match actor_txn
         .process_import_repo(commit_data, prepared_writes)
         .await
     {
@@ -134,6 +144,8 @@ pub async fn import_repo(
             return Err(ApiError::RuntimeError);
         }
     }
+    // an accepted import exposes its revision like a read would
+    actor_store.note_exposure(&requester, &imported_rev).await?;
 
     Ok(())
 }

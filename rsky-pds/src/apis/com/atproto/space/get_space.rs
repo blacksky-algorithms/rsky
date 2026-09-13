@@ -19,7 +19,7 @@ pub async fn space_get_space(
 ) -> Result<Json<GetSpaceOutput>, ApiError> {
     let space_id = parse_space_uri(&space)?;
     if auth.space_uri != space_id.uri() {
-        return Err(ApiError::InvalidToken);
+        return Err(ApiError::InvalidToken("Token is invalid".to_string()));
     }
     let (def, _, _) = local_space_def(actor_store, blobstore_factory, &space_id).await?;
     Ok(Json(GetSpaceOutput {

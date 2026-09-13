@@ -1,11 +1,17 @@
 // based on https://github.com/bluesky-social/atproto/blob/main/packages/pds/src/sequencer/db
 
-use crate::db::migrator::{migrate_to_latest, Migration};
-use crate::db::sqlite::Db;
+use crate::db::migrator::{migrate_to_latest, Migration, MigrationSet};
+use crate::db::sqlite::{Db, Synchronous};
 use anyhow::Result;
 use std::path::Path;
 
 pub type SequencerDb = Db;
+
+pub const SEQUENCER_DB_MIGRATIONS_SET: MigrationSet = MigrationSet {
+    shared: SEQUENCER_DB_MIGRATIONS,
+    local: &[],
+    legacy: None,
+};
 
 pub const SEQUENCER_DB_MIGRATIONS: &[Migration] = &[Migration {
     name: "001",
@@ -27,9 +33,11 @@ pub fn get_db(location: impl AsRef<Path>) -> Result<SequencerDb> {
     Db::open(location)
 }
 
+/// The sequencer is the publication record; an event it has returned a
+/// sequence number for must survive a power loss.
 pub async fn get_migrated_db(location: impl AsRef<Path>) -> Result<SequencerDb> {
-    let db = get_db(location)?;
-    migrate_to_latest(&db, SEQUENCER_DB_MIGRATIONS).await?;
+    let db = Db::open_with(location, Synchronous::Full)?;
+    migrate_to_latest(&db, SEQUENCER_DB_MIGRATIONS_SET).await?;
     Ok(db)
 }
 
@@ -44,7 +52,7 @@ mod tests {
             .await
             .unwrap();
         // migrating again is a no-op
-        migrate_to_latest(&db, SEQUENCER_DB_MIGRATIONS)
+        migrate_to_latest(&db, SEQUENCER_DB_MIGRATIONS_SET)
             .await
             .unwrap();
         let tables: Vec<String> = db
@@ -60,6 +68,9 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(tables, ["migrations", "repo_seq"]);
+        assert_eq!(
+            tables,
+            ["kysely_migration", "kysely_migration_lock", "repo_seq"]
+        );
     }
 }

@@ -39,12 +39,12 @@ pub async fn space_notify_space_deleted(
     .await
     .map_err(|error| {
         tracing::debug!(%error, "notifySpaceDeleted auth rejected");
-        ApiError::InvalidToken
+        ApiError::InvalidToken("Token is invalid".to_string())
     })?;
     // Only the space authority may announce the space's deletion.
     let iss_did = claims.iss.split('#').next().unwrap_or(&claims.iss);
     if iss_did != space_id.authority {
-        return Err(ApiError::InvalidToken);
+        return Err(ApiError::InvalidToken("Token is invalid".to_string()));
     }
     let dids: Vec<String> = account_manager
         .db

@@ -103,12 +103,13 @@ struct TokenRow {
     parameters: String,
     code: Option<String>,
     current_refresh_token: Option<String>,
+    scope: Option<String>,
 }
 
 impl TokenRow {
     const COLUMNS: &'static str = "\"tokenId\", did, \"createdAt\", \"updatedAt\", \
         \"expiresAt\", \"clientId\", \"clientAuth\", \"deviceId\", parameters, code, \
-        \"currentRefreshToken\"";
+        \"currentRefreshToken\", scope";
 
     fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
@@ -123,6 +124,7 @@ impl TokenRow {
             parameters: row.get("parameters")?,
             code: row.get("code")?,
             current_refresh_token: row.get("currentRefreshToken")?,
+            scope: row.get("scope")?,
         })
     }
 
@@ -139,6 +141,7 @@ impl TokenRow {
                 did: self.did,
                 parameters: from_json::<AuthorizationRequestParameters>(&self.parameters)?,
                 code: self.code,
+                scope: self.scope,
             },
             current_refresh_token: self.current_refresh_token,
         })
@@ -323,7 +326,7 @@ impl OAuthStore for PdsOAuthStore {
                         parameters,
                         data.code,
                         refresh_token,
-                        data.parameters.scope,
+                        data.granted_scope(),
                     ],
                 )?;
                 Ok(())
@@ -789,6 +792,7 @@ mod tests {
             did: DID.to_string(),
             parameters: parameters(),
             code: Some("cod-1".to_string()),
+            scope: Some("atproto".to_string()),
         }
     }
 

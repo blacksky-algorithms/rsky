@@ -1,7 +1,8 @@
 use crate::error::OAuthError;
-use crate::jwk::{EcCurve, Jwk};
+use crate::jwk::{EcCurve, Jwk, SigningKey};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -143,6 +144,67 @@ pub fn verify(token: &str, key: &Jwk) -> Result<DecodedJwt, OAuthError> {
     let decoded = decode(token)?;
     verify_signature(&decoded, key)?;
     Ok(decoded)
+}
+
+/// Verifies a token against the server's signing key, whichever kind it is.
+pub fn verify_with(token: &str, key: &SigningKey) -> Result<DecodedJwt, OAuthError> {
+    let decoded = decode(token)?;
+    match key {
+        SigningKey::Ec(jwk) => verify_signature(&decoded, jwk)?,
+        SigningKey::Symmetric(secret) => {
+            if decoded.header.alg != "HS256" {
+                return Err(OAuthError::InvalidToken(format!(
+                    "JWT \"alg\" {} does not match key algorithm HS256",
+                    decoded.header.alg
+                )));
+            }
+            let mut mac =
+                Hmac::<Sha256>::new_from_slice(secret).expect("hmac accepts any key length");
+            mac.update(decoded.signing_input.as_bytes());
+            if mac.verify_slice(&decoded.signature).is_err() {
+                return Err(OAuthError::InvalidToken(
+                    "JWT signature verification failed".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(decoded)
+}
+
+/// Signs with the server's signing key, whichever kind it is.
+pub fn sign_with(
+    header: &JwtHeader,
+    claims: &JwtClaims,
+    key: &SigningKey,
+) -> Result<String, OAuthError> {
+    match key {
+        SigningKey::Ec(jwk) => sign(header, claims, jwk),
+        SigningKey::Symmetric(secret) => {
+            if header.alg != "HS256" {
+                return Err(OAuthError::InvalidRequest(format!(
+                    "JWT \"alg\" {} does not match key algorithm HS256",
+                    header.alg
+                )));
+            }
+            let header_json =
+                serde_json::to_string(header).expect("JWT header serialization cannot fail");
+            let claims_json =
+                serde_json::to_string(claims).expect("JWT claims serialization cannot fail");
+            let signing_input = format!(
+                "{}.{}",
+                URL_SAFE_NO_PAD.encode(header_json),
+                URL_SAFE_NO_PAD.encode(claims_json)
+            );
+            let mut mac =
+                Hmac::<Sha256>::new_from_slice(secret).expect("hmac accepts any key length");
+            mac.update(signing_input.as_bytes());
+            let signature = mac.finalize().into_bytes();
+            Ok(format!(
+                "{signing_input}.{}",
+                URL_SAFE_NO_PAD.encode(signature)
+            ))
+        }
+    }
 }
 
 pub fn verify_signature(decoded: &DecodedJwt, key: &Jwk) -> Result<(), OAuthError> {
@@ -519,5 +581,33 @@ mod tests {
         header.typ = Some("JWT".to_string());
         header.validate_typ("JWT").unwrap();
         assert!(header.validate_typ("dpop+jwt").is_err());
+    }
+
+    #[test]
+    fn symmetric_keys_sign_and_verify_hs256_only() {
+        let secret = SigningKey::Symmetric(b"secret".to_vec());
+        let mut header = JwtHeader::new("HS256");
+        header.typ = Some("at+jwt".to_string());
+        let claims = JwtClaims {
+            sub: Some("did:plc:a".to_string()),
+            ..Default::default()
+        };
+        let token = sign_with(&header, &claims, &secret).unwrap();
+        let decoded = verify_with(&token, &secret).unwrap();
+        assert_eq!(decoded.claims.sub.as_deref(), Some("did:plc:a"));
+        assert!(verify_with(&token, &SigningKey::Symmetric(b"other".to_vec())).is_err());
+        // an EC token is never accepted by a symmetric key, whatever its bytes
+        let (ec_token, ec_key) = signed_token(EcCurve::K256);
+        let err = verify_with(&ec_token, &secret).unwrap_err();
+        assert!(err
+            .error_description()
+            .contains("does not match key algorithm HS256"));
+        // and the EC paths of the generic helpers delegate to the EC code
+        let ec = SigningKey::Ec(ec_key.clone());
+        assert!(verify_with(&ec_token, &ec).is_ok());
+        let mut ec_header = JwtHeader::new("ES256K");
+        ec_header.typ = Some("at+jwt".to_string());
+        let signed = sign_with(&ec_header, &claims, &ec).unwrap();
+        assert!(verify_with(&signed, &ec).is_ok());
     }
 }

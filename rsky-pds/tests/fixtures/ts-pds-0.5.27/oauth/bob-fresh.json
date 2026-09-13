@@ -1,0 +1,35 @@
+{
+  "did": "did:plc:ojboo4h3a2czrmpelfyyn2lx",
+  "client_id": "http://localhost?redirect_uri=http%3A%2F%2F127.0.0.1%2Fcb&scope=atproto+transition%3Ageneric",
+  "redirect_uri": "http://127.0.0.1/cb",
+  "scope": "atproto transition:generic",
+  "dpop": {
+    "private_jwk": {
+      "kty": "EC",
+      "x": "STEGR37cxLPqv4qtezVR57l7zh124O7smP6L5qDQWMs",
+      "y": "KoEfpdSuJSYCTJuFyfoB4e7tUX3GVRPS6cugCIiye8g",
+      "crv": "P-256",
+      "d": "wOHAL8_T3dqr9yJugszy04QfMgegB82gE46R4DiNDbY"
+    },
+    "public_jwk": {
+      "kty": "EC",
+      "x": "STEGR37cxLPqv4qtezVR57l7zh124O7smP6L5qDQWMs",
+      "y": "KoEfpdSuJSYCTJuFyfoB4e7tUX3GVRPS6cugCIiye8g",
+      "crv": "P-256"
+    },
+    "jkt": "Fx7xestMWogg6AJ2KH0nQc8WF0SYNWLrtxPTSfHWIqc"
+  },
+  "cookies": {
+    "dev-id": "dev-3b2789ae6ef4c40df879a470d36b06e1",
+    "ses-id": "ses-e2c8b2a791e112cabe94c744abe4ba15",
+    "csrf-token": "b5f8e6431df4e3482de1811b"
+  },
+  "consent_error": {
+    "redirect_mode": "query",
+    "redirect_uri": "http://127.0.0.1/cb",
+    "iss": "https://fixture.test",
+    "state": "mJ69OCWaiwnDSvVx3RaU2w",
+    "error": "access_denied",
+    "error_description": "This account has been deactivated"
+  }
+}

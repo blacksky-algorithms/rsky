@@ -84,12 +84,17 @@ async fn harness(dids: &[&str]) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let path = |name: &str| dir.path().join(name).to_string_lossy().to_string();
 
+    let lifecycle =
+        crate::lifecycle::LifecycleStore::open(dir.path().join("rsky/lifecycle.sqlite"))
+            .await
+            .unwrap();
     let actor_store = ActorStore::new(
         &ActorStoreConfig {
             directory: path("actors"),
             cache_size: 8,
         },
         crate::background::BackgroundQueue::default(),
+        lifecycle,
     );
     let account_manager = AccountManager::new(
         crate::account_manager::db::get_migrated_db(dir.path().join("account.sqlite"))
@@ -125,7 +130,7 @@ async fn harness(dids: &[&str]) -> Harness {
             )
             .await
             .unwrap();
-        actor_txn.create_repo(Vec::new()).await.unwrap();
+        actor_txn.create_repo(Vec::new(), true).await.unwrap();
         drop(actor_txn);
         account_manager
             .create_account(CreateAccountOpts {

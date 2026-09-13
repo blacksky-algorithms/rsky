@@ -55,7 +55,8 @@ async fn main() -> Result<()> {
         &args.database_url,
         rsky_wintermute::config::pg_pool_config(16),
     )?;
-    let http_client = reqwest::Client::builder()
+    let http_client = rsky_wintermute::outbound::client()?
+        .builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
 
@@ -107,9 +108,11 @@ async fn process_did(
     println!("  PDS: {}", pds_endpoint);
 
     // Fetch CAR file
-    let repo_url = format!("{pds_endpoint}/xrpc/com.atproto.sync.getRepo?did={did}");
+    let repo_url = rsky_wintermute::outbound::client()?.checked(&format!(
+        "{pds_endpoint}/xrpc/com.atproto.sync.getRepo?did={did}"
+    ))?;
     println!("  Fetching CAR...");
-    let response = http_client.get(&repo_url).send().await?;
+    let response = http_client.get(repo_url).send().await?;
 
     if !response.status().is_success() {
         return Err(color_eyre::eyre::eyre!("HTTP error: {}", response.status()));
@@ -209,6 +212,10 @@ async fn process_did(
                 record: Some(record_json),
                 indexed_at: now.clone(),
                 rev: rev.clone(),
+                provenance: Some(rsky_wintermute::reconcile::Provenance {
+                    generation: rsky_wintermute::reconcile::current_generation(pool, did).await?,
+                    source: rsky_wintermute::reconcile::Source::Direct,
+                }),
             };
 
             // Index directly to PostgreSQL

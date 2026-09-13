@@ -1,3 +1,4 @@
+use crate::actor_store::blobstore::{DeleteError, ObjectKind};
 // based on https://github.com/bluesky-social/atproto/blob/main/packages/pds/src/disk-blobstore.ts
 use crate::actor_store::blobstore::{BlobNotFoundError, BlobStore};
 use anyhow::{bail, Result};
@@ -100,11 +101,74 @@ async fn remove_dir_if_exists(path: &Path) -> Result<()> {
 }
 
 impl BlobStore for DiskBlobStore {
+    fn namespace_prefixes(&self) -> Vec<String> {
+        vec![
+            format!("{}/", self.location.join(&self.did).display()),
+            format!("{}/", self.tmp_location.join(&self.did).display()),
+            format!("{}/", self.quarantine_location.join(&self.did).display()),
+        ]
+    }
+    fn object_key(&self, kind: ObjectKind, name: &str, generation: u32) -> String {
+        let name = crate::blob_generations::generation_name(name, generation);
+        let root = match kind {
+            ObjectKind::Permanent => &self.location,
+            ObjectKind::Temp => &self.tmp_location,
+            ObjectKind::Quarantine => &self.quarantine_location,
+        };
+        root.join(&self.did).join(name).display().to_string()
+    }
+    fn list_objects(&self, prefix: String) -> BoxFuture<'_, Result<Vec<String>>> {
+        Box::pin(async move {
+            let dir = Path::new(&prefix);
+            let mut keys = Vec::new();
+            let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+                return Ok(keys);
+            };
+            while let Some(entry) = entries.next_entry().await? {
+                if entry.file_type().await?.is_file() {
+                    keys.push(entry.path().display().to_string());
+                }
+            }
+            keys.sort();
+            Ok(keys)
+        })
+    }
+    fn delete_object(&self, key: String) -> BoxFuture<'_, std::result::Result<(), DeleteError>> {
+        Box::pin(async move {
+            remove_file_if_exists(Path::new(&key))
+                .await
+                .map_err(|err| DeleteError::Definitive(err.to_string()))
+        })
+    }
+    fn object_exists(&self, key: String) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async move { Ok(tokio::fs::try_exists(&key).await?) })
+    }
+    fn get_object(&self, key: String) -> BoxFuture<'_, Result<Vec<u8>>> {
+        Box::pin(async move { tokio::fs::read(&key).await.map_err(translate_err) })
+    }
+    fn put_object(&self, key: String, bytes: Vec<u8>) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            if let Some(parent) = Path::new(&key).parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            tokio::fs::write(&key, bytes).await?;
+            Ok(())
+        })
+    }
     fn put_temp(&self, bytes: Vec<u8>) -> BoxFuture<'_, Result<String>> {
         Box::pin(async move {
             self.ensure_temp().await?;
             let key = Self::gen_key();
             tokio::fs::write(self.tmp_path(&key), bytes).await?;
+            Ok(key)
+        })
+    }
+
+    fn put_temp_from_path(&self, path: PathBuf) -> BoxFuture<'_, Result<String>> {
+        Box::pin(async move {
+            self.ensure_temp().await?;
+            let key = Self::gen_key();
+            tokio::fs::copy(path, self.tmp_path(&key)).await?;
             Ok(key)
         })
     }
@@ -208,6 +272,30 @@ impl BlobStore for DiskBlobStore {
             remove_dir_if_exists(&self.quarantine_location.join(&self.did)).await
         }))
     }
+
+    fn make_permanent_copy_only(&self, key: String, cid: Cid) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            self.ensure_dir().await?;
+            if !BlobStore::has_stored(self, cid).await? {
+                copy_from_temp(&self.tmp_path(&key), &self.stored_path(cid)).await?;
+            }
+            Ok(())
+        })
+    }
+
+    fn has_quarantined(&self, cid: Cid) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async move { Ok(tokio::fs::try_exists(self.quarantine_path(cid)).await?) })
+    }
+
+    fn restore_copy_only(&self, cid: Cid) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            self.ensure_dir().await?;
+            if !BlobStore::has_stored(self, cid).await? {
+                copy_from_temp(&self.quarantine_path(cid), &self.stored_path(cid)).await?;
+            }
+            Ok(())
+        })
+    }
 }
 
 #[cfg(test)]
@@ -253,6 +341,44 @@ mod tests {
             store.quarantine_path(cid),
             Path::new("/quarantine/blobs/did:example:alice").join(cid.to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn copy_only_promotion_and_restoration_keep_their_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let bytes = b"copy only".to_vec();
+        let cid = cid_for(&bytes);
+        assert!(store
+            .make_permanent_copy_only("missing".to_owned(), cid)
+            .await
+            .is_err());
+        let key = store.put_temp(bytes.clone()).await.unwrap();
+        store
+            .make_permanent_copy_only(key.clone(), cid)
+            .await
+            .unwrap();
+        store
+            .make_permanent_copy_only(key.clone(), cid)
+            .await
+            .unwrap();
+        assert!(store.tmp_path(&key).is_file());
+        assert_eq!(BlobStore::get_bytes(&store, cid).await.unwrap(), bytes);
+
+        assert!(!BlobStore::has_quarantined(&store, cid).await.unwrap());
+        assert!(
+            store.restore_copy_only(cid).await.is_ok(),
+            "nothing to restore over"
+        );
+        store.quarantine(cid).await.unwrap();
+        assert!(BlobStore::has_quarantined(&store, cid).await.unwrap());
+        store.restore_copy_only(cid).await.unwrap();
+        assert!(store.quarantine_path(cid).is_file());
+        assert_eq!(BlobStore::get_bytes(&store, cid).await.unwrap(), bytes);
+        store.delete(cid).await.unwrap();
+        store.unquarantine(cid).await.unwrap();
+        store.delete(cid).await.unwrap();
+        assert!(store.restore_copy_only(cid).await.is_err());
     }
 
     #[tokio::test]
@@ -387,6 +513,43 @@ mod tests {
             .unwrap();
         let err = store.get_bytes(cid).await.unwrap_err();
         assert!(err.downcast_ref::<BlobNotFoundError>().is_none());
+    }
+
+    #[tokio::test]
+    async fn physical_keys_are_listed_read_written_and_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DiskBlobStore::new("did:plc:disk".into(), dir.path(), None, None);
+        let prefixes = store.namespace_prefixes();
+        assert_eq!(prefixes.len(), 3);
+        let key = store.object_key(ObjectKind::Permanent, "bafycid", 2);
+        assert!(key.ends_with("did:plc:disk/bafycid.g2"), "{key}");
+        assert!(store
+            .object_key(ObjectKind::Temp, "t", 0)
+            .starts_with(&prefixes[1]));
+        assert!(store
+            .object_key(ObjectKind::Quarantine, "q", 0)
+            .starts_with(&prefixes[2]));
+        assert!(store
+            .list_objects(prefixes[0].clone())
+            .await
+            .unwrap()
+            .is_empty());
+        store
+            .put_object(key.clone(), b"bytes".to_vec())
+            .await
+            .unwrap();
+        assert!(store.object_exists(key.clone()).await.unwrap());
+        assert_eq!(store.get_object(key.clone()).await.unwrap(), b"bytes");
+        assert_eq!(
+            store.list_objects(prefixes[0].clone()).await.unwrap(),
+            vec![key.clone()]
+        );
+        store.delete_object(key.clone()).await.unwrap();
+        assert!(!store.object_exists(key.clone()).await.unwrap());
+        // deleting an absent key is not an error; reading one is
+        store.delete_object(key.clone()).await.unwrap();
+        assert!(store.get_object(key).await.is_err());
+        assert!(store.put_object(String::new(), vec![]).await.is_err());
     }
 
     #[tokio::test]

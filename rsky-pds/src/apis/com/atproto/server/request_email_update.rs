@@ -6,8 +6,10 @@ use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::mailer;
 use crate::mailer::TokenParam;
 use crate::models::models::EmailTokenPurpose;
+use crate::rate_limits::{Caller, RateLimits};
 use anyhow::{bail, Result};
 use rocket::serde::json::Json;
+use rocket::State;
 use rsky_lexicon::com::atproto::server::RequestEmailUpdateOutput;
 
 async fn inner_request_email_update(
@@ -48,7 +50,18 @@ async fn inner_request_email_update(
 pub async fn request_email_update(
     auth: Scoped<OAuthForbidden, AccessStandardIncludeChecks>,
     account_manager: AccountManager,
+    limits: &State<RateLimits>,
+    caller: Caller,
 ) -> Result<Json<RequestEmailUpdateOutput>, ApiError> {
+    let did = auth.did().await?;
+    limits
+        .consume_all(
+            &crate::rate_limits::REQUEST_EMAIL_UPDATE,
+            &did,
+            1,
+            caller.bypass,
+        )
+        .await?;
     match inner_request_email_update(auth, account_manager).await {
         Ok(res) => Ok(Json(res)),
         Err(error) => {

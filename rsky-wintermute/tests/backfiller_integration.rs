@@ -25,6 +25,13 @@ fn test_backfiller_manager_new_success() {
         "BackfillerManager::new should succeed: {:?}",
         manager.err()
     );
+    // a generation pool is attached without connecting
+    let pool = rsky_wintermute::config::create_pg_pool(
+        "postgresql://postgres:postgres@127.0.0.1:1/nowhere",
+        rsky_wintermute::config::pg_pool_config(1),
+    )
+    .unwrap();
+    let _with_generations = manager.unwrap().with_generations(pool);
 }
 
 #[tokio::test]
@@ -111,6 +118,7 @@ async fn test_backfiller_detects_backpressure() {
             record: Some(json!({"text": "test"})),
             indexed_at: "2024-01-01T00:00:00Z".to_owned(),
             rev: "test".to_owned(),
+            provenance: None,
         };
         storage.enqueue_firehose_backfill(&job).unwrap();
     }
@@ -155,10 +163,11 @@ async fn test_backfiller_handles_job_failures_with_retry() {
     storage.enqueue_backfill(&job).unwrap();
 
     // Process the job directly to test retry logic
-    let http_client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
+    let http_client = rsky_identity::safe_fetch::SafeClient::new(
+        rsky_identity::safe_fetch::NetworkPolicy::PERMISSIVE,
+        Duration::from_secs(5),
+    )
+    .unwrap();
 
     let result =
         BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
@@ -192,10 +201,11 @@ async fn test_backfiller_dead_letters_after_max_retries() {
 #[tokio::test]
 async fn test_process_job_error_paths() {
     let (storage, _dir) = setup_test_storage();
-    let http_client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
+    let http_client = rsky_identity::safe_fetch::SafeClient::new(
+        rsky_identity::safe_fetch::NetworkPolicy::PERMISSIVE,
+        Duration::from_secs(5),
+    )
+    .unwrap();
 
     // Test 1: Invalid DID resolution
     let job1 = BackfillJob {

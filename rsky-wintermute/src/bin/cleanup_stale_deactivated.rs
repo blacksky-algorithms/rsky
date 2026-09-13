@@ -69,7 +69,8 @@ async fn main() -> Result<()> {
     });
     let pool = Arc::new(cfg.create_pool(Some(Runtime::Tokio1), NoTls)?);
 
-    let http = reqwest::Client::builder()
+    let http = rsky_wintermute::outbound::client()?
+        .builder()
         .timeout(std::time::Duration::from_millis(args.pds_timeout_ms))
         .user_agent("rsky-wintermute-cleanup/0.1")
         .build()?;
@@ -178,7 +179,15 @@ async fn process_one(
         pds.trim_end_matches('/'),
         did
     );
-    match http.get(&url).send().await {
+    let Ok(url) = rsky_wintermute::outbound::client().and_then(|client| {
+        client
+            .checked(&url)
+            .map_err(|e| rsky_wintermute::types::WintermuteError::Other(e.to_string()))
+    }) else {
+        debug!("{}: PDS endpoint refused by the network policy", did);
+        return Outcome::DeferredNoPds;
+    };
+    match http.get(url.clone()).send().await {
         Ok(resp) => {
             let status = resp.status();
             if !status.is_success() {

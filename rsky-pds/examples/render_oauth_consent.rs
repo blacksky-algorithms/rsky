@@ -58,6 +58,7 @@ fn main() {
         login_hint: "alice.example.social".to_string(),
         error: Some("That handle or password didn't match.".to_string()),
         signup_url: Some("https://example.social/signup".to_string()),
+        otp_hint: None,
         sessions: vec![SessionOption {
             did: "did:plc:qz3x7k2j9m4n8p1r5s6t7u8v".to_string(),
             label: "alice.example.social".to_string(),

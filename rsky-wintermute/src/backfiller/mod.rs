@@ -7,6 +7,7 @@ use crate::types::{BackfillJob, IndexJob, WintermuteError, WriteAction};
 use dashmap::DashMap;
 use iroh_car::CarReader;
 use rsky_identity::IdResolver;
+use rsky_identity::safe_fetch::{Redirects, SafeClient};
 use rsky_identity::types::IdentityResolverOpts;
 use rsky_repo::parse::get_and_parse_record;
 use rsky_repo::readable_repo::ReadableRepo;
@@ -19,8 +20,10 @@ use std::time::Duration;
 pub struct BackfillerManager {
     workers: usize,
     storage: Arc<Storage>,
-    http_client: reqwest::Client,
+    http_client: SafeClient,
     pds_cache: Arc<DashMap<String, String>>,
+    /// Where the actor generations are read before each fetch.
+    generations: Option<deadpool_postgres::Pool>,
 }
 
 /// RAII guard that decrements `BACKFILLER_REPOS_RUNNING` on drop.
@@ -43,9 +46,7 @@ impl Drop for RepoRunningGuard {
 impl BackfillerManager {
     pub fn new(storage: Arc<Storage>) -> Result<Self, WintermuteError> {
         let workers = *WORKERS_BACKFILLER;
-        let http_client = reqwest::Client::builder()
-            .timeout(backfiller_timeout())
-            .build()?;
+        let http_client = crate::outbound::client()?;
 
         tracing::info!(
             "backfiller config: workers={}, channel_cap={}, timeout={:?}",
@@ -58,8 +59,18 @@ impl BackfillerManager {
             workers,
             storage,
             http_client,
+            generations: None,
             pds_cache: Arc::new(DashMap::new()),
         })
+    }
+
+    /// Stamps every job with the actor's generation read from `pool` when
+    /// the fetch starts, so work obtained before a reconciliation is
+    /// refused after it.
+    #[must_use]
+    pub fn with_generations(mut self, pool: deadpool_postgres::Pool) -> Self {
+        self.generations = Some(pool);
+        self
     }
 
     pub fn run(self) -> Result<(), WintermuteError> {
@@ -107,6 +118,7 @@ impl BackfillerManager {
             let storage = Arc::clone(&self.storage);
             let http_client = self.http_client.clone();
             let pds_cache = Arc::clone(&self.pds_cache);
+            let generations = self.generations.clone();
 
             worker_handles.push(tokio::spawn(async move {
                 loop {
@@ -121,7 +133,15 @@ impl BackfillerManager {
                         break;
                     };
 
-                    match Self::process_job(&storage, &http_client, &pds_cache, &job).await {
+                    match Self::process_job_with(
+                        &storage,
+                        &http_client,
+                        &pds_cache,
+                        &job,
+                        generations.as_ref(),
+                    )
+                    .await
+                    {
                         Ok(()) => {}
                         Err(e) => {
                             tracing::error!("worker {worker_id}: failed {}: {e}", job.did);
@@ -202,9 +222,19 @@ impl BackfillerManager {
 
     pub async fn process_job(
         storage: &Storage,
-        http_client: &reqwest::Client,
+        http_client: &SafeClient,
         pds_cache: &DashMap<String, String>,
         job: &BackfillJob,
+    ) -> Result<(), WintermuteError> {
+        Self::process_job_with(storage, http_client, pds_cache, job, None).await
+    }
+
+    pub async fn process_job_with(
+        storage: &Storage,
+        http_client: &SafeClient,
+        pds_cache: &DashMap<String, String>,
+        job: &BackfillJob,
+        generations: Option<&deadpool_postgres::Pool>,
     ) -> Result<(), WintermuteError> {
         use crate::metrics;
 
@@ -212,6 +242,14 @@ impl BackfillerManager {
         let _running_guard = RepoRunningGuard::new();
 
         let did = &job.did;
+        // the acquisition identity is fixed before any data is fetched
+        let generation = match generations {
+            Some(pool) => crate::reconcile::current_generation(pool, did).await?,
+            None => None,
+        };
+        let fetched_at = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
 
         // Check PDS endpoint cache first to avoid repeated DID resolution
         let pds_endpoint = if let Some(cached) = pds_cache.get(did) {
@@ -252,7 +290,15 @@ impl BackfillerManager {
         };
 
         let repo_url = format!("{pds_endpoint}/xrpc/com.atproto.sync.getRepo?did={did}");
-        let response = match http_client.get(&repo_url).send().await {
+        let repo_url = match http_client.checked(&repo_url) {
+            Ok(url) => url,
+            Err(e) => {
+                metrics::BACKFILLER_CAR_FETCH_ERRORS_TOTAL.inc();
+                metrics::BACKFILLER_REPOS_FAILED_TOTAL.inc();
+                return Err(WintermuteError::Other(format!("refused: {e}")));
+            }
+        };
+        let response = match http_client.get(repo_url, Redirects::Follow(3)).await {
             Ok(r) => r,
             Err(e) => {
                 metrics::BACKFILLER_CAR_FETCH_ERRORS_TOTAL.inc();
@@ -271,7 +317,14 @@ impl BackfillerManager {
         }
 
         let car_bytes = response.bytes().await?;
-        Self::process_car_bytes(storage, did, &car_bytes, job.priority).await?;
+        let provenance = crate::reconcile::Provenance {
+            generation,
+            source: crate::reconcile::Source::Backfill {
+                host: pds_endpoint.clone(),
+                fetched_at,
+            },
+        };
+        Self::process_car_bytes(storage, did, &car_bytes, job.priority, Some(provenance)).await?;
 
         metrics::BACKFILLER_REPOS_PROCESSED_TOTAL.inc();
 
@@ -283,6 +336,7 @@ impl BackfillerManager {
         did: &str,
         car_bytes: &[u8],
         priority: bool,
+        provenance: Option<crate::reconcile::Provenance>,
     ) -> Result<usize, WintermuteError> {
         use crate::metrics;
 
@@ -376,6 +430,7 @@ impl BackfillerManager {
                     record: Some(record_json),
                     indexed_at: now.clone(),
                     rev: rev.clone(),
+                    provenance: provenance.clone(),
                 });
             }
         }

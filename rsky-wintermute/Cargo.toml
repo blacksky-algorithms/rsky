@@ -1,6 +1,6 @@
 [package]
 name = "rsky-wintermute"
-version = "0.9.4"
+version = "0.10.0"
 edition = "2024"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "Monolithic indexer combining ingester, backfiller, and indexer"
@@ -28,6 +28,10 @@ path = "src/bin/label_sync.rs"
 [[bin]]
 name = "car_loader"
 path = "src/bin/car_loader.rs"
+
+[[bin]]
+name = "reindex_did"
+path = "src/bin/reindex_did.rs"
 
 [[bin]]
 name = "cleanup_stale_deactivated"
@@ -87,6 +91,7 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] 
 
 [dev-dependencies]
 mockito = "1.7.0"
+secp256k1 = { workspace = true }
 serial_test = { version = "3.2", features = ["async"] }
 tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

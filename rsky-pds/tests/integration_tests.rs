@@ -137,8 +137,10 @@ async fn test_create_session() {
         .body(session_input.to_string())
         .dispatch()
         .await;
-    let response_status = response.status();
-    assert_eq!(response_status, Status::BadRequest);
+    assert_eq!(response.status(), Status::Unauthorized);
+    let body: serde_json::Value = response.into_json().await.unwrap();
+    assert_eq!(body["error"], "AuthenticationRequired");
+    assert_eq!(body["message"], "Invalid identifier or password");
 }
 
 #[tokio::test]
@@ -193,9 +195,12 @@ async fn test_liveness_options_and_catcher() {
         Some("*")
     );
 
-    // unhandled paths fall through to the default catcher
+    // unhandled paths fall through to the default catcher, which answers
+    // the status it was given
     let response = client.get("/does-not-exist").dispatch().await;
-    assert_eq!(response.status(), Status::InternalServerError);
+    assert_eq!(response.status(), Status::NotFound);
+    let body: serde_json::Value = response.into_json().await.unwrap();
+    assert_eq!(body["error"], "NotFound");
 }
 
 async fn get_access_token(client: &rocket::local::asynchronous::Client) -> String {

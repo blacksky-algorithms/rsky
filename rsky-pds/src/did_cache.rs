@@ -1,13 +1,19 @@
 // based on https://github.com/bluesky-social/atproto/blob/main/packages/pds/src/did-cache
 
 use crate::background::BackgroundQueue;
-use crate::db::migrator::{migrate_to_latest, Migration};
+use crate::db::migrator::{migrate_to_latest, Migration, MigrationSet};
 use crate::db::sqlite::Db;
 use anyhow::Result;
 use rsky_identity::types::{CacheResult, DidCache, DidDocument, GetDocFn};
 use rusqlite::{params, OptionalExtension};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
+
+pub const DID_CACHE_DB_MIGRATIONS_SET: MigrationSet = MigrationSet {
+    shared: DID_CACHE_DB_MIGRATIONS,
+    local: &[],
+    legacy: None,
+};
 
 pub const DID_CACHE_DB_MIGRATIONS: &[Migration] = &[Migration {
     name: "001",
@@ -21,7 +27,7 @@ pub const DID_CACHE_DB_MIGRATIONS: &[Migration] = &[Migration {
 
 pub async fn get_migrated_db(location: impl AsRef<Path>) -> Result<Db> {
     let db = Db::open(location)?;
-    migrate_to_latest(&db, DID_CACHE_DB_MIGRATIONS).await?;
+    migrate_to_latest(&db, DID_CACHE_DB_MIGRATIONS_SET).await?;
     Ok(db)
 }
 
@@ -41,6 +47,8 @@ pub struct DidSqliteCache {
     background_queue: BackgroundQueue,
     stale_ttl: Duration,
     max_ttl: Duration,
+    /// Serve the cache but never write to it.
+    read_only: bool,
 }
 
 impl DidSqliteCache {
@@ -55,7 +63,13 @@ impl DidSqliteCache {
             background_queue,
             stale_ttl,
             max_ttl,
+            read_only: false,
         }
+    }
+
+    pub fn with_read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
     }
 
     async fn cache_did_internal(&self, did: String, doc: &DidDocument) -> Result<()> {
@@ -125,6 +139,9 @@ impl DidSqliteCache {
 #[async_trait::async_trait]
 impl DidCache for DidSqliteCache {
     async fn cache_did(&self, did: String, doc: DidDocument) -> Result<()> {
+        if self.read_only {
+            return Ok(());
+        }
         if let Err(err) = self.cache_did_internal(did.clone(), &doc).await {
             tracing::error!(%did, ?err, "failed to cache did");
         }
@@ -132,6 +149,9 @@ impl DidCache for DidSqliteCache {
     }
 
     async fn refresh_cache(&self, did: String, get_doc: GetDocFn) -> Result<()> {
+        if self.read_only {
+            return Ok(());
+        }
         let cache = self.clone();
         self.background_queue.add(async move {
             match get_doc().await {
@@ -197,6 +217,39 @@ mod tests {
             .unwrap();
         let cache = DidSqliteCache::new(db, BackgroundQueue::default(), stale_ttl, max_ttl);
         (dir, cache)
+    }
+
+    #[tokio::test]
+    async fn read_only_cache_serves_but_never_writes() {
+        let (_dir, cache) =
+            cache_with_ttls(Duration::from_secs(3600), Duration::from_secs(86400)).await;
+        cache
+            .cache_did("did:example:alice".to_owned(), doc("did:example:alice"))
+            .await
+            .unwrap();
+        let cache = cache.with_read_only(true);
+        cache
+            .cache_did("did:example:bob".to_owned(), doc("did:example:bob"))
+            .await
+            .unwrap();
+        assert!(cache
+            .check_cache("did:example:bob".to_owned())
+            .await
+            .unwrap()
+            .is_none());
+        cache
+            .refresh_cache(
+                "did:example:alice".to_owned(),
+                Box::new(|| Box::pin(async { Ok(Some(doc("did:example:refreshed"))) })),
+            )
+            .await
+            .unwrap();
+        let alice = cache
+            .check_cache("did:example:alice".to_owned())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(alice.doc.id, "did:example:alice");
     }
 
     #[tokio::test]

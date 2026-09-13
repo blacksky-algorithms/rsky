@@ -2,17 +2,32 @@ use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
 use crate::auth_verifier::scope::{OAuthForbidden, Scoped};
-use crate::auth_verifier::AccessStandardIncludeChecks;
+use crate::auth_verifier::AccessFullCheckTakedown;
 use crate::mailer;
 use crate::mailer::TokenParam;
 use crate::models::models::EmailTokenPurpose;
-use anyhow::{bail, Result};
+use crate::rate_limits::{Caller, RateLimits};
+use rocket::State;
 
-async fn inner_request_account_delete(
-    auth: Scoped<OAuthForbidden, AccessStandardIncludeChecks>,
+/// Mails the caller the token `deleteAccount` requires. Full access only,
+/// from an account that is not taken down, like the reference PDS.
+#[tracing::instrument(skip_all)]
+#[rocket::post("/xrpc/com.atproto.server.requestAccountDelete")]
+pub async fn request_account_delete(
+    auth: Scoped<OAuthForbidden, AccessFullCheckTakedown>,
     account_manager: AccountManager,
-) -> Result<()> {
+    limits: &State<RateLimits>,
+    caller: Caller,
+) -> Result<(), ApiError> {
     let did = auth.did().await?;
+    limits
+        .consume_all(
+            &crate::rate_limits::REQUEST_ACCOUNT_DELETE,
+            &did,
+            1,
+            caller.bypass,
+        )
+        .await?;
     let account = account_manager
         .get_account(
             &did,
@@ -22,32 +37,15 @@ async fn inner_request_account_delete(
             }),
         )
         .await?;
-    if let Some(account) = account {
-        if let Some(email) = account.email {
-            let token = account_manager
-                .create_email_token(&did, EmailTokenPurpose::DeleteAccount)
-                .await?;
-            mailer::send_account_delete(email, TokenParam { token }).await?;
-            Ok(())
-        } else {
-            bail!("Account does not have an email address")
-        }
-    } else {
-        bail!("Account not found")
-    }
-}
-
-#[tracing::instrument(skip_all)]
-#[rocket::post("/xrpc/com.atproto.server.requestAccountDelete")]
-pub async fn request_account_delete(
-    auth: Scoped<OAuthForbidden, AccessStandardIncludeChecks>,
-    account_manager: AccountManager,
-) -> Result<(), ApiError> {
-    match inner_request_account_delete(auth, account_manager).await {
-        Ok(_) => Ok(()),
-        Err(error) => {
-            tracing::error!("@LOG: ERROR: {error}");
-            Err(ApiError::RuntimeError)
-        }
-    }
+    let account = account.ok_or(ApiError::InvalidRequest("account not found".to_string()))?;
+    let Some(email) = account.email else {
+        return Err(ApiError::InvalidRequest(
+            "account does not have an email address".to_string(),
+        ));
+    };
+    let token = account_manager
+        .create_email_token(&did, EmailTokenPurpose::DeleteAccount)
+        .await?;
+    mailer::send_account_delete(email, TokenParam { token }).await?;
+    Ok(())
 }

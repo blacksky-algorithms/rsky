@@ -23,13 +23,16 @@ fn test_keypair() -> Keypair {
     import_keypair(&hex::decode(TEST_SECRET_HEX).unwrap()).unwrap()
 }
 
-fn test_store(cache_size: usize) -> (tempfile::TempDir, ActorStore) {
+async fn test_store(cache_size: usize) -> (tempfile::TempDir, ActorStore) {
     let dir = tempfile::tempdir().unwrap();
     let cfg = ActorStoreConfig {
         directory: dir.path().join("actors").to_string_lossy().to_string(),
         cache_size,
     };
-    let store = ActorStore::new(&cfg, BackgroundQueue::default());
+    let lifecycle = LifecycleStore::open(dir.path().join("rsky/lifecycle.sqlite"))
+        .await
+        .unwrap();
+    let store = ActorStore::new(&cfg, BackgroundQueue::default(), lifecycle);
     (dir, store)
 }
 
@@ -116,7 +119,7 @@ fn rejects_unsafe_path_parts() {
 
 #[tokio::test]
 async fn create_open_keypair_destroy_roundtrip() {
-    let (_dir, store) = test_store(10);
+    let (_dir, store) = test_store(10).await;
     let keypair = test_keypair();
 
     assert!(!store.exists(TEST_DID).await.unwrap());
@@ -151,7 +154,7 @@ async fn create_open_keypair_destroy_roundtrip() {
 
 #[tokio::test]
 async fn location_shards_by_did_hash() {
-    let (_dir, store) = test_store(10);
+    let (_dir, store) = test_store(10).await;
     let location = store.get_location(TEST_DID).unwrap();
     let did_hash = hex::encode(Sha256::digest(TEST_DID.as_bytes()));
     assert!(location.directory.to_string_lossy().contains(&format!(
@@ -172,7 +175,7 @@ async fn location_shards_by_did_hash() {
 
 #[tokio::test]
 async fn concurrent_transactions_serialize_per_did() {
-    let (_dir, store) = test_store(10);
+    let (_dir, store) = test_store(10).await;
     let store = Arc::new(store);
     store.create(TEST_DID, &test_keypair()).await.unwrap();
 
@@ -203,7 +206,7 @@ async fn concurrent_transactions_serialize_per_did() {
 
 #[tokio::test]
 async fn lru_evicts_least_recently_used_db() {
-    let (_dir, store) = test_store(1);
+    let (_dir, store) = test_store(1).await;
     let keypair = test_keypair();
     let did_bob = "did:example:bob";
     store.create(TEST_DID, &keypair).await.unwrap();
@@ -225,7 +228,7 @@ async fn lru_evicts_least_recently_used_db() {
 
 #[tokio::test]
 async fn reserved_keypair_lifecycle() {
-    let (_dir, store) = test_store(10);
+    let (_dir, store) = test_store(10).await;
     // reserving without a did keys the file by the key's own did
     let key_did = store.reserve_keypair(None).await.unwrap();
     assert!(key_did.starts_with("did:key:"));
@@ -268,7 +271,7 @@ async fn reserved_keypair_lifecycle() {
 
 #[tokio::test]
 async fn create_account_write_and_read_back_records() {
-    let (_dir, store) = test_store(10);
+    let (_dir, store) = test_store(10).await;
     let keypair = test_keypair();
     let blobs = blobstore();
     store.create(TEST_DID, &keypair).await.unwrap();
@@ -278,7 +281,7 @@ async fn create_account_write_and_read_back_records() {
         .transact(TEST_DID.to_owned(), blobs.clone())
         .await
         .unwrap();
-    let init_commit = txn.create_repo(vec![]).await.unwrap();
+    let init_commit = txn.create_repo(vec![], true).await.unwrap();
     assert!(init_commit.ops.is_empty());
     assert!(init_commit.prev_data.is_none());
     let root = txn.get_repo_root().await.unwrap();
@@ -381,7 +384,7 @@ async fn create_account_write_and_read_back_records() {
 
 #[tokio::test]
 async fn process_writes_requires_repo_root() {
-    let (_dir, store) = test_store(10);
+    let (_dir, store) = test_store(10).await;
     store.create(TEST_DID, &test_keypair()).await.unwrap();
     let mut txn = store
         .transact(TEST_DID.to_owned(), blobstore())
@@ -401,13 +404,13 @@ async fn process_writes_requires_repo_root() {
 
 #[tokio::test]
 async fn duplicate_record_cids_are_detected() {
-    let (_dir, store) = test_store(10);
+    let (_dir, store) = test_store(10).await;
     store.create(TEST_DID, &test_keypair()).await.unwrap();
     let mut txn = store
         .transact(TEST_DID.to_owned(), blobstore())
         .await
         .unwrap();
-    txn.create_repo(vec![]).await.unwrap();
+    txn.create_repo(vec![], true).await.unwrap();
 
     // two records with identical content share a cid
     let write_one = post_write("3jt5vlkoraa2a", "same content");
@@ -474,7 +477,7 @@ async fn failing_blobstore_fails_every_operation() {
 
 #[tokio::test]
 async fn destroy_deletes_blobs_from_blobstore() {
-    let (_dir, store) = test_store(10);
+    let (_dir, store) = test_store(10).await;
     let blobs = blobstore();
     store.create(TEST_DID, &test_keypair()).await.unwrap();
 
@@ -557,11 +560,24 @@ impl crate::actor_store::blobstore::BlobStore for FailingBlobStore {
             None
         }
     }
+    fn make_permanent_copy_only(
+        &self,
+        _key: String,
+        _cid: Cid,
+    ) -> futures::future::BoxFuture<'_, Result<()>> {
+        Box::pin(async { bail!("blobstore unavailable") })
+    }
+    fn has_quarantined(&self, _cid: Cid) -> futures::future::BoxFuture<'_, Result<bool>> {
+        Box::pin(async { bail!("blobstore unavailable") })
+    }
+    fn restore_copy_only(&self, _cid: Cid) -> futures::future::BoxFuture<'_, Result<()>> {
+        Box::pin(async { bail!("blobstore unavailable") })
+    }
 }
 
 #[tokio::test]
 async fn reopens_evicted_db_from_disk() {
-    let (_dir, store) = test_store(1);
+    let (_dir, store) = test_store(1).await;
     let keypair = test_keypair();
     store.create(TEST_DID, &keypair).await.unwrap();
     // bob evicts alice from the single-entry cache
@@ -573,7 +589,7 @@ async fn reopens_evicted_db_from_disk() {
 
 #[tokio::test]
 async fn destroy_logs_blobstore_failures_and_still_removes_dir() {
-    let (_dir, store) = test_store(10);
+    let (_dir, store) = test_store(10).await;
     store.create(TEST_DID, &test_keypair()).await.unwrap();
     let txn = store
         .transact(TEST_DID.to_owned(), blobstore())
@@ -597,7 +613,7 @@ async fn destroy_logs_blobstore_failures_and_still_removes_dir() {
 #[tokio::test]
 async fn destroy_uses_disk_delete_all_when_available() {
     use crate::actor_store::disk_blobstore::DiskBlobStore;
-    let (dir, store) = test_store(10);
+    let (dir, store) = test_store(10).await;
     store.create(TEST_DID, &test_keypair()).await.unwrap();
     let disk_store = Arc::new(DiskBlobStore::new(
         TEST_DID.to_owned(),
@@ -617,7 +633,7 @@ async fn destroy_uses_disk_delete_all_when_available() {
 
 #[tokio::test]
 async fn destroy_logs_delete_all_failures_and_still_removes_dir() {
-    let (_dir, store) = test_store(10);
+    let (_dir, store) = test_store(10).await;
     store.create(TEST_DID, &test_keypair()).await.unwrap();
     store
         .destroy(
@@ -633,7 +649,7 @@ async fn destroy_logs_delete_all_failures_and_still_removes_dir() {
 
 #[tokio::test]
 async fn reader_keypair_errors_when_key_missing() {
-    let (_dir, store) = test_store(10);
+    let (_dir, store) = test_store(10).await;
     store.create(TEST_DID, &test_keypair()).await.unwrap();
     let location = store.get_location(TEST_DID).unwrap();
     tokio::fs::remove_file(&location.key_location)
@@ -649,7 +665,7 @@ async fn reader_keypair_errors_when_key_missing() {
 
 #[tokio::test]
 async fn reserved_key_load_errors_on_unreadable_file() {
-    let (_dir, store) = test_store(10);
+    let (_dir, store) = test_store(10).await;
     tokio::fs::create_dir_all(store.reserved_key_dir.join("not-a-file"))
         .await
         .unwrap();
@@ -659,14 +675,14 @@ async fn reserved_key_load_errors_on_unreadable_file() {
 
 #[tokio::test]
 async fn create_repo_with_initial_writes() {
-    let (_dir, store) = test_store(10);
+    let (_dir, store) = test_store(10).await;
     store.create(TEST_DID, &test_keypair()).await.unwrap();
     let mut txn = store
         .transact(TEST_DID.to_owned(), blobstore())
         .await
         .unwrap();
     let write = post_write("3jt5vlkoraa2a", "first post");
-    let commit = txn.create_repo(vec![write.clone()]).await.unwrap();
+    let commit = txn.create_repo(vec![write.clone()], true).await.unwrap();
     assert_eq!(commit.ops.len(), 1);
     assert_eq!(commit.ops[0].cid, Some(write.cid));
     let write_uri: AtUri = write.uri.clone().try_into().unwrap();
@@ -688,13 +704,13 @@ async fn create_repo_with_initial_writes() {
 
 #[tokio::test]
 async fn process_import_repo_applies_commit_and_writes() {
-    let (_dir, store) = test_store(10);
+    let (_dir, store) = test_store(10).await;
     store.create(TEST_DID, &test_keypair()).await.unwrap();
     let mut txn = store
         .transact(TEST_DID.to_owned(), blobstore())
         .await
         .unwrap();
-    let init = txn.create_repo(vec![]).await.unwrap();
+    let init = txn.create_repo(vec![], true).await.unwrap();
 
     let write = post_write("3jt5vlkoraa2a", "imported");
     let commit = CommitData {
@@ -726,13 +742,13 @@ async fn process_import_repo_applies_commit_and_writes() {
 
 #[tokio::test]
 async fn moved_record_keeps_shared_blocks() {
-    let (_dir, store) = test_store(10);
+    let (_dir, store) = test_store(10).await;
     store.create(TEST_DID, &test_keypair()).await.unwrap();
     let mut txn = store
         .transact(TEST_DID.to_owned(), blobstore())
         .await
         .unwrap();
-    txn.create_repo(vec![]).await.unwrap();
+    txn.create_repo(vec![], true).await.unwrap();
 
     let original = post_write("3jt5vlkoraa2a", "same content");
     txn.process_writes(vec![PreparedWrite::Create(original.clone())], None)
@@ -768,14 +784,14 @@ async fn moved_record_keeps_shared_blocks() {
 
 #[tokio::test]
 async fn set_keypair_replaces_the_key_and_the_next_commit_uses_it() {
-    let (_dir, store) = test_store(10);
+    let (_dir, store) = test_store(10).await;
     store.create(TEST_DID, &test_keypair()).await.unwrap();
     {
         let actor_txn = store
             .transact(TEST_DID.to_owned(), blobstore())
             .await
             .unwrap();
-        actor_txn.create_repo(Vec::new()).await.unwrap();
+        actor_txn.create_repo(Vec::new(), true).await.unwrap();
     }
 
     let replacement = import_keypair(&hex::decode(REPLACEMENT_SECRET_HEX).unwrap()).unwrap();
@@ -795,7 +811,7 @@ async fn set_keypair_replaces_the_key_and_the_next_commit_uses_it() {
 
 #[tokio::test]
 async fn set_keypair_leaves_no_temp_file_behind() {
-    let (_dir, store) = test_store(10);
+    let (_dir, store) = test_store(10).await;
     store.create(TEST_DID, &test_keypair()).await.unwrap();
     let location = store.get_location(TEST_DID).unwrap();
     store
@@ -820,11 +836,464 @@ async fn set_keypair_leaves_no_temp_file_behind() {
 
 #[tokio::test]
 async fn set_keypair_rejects_an_unsafe_did() {
-    let (_dir, store) = test_store(10);
+    let (_dir, store) = test_store(10).await;
     assert!(store.set_keypair("bad/did", &test_keypair()).await.is_err());
 }
 
 #[tokio::test]
 async fn atomic_write_key_rejects_a_pathless_location() {
     assert!(atomic_write_key(Path::new("/"), b"bytes").await.is_err());
+}
+
+async fn store_tables(store: &ActorStore, did: &str) -> Vec<String> {
+    let db = store.open_db(did, OpenMode::Read).await.unwrap();
+    db.run(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' \
+             AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        )?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<String>, rusqlite::Error>>()?;
+        Ok(names)
+    })
+    .await
+    .unwrap()
+}
+
+/// Lays down a store the way the reference PDS creates one: only the shared
+/// schema, tracked in Kysely's ledger, no rsky-local tables.
+async fn reference_store(store: &ActorStore, did: &str) {
+    let location = store.get_location(did).unwrap();
+    tokio::fs::create_dir_all(&location.directory)
+        .await
+        .unwrap();
+    tokio::fs::write(&location.key_location, test_keypair().secret_bytes())
+        .await
+        .unwrap();
+    let db = crate::actor_store::db::get_db(&location.db_location).unwrap();
+    db.run(|conn| {
+        conn.execute_batch(crate::actor_store::db::ACTOR_DB_MIGRATIONS[0].sql)?;
+        conn.execute_batch(
+            "CREATE TABLE kysely_migration (name varchar(255) NOT NULL PRIMARY KEY, \
+                timestamp varchar(255) NOT NULL);\
+             CREATE TABLE kysely_migration_lock (id varchar(255) NOT NULL PRIMARY KEY, \
+                is_locked integer NOT NULL DEFAULT 0);\
+             INSERT INTO kysely_migration_lock VALUES ('migration_lock', 0);\
+             INSERT INTO kysely_migration VALUES ('001', '2026-01-01T00:00:00.000Z');",
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn reading_a_reference_store_never_changes_its_schema() {
+    let (_dir, store) = test_store(4).await;
+    reference_store(&store, TEST_DID).await;
+    let before = store_tables(&store, TEST_DID).await;
+    assert!(!before.contains(&"migrations".to_string()));
+    assert!(!before.contains(&"space_repo".to_string()));
+    let reader = store.read(TEST_DID.to_string(), blobstore()).await.unwrap();
+    assert!(reader.get_repo_root().await.is_none());
+    assert_eq!(store_tables(&store, TEST_DID).await, before);
+}
+
+#[tokio::test]
+async fn writing_a_reference_store_applies_only_local_migrations() {
+    let (_dir, store) = test_store(4).await;
+    reference_store(&store, TEST_DID).await;
+    let _tx = store
+        .transact(TEST_DID.to_string(), blobstore())
+        .await
+        .unwrap();
+    let tables = store_tables(&store, TEST_DID).await;
+    assert!(tables.contains(&"migrations".to_string()));
+    assert!(tables.contains(&"space_repo".to_string()));
+    let (shared, local): (Vec<String>, Vec<String>) = store
+        .open_db(TEST_DID, OpenMode::Read)
+        .await
+        .unwrap()
+        .run(|conn| {
+            fn names(
+                conn: &rusqlite::Connection,
+                sql: &str,
+            ) -> Result<Vec<String>, rusqlite::Error> {
+                let mut stmt = conn.prepare(sql)?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                rows.collect()
+            }
+            Ok((
+                names(conn, "SELECT name FROM kysely_migration ORDER BY name")?,
+                names(conn, "SELECT name FROM migrations ORDER BY name")?,
+            ))
+        })
+        .await
+        .unwrap();
+    assert_eq!(shared, ["001"]);
+    assert_eq!(local, ["002", "003", "004", "005"]);
+}
+
+#[tokio::test]
+async fn a_cached_read_handle_is_migrated_before_the_first_write() {
+    let (_dir, store) = test_store(4).await;
+    reference_store(&store, TEST_DID).await;
+    store.read(TEST_DID.to_string(), blobstore()).await.unwrap();
+    assert!(!store_tables(&store, TEST_DID)
+        .await
+        .contains(&"space_repo".to_string()));
+    store
+        .transact(TEST_DID.to_string(), blobstore())
+        .await
+        .unwrap();
+    assert!(store_tables(&store, TEST_DID)
+        .await
+        .contains(&"space_repo".to_string()));
+}
+
+#[tokio::test]
+async fn write_limits_match_the_reference() {
+    let (_dir, store) = test_store(10).await;
+    store.create(TEST_DID, &test_keypair()).await.unwrap();
+    let mut txn = store
+        .transact(TEST_DID.to_owned(), blobstore())
+        .await
+        .unwrap();
+    txn.create_repo(vec![], true).await.unwrap();
+
+    let too_many: Vec<PreparedWrite> = (0..201)
+        .map(|i| PreparedWrite::Create(post_write(&format!("3jt5vlkor{i:04}"), "x")))
+        .collect();
+    let err = txn.process_writes(too_many, None).await.unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<WriteLimitError>(),
+        Some(&WriteLimitError::TooManyWrites)
+    );
+
+    let huge = post_write("3jt5vlkorhuge", &"x".repeat(2_100_000));
+    let err = txn
+        .process_writes(vec![PreparedWrite::Create(huge)], None)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<WriteLimitError>(),
+        Some(&WriteLimitError::EventTooLarge)
+    );
+    assert_eq!(
+        WriteLimitError::TooManyWrites.to_string(),
+        "Too many writes. Max: 200"
+    );
+    // a rejected write leaves no intent behind
+    assert_eq!(txn.pending_intents().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn an_import_replaces_the_repository_without_an_intent() {
+    let (_dir, store) = test_store(10).await;
+    store.create(TEST_DID, &test_keypair()).await.unwrap();
+    let mut txn = store
+        .transact(TEST_DID.to_owned(), blobstore())
+        .await
+        .unwrap();
+    let init = txn.create_repo(vec![], true).await.unwrap();
+    let write = post_write("3jt5vlkorimp1", "imported");
+    let (commit, _) = txn
+        .format_commit(vec![PreparedWrite::Create(write.clone())], None)
+        .await
+        .unwrap();
+    txn.process_import_repo(
+        commit.commit_data.clone(),
+        vec![PreparedWrite::Create(write.clone())],
+    )
+    .await
+    .unwrap();
+    let root = txn.get_repo_root().await.unwrap();
+    assert_eq!(root, commit.commit_data.cid);
+    assert_ne!(root, init.commit_data.cid);
+    let uri: AtUri = write.uri.try_into().unwrap();
+    assert!(txn
+        .record
+        .get_record(&uri, None, None)
+        .await
+        .unwrap()
+        .is_some());
+    // the import published nothing, and the creation batch it replaced
+    // must never be published behind the imported head
+    let intents = txn.all_intents().await.unwrap();
+    assert_eq!(intents.len(), 2);
+    assert!(intents
+        .iter()
+        .all(|intent| intent.cid == init.commit_data.cid.to_string()));
+    assert!(intents.iter().all(|intent| intent.state == "superseded"));
+    assert!(txn.pending_intents().await.unwrap().is_empty());
+
+    // an import into an empty store creates the root
+    let empty_did = "did:example:empty";
+    store.create(empty_did, &test_keypair()).await.unwrap();
+    let mut empty = store
+        .transact(empty_did.to_owned(), blobstore())
+        .await
+        .unwrap();
+    let mut fresh = Repo::format_init_commit(
+        empty.storage.clone(),
+        empty_did.to_owned(),
+        &empty.keypair,
+        None,
+    )
+    .await
+    .unwrap();
+    fresh.since = None;
+    empty
+        .process_import_repo(fresh.clone(), vec![])
+        .await
+        .unwrap();
+    assert_eq!(empty.get_repo_root().await.unwrap(), fresh.cid);
+    assert!(empty.all_intents().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_transaction_leaves_no_trace() {
+    let (_dir, store) = test_store(10).await;
+    store.create(TEST_DID, &test_keypair()).await.unwrap();
+    let mut txn = store
+        .transact(TEST_DID.to_owned(), blobstore())
+        .await
+        .unwrap();
+    txn.create_repo(vec![], true).await.unwrap();
+    let root_before = txn.get_repo_root().await.unwrap();
+    // a record whose uri names another repository fails indexing inside the
+    // transaction, after the root and blocks were written
+    let mut foreign = post_write("3jt5vlkorbad1", "foreign");
+    foreign.uri = "at://example.com/app.bsky.feed.post/3jt5vlkorbad1".to_owned();
+    let err = txn
+        .process_writes(vec![PreparedWrite::Create(foreign)], None)
+        .await;
+    assert!(err.is_err());
+    assert_eq!(txn.get_repo_root().await.unwrap(), root_before);
+    assert_eq!(txn.all_intents().await.unwrap().len(), 2);
+    assert_eq!(txn.record.record_count().await.unwrap(), 0);
+}
+
+/// A blob promoted for a write whose transaction then fails stays
+/// unreadable: the promotion is only recorded by the transaction, so the
+/// blob is served once a record referencing it commits.
+#[tokio::test]
+async fn a_failed_write_leaves_its_blob_unreadable_until_a_write_commits() {
+    let (_dir, store) = test_store(10).await;
+    store.create(TEST_DID, &test_keypair()).await.unwrap();
+    let blobs = blobstore();
+    let mut txn = store
+        .transact(TEST_DID.to_owned(), blobs.clone())
+        .await
+        .unwrap();
+    txn.create_repo(vec![], true).await.unwrap();
+    let metadata = txn
+        .blob
+        .upload_blob_and_get_metadata("text/plain".to_owned(), b"pending".to_vec())
+        .await
+        .unwrap();
+    let blob_ref = txn.blob.track_untethered_blob(metadata).await.unwrap();
+    let cid = blob_ref.get_cid().unwrap();
+    let prepared = rsky_repo::types::PreparedBlobRef {
+        cid,
+        mime_type: "text/plain".to_owned(),
+        constraints: rsky_repo::types::BlobConstraint {
+            max_size: None,
+            accept: None,
+        },
+    };
+    let mut foreign = post_write("3jt5vlkorbad2", "with blob");
+    foreign.uri = "at://example.com/app.bsky.feed.post/3jt5vlkorbad2".to_owned();
+    foreign.blobs = vec![prepared.clone()];
+    assert!(txn
+        .process_writes(vec![PreparedWrite::Create(foreign)], None)
+        .await
+        .is_err());
+    assert!(
+        blobs.has_stored(cid).await.unwrap(),
+        "promoted before the transaction"
+    );
+    assert!(txn.blob.get_blob_metadata(cid).await.is_err(), "not served");
+
+    let mut good = post_write("3jt5vlkorgood", "with blob");
+    good.blobs = vec![prepared];
+    txn.process_writes(vec![PreparedWrite::Create(good)], None)
+        .await
+        .unwrap();
+    assert!(txn.blob.get_blob_metadata(cid).await.is_ok());
+}
+
+const ALLOWLIST: &str = r#"
+version = 1
+default = "absent"
+
+[entries]
+"did:example:alice" = "active"
+"did:example:draining" = "draining"
+"#;
+
+async fn admitted_store() -> (tempfile::TempDir, ActorStore) {
+    let (dir, store) = test_store(10).await;
+    let allowlist = dir.path().join("write-allowlist.toml");
+    std::fs::write(&allowlist, ALLOWLIST).unwrap();
+    let admission = Arc::new(crate::admission::Admission::from_file(&allowlist).unwrap());
+    let lock_dir = crate::locks::LockDir::new(dir.path().join("locks")).unwrap();
+    let store = store.with_admission(admission).with_lock_dir(lock_dir);
+    (dir, store)
+}
+
+fn not_admitted(err: &anyhow::Error) -> Option<&crate::admission::NotAdmitted> {
+    err.downcast_ref::<crate::admission::NotAdmitted>()
+}
+
+#[tokio::test]
+async fn writes_follow_the_allowlist_and_hold_the_actor_lock() {
+    let (dir, store) = admitted_store().await;
+    let keypair = test_keypair();
+    let refused = store
+        .create("did:example:draining", &keypair)
+        .await
+        .unwrap_err();
+    assert_eq!(not_admitted(&refused).unwrap().state, "draining");
+    let refused = store
+        .create("did:example:nobody", &keypair)
+        .await
+        .unwrap_err();
+    assert_eq!(not_admitted(&refused).unwrap().state, "absent");
+    store.create(TEST_DID, &keypair).await.unwrap();
+
+    let locks = crate::locks::LockDir::new(dir.path().join("locks")).unwrap();
+    assert_eq!(store.inflight_mutations(TEST_DID), 0);
+    let txn = store
+        .transact(TEST_DID.to_owned(), blobstore())
+        .await
+        .unwrap();
+    assert_eq!(store.inflight_mutations(TEST_DID), 1);
+    assert!(locks.try_exclusive(TEST_DID).unwrap().is_none());
+    drop(txn);
+    assert_eq!(store.inflight_mutations(TEST_DID), 0);
+    assert!(locks.try_exclusive(TEST_DID).unwrap().is_some());
+
+    // a draining actor accepts no new write; an absent one nothing at all
+    reference_store(&store, "did:example:draining").await;
+    let refused = store
+        .transact("did:example:draining".to_owned(), blobstore())
+        .await
+        .map(drop)
+        .unwrap_err();
+    assert_eq!(not_admitted(&refused).unwrap().state, "draining");
+    reference_store(&store, "did:example:nobody").await;
+    let refused = store.unlink("did:example:nobody").await.unwrap_err();
+    assert_eq!(not_admitted(&refused).unwrap().state, "absent");
+    let refused = store
+        .delete_blobs("did:example:nobody", blobstore())
+        .await
+        .unwrap_err();
+    assert_eq!(not_admitted(&refused).unwrap().state, "absent");
+    store
+        .lifecycle
+        .mark_pending_work("did:example:nobody")
+        .await
+        .unwrap();
+    store.queue_blob_work("did:example:nobody", blobstore());
+    store.background_queue.process_all().await;
+    assert_eq!(
+        store.lifecycle.pending_work().await.unwrap(),
+        ["did:example:nobody"]
+    );
+    // a worker still runs for a draining actor
+    assert!(store.unlink("did:example:draining").await.is_ok());
+}
+
+/// A revision floor lifts every later commit above a boundary consumers
+/// have already seen, and an empty write list is a valid recovery commit.
+#[tokio::test]
+async fn commits_rise_above_the_revision_floor() {
+    let (_dir, store) = test_store(10).await;
+    store.create(TEST_DID, &test_keypair()).await.unwrap();
+    let mut txn = store
+        .transact(TEST_DID.to_owned(), blobstore())
+        .await
+        .unwrap();
+    txn.create_repo(vec![], true).await.unwrap();
+    let floor = "3zzzzzzzzzzzz";
+    store
+        .lifecycle
+        .raise_revision_floor(TEST_DID, floor)
+        .await
+        .unwrap();
+    let recovery = txn.process_writes(vec![], None).await.unwrap();
+    assert!(recovery.commit_data.rev.as_str() > floor);
+    assert!(recovery.ops.is_empty());
+    let next = txn
+        .process_writes(
+            vec![PreparedWrite::Create(post_write("3jt5vlkorflr1", "x"))],
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(next.commit_data.rev > recovery.commit_data.rev);
+    assert_eq!(
+        next.commit_data.since.as_deref(),
+        Some(recovery.commit_data.rev.as_str())
+    );
+}
+
+#[tokio::test]
+async fn read_only_store_serves_reads_and_refuses_every_write() {
+    let (dir, writer) = test_store(10).await;
+    writer.create(TEST_DID, &test_keypair()).await.unwrap();
+    // a read-only process starts over the directory another one wrote
+    let cfg = ActorStoreConfig {
+        directory: dir.path().join("actors").to_string_lossy().to_string(),
+        cache_size: 10,
+    };
+    let lifecycle = LifecycleStore::open(dir.path().join("rsky/lifecycle.sqlite"))
+        .await
+        .unwrap();
+    let store = ActorStore::new(&cfg, BackgroundQueue::default(), lifecycle).with_read_only(true);
+    assert!(store.is_read_only());
+    let refused = store
+        .create("did:plc:someoneelse", &test_keypair())
+        .await
+        .unwrap_err();
+    assert!(
+        refused.downcast_ref::<ReadOnlyMode>().is_some(),
+        "{refused}"
+    );
+    let refused = store.open_db(TEST_DID, OpenMode::Write).await.unwrap_err();
+    assert!(
+        refused.downcast_ref::<ReadOnlyMode>().is_some(),
+        "{refused}"
+    );
+    let db = store.open_db(TEST_DID, OpenMode::Read).await.unwrap();
+    let tables = db
+        .run(|conn| {
+            let mut stmt = conn.prepare("SELECT count(*) FROM sqlite_master")?;
+            Ok(stmt.query_row([], |row| row.get::<_, i64>(0))?)
+        })
+        .await
+        .unwrap();
+    assert!(tables > 0);
+    let refused = db
+        .run(|conn| {
+            conn.execute("CREATE TABLE never (id INTEGER)", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("readonly"), "{refused}");
+}
+
+#[test]
+fn inflight_counts_stack_and_unwind() {
+    let inflight = Arc::new(Mutex::new(HashMap::new()));
+    let first = InflightGuard::new(TEST_DID, &inflight);
+    let second = InflightGuard::new(TEST_DID, &inflight);
+    assert_eq!(inflight.lock().unwrap()[TEST_DID], 2);
+    drop(first);
+    assert_eq!(inflight.lock().unwrap()[TEST_DID], 1);
+    drop(second);
+    assert!(inflight.lock().unwrap().get(TEST_DID).is_none());
 }

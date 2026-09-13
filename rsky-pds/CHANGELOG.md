@@ -2,6 +2,306 @@
 
 All notable changes to `rsky-pds` are documented here.
 
+## [1.2.0]
+
+### Changed — reference-compatible schema ledgers and account schema
+
+rsky-pds now records the migrations it shares with the reference TypeScript
+PDS in Kysely's `kysely_migration` ledger under the reference migration names,
+and its own additions in a separate `migrations` ledger. `account.sqlite`
+follows the reference schema migration for migration (`passwordScrypt`
+columns, no rsky-only columns). A database created by either implementation
+can therefore be opened by the other: rsky-pds opens a reference-created
+`account.sqlite`, `sequencer.sqlite`, `did_cache.sqlite`, or actor store as-is,
+and reads never modify a store's schema. rsky-only actor tables are added on the
+first write to a store, not on read.
+
+Databases created by rsky-pds 1.1.x are converted in place on first open: the
+misfiled ledger rows move to `kysely_migration`, and `account.sqlite` is
+brought to the reference column set (`password` becomes `passwordScrypt`; the
+unused `recoveryKey`, `createdAt`, and `inviteNote` columns are dropped).
+
+**This conversion is one-way.** A pre-1.2.0 binary does not know the
+`kysely_migration` ledger and will fail to open a converted database. Back up
+`account.sqlite` before upgrading if a rollback to 1.1.x must remain possible.
+
+
+### Added — reference-compatible session tokens
+
+When `PDS_JWT_SECRET` is set, access and refresh tokens are signed with
+HMAC-SHA256 over that secret exactly as the reference PDS signs them (same
+header, claim order, and lifetimes), so sessions created by either
+implementation are valid on the other. Without it, tokens are signed with
+ES256K over `PDS_JWT_KEY_K256_PRIVATE_KEY_HEX` as before, and tokens rsky-pds
+1.1 issued with the default `JWT` header type stay valid. Tokens now carry
+and require the `at+jwt` / `refresh+jwt` types, a taken-down account can log
+in with `allowTakendown` and receives the `com.atproto.takendown` scope,
+app-password sessions keep their `privileged` flag across refreshes, and
+refresh rotation writes the grace period and the successor in one
+transaction. Session outputs carry `active` and `status`, `getSession` works
+for deactivated accounts, `listAppPasswords` reports `privileged` and accepts
+app-password sessions, and rejected credentials answer with the reference
+names: `AuthMissing` (401), `AuthenticationRequired` (401), `InvalidToken`
+(400), `ExpiredToken` (400), `AccountTakedown` (401).
+
+### Added — reference-compatible OAuth sessions
+
+With `PDS_JWT_SECRET` set the OAuth provider signs access tokens with
+HMAC-SHA256 over the shared secret and publishes an empty JWK set, as the
+reference PDS does. Access tokens carry the reference claim set, and
+verification is stateful: the stored session row is authoritative for the
+DPoP key binding, the expiry, and the granted scope (the `token.scope`
+column), so a token superseded by a refresh or revoked elsewhere is refused
+at once and a session granted a narrower scope than its token claims is
+held to the stored grant. DPoP proof replay is tracked in redis under the
+reference key scheme when `PDS_REDIS_SCRATCH_ADDRESS` is set, so a proof
+consumed by one process is refused by every other. Trusted first-party
+clients get the extended session lifetimes. Rejected OAuth credentials
+answer with their OAuth error code (`invalid_token`, `use_dpop_nonce`) and
+a 401. rsky-oauth 0.4.0 carries the signing-key and replay-store changes.
+
+### Added — account lifecycle parity
+
+`deleteAccount` is the public method the reference PDS exposes (account
+password plus the mailed token), and deletion runs in the reference order:
+account rows, the deletion event with the earlier history pruned, then the
+actor store. Each move is journaled in `PDS_LIFECYCLE_DB` (a tombstone
+before the first one, a purge obligation before the actor directory is
+unlinked when `PDS_COEXISTENCE` keeps blob storage untouched), no write is
+admitted for a DID whose deletion is in progress, and an interrupted
+deletion is resumed at the next start. `deactivateAccount` publishes the
+account status event, accepts a taken-down account's recovery session, and
+`updateHandle` no longer emits the retired `#handle` event. `resetPassword`,
+`confirmEmail`, `updateEmail`, `requestAccountDelete`, and `activateAccount`
+answer with the reference error names and messages (`InvalidToken`,
+`ExpiredToken`, `InvalidEmail`, `AccountNotFound`, `Forbidden` for OAuth
+sessions). Session outputs carry `didDoc` when
+`PDS_ENABLE_DID_DOC_WITH_SESSION` is set, and a blob that has been uploaded
+but not yet referenced by a record is not served.
+
+### Changed — durable writes and publication
+
+A record write is now one SQLite transaction: the repository root is
+replaced only if it still equals the root the commit was formatted against,
+and the blocks, the record index, the blob bookkeeping, and the write's
+publication intent land together or not at all. Blob promotion out of
+temporary storage happens before the transaction, and the temporary key is
+cleared inside it, so an uploaded blob stays unreadable until the record that
+references it is committed. Store write connections, the sequencer, and the
+lifecycle journal run with `synchronous=FULL`, so a write acknowledged to a
+client survives a power loss.
+
+Publication intents (`publish_intent`, actor migration `005`) are delivered
+to the sequencer after the transaction commits and acknowledged in the store
+afterwards. The publisher records the sequencer head on the intent before
+inserting, so after a crash it recognises a row it already inserted instead
+of inserting it again; every write publishes exactly one event. Actors with
+undelivered intents are marked in the lifecycle journal (`pending_work`) and
+finished at startup.
+
+Object deletions are journaled (`blob_work`) instead of queued in memory.
+Under `PDS_COEXISTENCE=true` a dereferenced object is recorded `gc-deferred`
+and never deleted; otherwise it is deleted by a worker after the transaction.
+Writes are subject to the reference limits of 200 operations and a 2 MB
+event per commit, answered with `InvalidRequest`. Repository exports read
+from a single snapshot on a dedicated connection, bounded to ten minutes.
+
+### Changed — blob storage under coexistence
+
+While `PDS_COEXISTENCE` is set, no object is deleted or moved: promotion
+copies a temporary object to its permanent key and journals the temporary
+one `gc-deferred`, a re-upload of a permanent blob journals its unused
+temporary object, a blob takedown sets the flag alone, and a reversal clears
+the flag when the permanent object exists or restores it by copy from a
+quarantine the reference implementation left, confirming the copy before
+the flag is cleared (`restore-pending` blob work, resumable after a crash).
+Every moderation decision advances a per-blob version, and a restoration
+that resumes after a newer decision ends `superseded` instead of clearing
+it. Outside coexistence takedowns still move objects to and from quarantine.
+
+### Changed — every S3 request is one journaled attempt
+
+The S3 client no longer retries on its own: a request that timed out may
+still complete later, and a hidden retry would report one success for two
+attempts. Each put, copy, and delete is recorded in `PDS_BLOB_ATTEMPTS_DB`
+before it is sent and resolved after, with the namespace's first write by
+this implementation and whether another implementation could have written
+it. The journal lives outside every actor store and must never be restored
+from a backup: an attempt with no outcome is the evidence that an object
+may still appear.
+
+### Changed — firehose subscriptions are fed by one broadcast
+
+The sequencer's poll loop fans each batch out over a `tokio` broadcast
+channel sized by `PDS_MAX_SUBSCRIPTION_BUFFER`, and every clone shares the
+poll loop's head, replacing the process-wide event emitter and the runtime
+each subscription used to build per batch. A subscription subscribes to the
+broadcast before it backfills from the database and delivers a live event
+only above the last sequence the backfill yielded, so the switch from
+backfill to live delivery has no gap and no repeat, a backfill of any
+length completes, and invalidated rows are never delivered. A subscriber
+that falls further behind than the buffer receives a `ConsumerTooSlow`
+error frame instead of a gap.
+
+### Added — the convergence report
+
+`community.blacksky.pds.getConvergence` (admin auth) and `rsky-pds --converge
+<did>` report whether an account's state on this server agrees with what
+it has published: the store's root, the account database's root, and the
+last published commit must be one commit, the status and handle must match
+their last events, and no publication intent, blob work, quarantine, repair,
+or deletion may be outstanding, with every shortfall named. Blob work older
+than an hour that is still not terminal is flagged. A deleted account
+converges once its deletion is journaled complete; whether its objects were
+purged is reported separately and never blocks logical convergence.
+
+### Added — journaled repairs and quarantines
+
+`PDS_REPAIR_DB` records repairs (`republish`, `empty-commit`,
+`phantom-delete`) and quarantines. A repair runs only for an account whose
+allowlist entry names it as the maintenance workflow, only after client
+writes have drained, and only while holding the account's maintenance slot;
+every commit it makes is recorded with its step in the same transaction, so
+a crash resumes from the last commit that landed, and each step swaps
+against the root the previous step left, so any other root ends the repair
+`client-superseded`. A quarantine supersedes the event's intent, invalidates
+its sequencer row, records its linked repairs, and closes only when every
+linked repair is finished, the local index was reconciled, and every
+affected consumer was verified or the gap explicitly accepted. The binary
+gains `--repair-create`, `--repair-run`, `--repair-status`,
+`--quarantine-open`, `--quarantine-local-reconciled`, `--quarantine-close`,
+and `--quarantine-status`; `/xrpc/_drain_status` counts pending repairs and
+open quarantines.
+
+### Added — the publication frontier
+
+`community.blacksky.pds.getPublicationFrontier` (admin auth) reports how far
+an account's publication history on this server reaches: the highest
+revision published, the highest ever served by a sync read or accepted by
+import (recorded durably before the first response byte), the current
+commit and its signed and stored revisions, the number of restore events,
+whether every host the account's PLC audit log ever named is this server,
+the kind of genesis its surviving history starts from, and whether that
+history is provably whole. An account migrated in, deleted and re-created
+below its recorded pre-deletion maximum, deleted on the reference, hosted
+elsewhere at any point, or a `did:web` fails closed. The lifecycle journal
+keeps the watermarks (`frontier_watermark`, `restore_event`) and a
+per-account revision floor that every later commit exceeds, which a
+recovery commit uses to move a restored repository past a boundary
+consumers have already seen. rsky-repo 0.1.0 adds `format_commit_above`.
+
+### Added — write admission and the maintenance drain
+
+`PDS_WRITE_ALLOWLIST_FILE` names the accounts this process may write while
+another implementation shares the data directory. Each entry is `active`,
+`draining` (new mutations refused, workers finish), or `maintenance` with a
+workflow id; an account the file does not name is refused everywhere. The
+file is re-read when it changes and a broken file leaves the previous
+allowlist in force. A refused write answers `503 NotAdmitted` with
+`Retry-After: 1`. Every write holds a shared `flock` under `PDS_LOCK_DIR`;
+`rsky-pds --drain-did <did>` takes it exclusively, finishes the account's
+publication and blob work, and reports the same counters that
+`GET /xrpc/_drain_status?did=<did>` (admin auth) serves.
+
+### Added — reference deployment settings, handle routes, open proxy, read-only mode
+
+The server listens on `PDS_PORT` on every interface, as the reference PDS
+does. The S3 blobstore is configured by `PDS_BLOBSTORE_S3_{BUCKET, REGION,
+ENDPOINT, FORCE_PATH_STYLE, ACCESS_KEY_ID, SECRET_ACCESS_KEY}` and no longer
+requests a public-read ACL on any object. `PDS_MAX_REPO_IMPORT_SIZE` bounds
+`importRepo` (default 100 MiB), and a server with
+`PDS_ACCEPTING_REPO_IMPORTS=false` refuses imports with the reference
+message. `PDS_EXTRA_HANDLE_DOMAINS` names handle domains served but not
+offered, and `GET /tls-check`, `GET /custom-well-known-atproto-did`, and
+`GET /custom-resolve-handle` answer as the production image's routes do.
+
+Any well-formed method without a local handler is proxied, and the default
+target follows the reference: `tools.ozone.*` to the moderation service,
+`com.atproto.moderation.createReport` to the report service, everything
+else to the app view; a method with no configured target answers
+`InvalidRequest`.
+
+`PDS_READ_ONLY=true` serves reads over a data directory another process
+writes: every user and service database is opened read-only without
+migrating, mutating requests are answered `503 ReadOnly` before any handler
+runs, the DID cache is never written, and neither deletions nor
+publication are resumed. The rsky control journals stay writable.
+
+### Added — production exposure minimums
+
+`GET /metrics` serves Prometheus metrics (requests by route and status
+with latency, firehose subscribers, sqlite busy retries, write attempts,
+control-journal writes by table, rejected credentials by error, the
+sequencer head, per-actor in-flight mutations, pending intents, and
+nonterminal blob work, lifecycle and repair backlogs, and a draining
+flag). Logs are one JSON object per line in the reference PDS's shape
+unless `PDS_LOG_FORMAT=text`, and every request is logged with its route,
+status, and response time.
+
+SIGTERM and SIGINT stop accepting connections, let in-flight requests
+finish within `PDS_SHUTDOWN_GRACE_SECS`, drain the background queue, and
+stop the sequencer; `/xrpc/_health` answers 503 meanwhile. Unrouted paths
+answer `404 NotFound` instead of an internal error.
+
+Repository exports are streamed from one snapshot as they are produced,
+in the reference's block order, and blob downloads are streamed from
+object storage with the registered length; both are bounded by
+`PDS_MAX_CONCURRENT_EXPORTS` and `PDS_MAX_CONCURRENT_BLOB_READS`, and an
+abandoned download releases its slot and snapshot. Uploads are spooled to
+disk under `PDS_UPLOAD_SPOOL_DIR`, hashed and sniffed from the file, and
+refused with `413 PayloadTooLarge` one byte past `PDS_BLOB_UPLOAD_LIMIT`
+instead of being silently truncated.
+
+`PDS_RATE_LIMITS_ENABLED=true` applies the reference PDS's request limits
+from this process's memory (the global per-address budget, the per-route
+budgets, and the shared repository-write budgets charged 3/2/1 points per
+create/update/delete), answering `429 RateLimitExceeded` with the
+`RateLimit-*` and `Retry-After` headers the reference sends;
+`PDS_RATE_LIMIT_BYPASS_KEY` and `PDS_RATE_LIMIT_BYPASS_IPS` skip them.
+
+### Changed — outbound requests are bound by a network policy
+
+Every request whose destination someone else chose (a service endpoint
+from a DID document, a subscriber's endpoint, a client's metadata or JWKS
+URL, a handle's or `did:web` well-known document, a permission set's host)
+goes through one transport whose name resolution keeps only public
+addresses, refuses credentials in URLs and plain `http`, never follows a
+redirect on its own, and reads bodies up to a bound. Client metadata and
+JWKS documents accept only a direct `200`; handle and `did:web` documents
+follow at most three redirects, each checked the same way. Configured
+services (the PLC directory, the app view, relays, mail) keep their own
+transports and never take a resolved destination. `PDS_DEV_MODE=true`
+relaxes the policy for local services.
+
+### Changed — bundled SQLite 3.53.2
+
+`rusqlite` 0.40 bundles SQLite 3.53.2, past the 3.51.3 release that fixed
+a write-ahead-log reset defect a shared data directory must not carry.
+
+### Fixed — responses that differed from the reference PDS
+
+- `com.atproto.sync.*` reads of a missing, taken-down, or deactivated
+  repository answer `RepoNotFound`, `RepoTakendown`, or `RepoDeactivated`
+  (HTTP 400) instead of an internal error.
+- `com.atproto.sync.listRepos` and `getRepoStatus` report a taken-down
+  repository as `takendown`, the value the lexicon defines.
+- `com.atproto.repo.describeRepo` answers the same `RepoNotFound`,
+  `RepoTakendown`, and `RepoDeactivated` errors as the reference PDS, and
+  `com.atproto.repo.listRecords` answers `InvalidRequest` for a repository it
+  does not serve, instead of internal errors.
+- `com.atproto.server.describeServer` includes `blobUploadLimit`.
+- Outgoing mail is logged and skipped when `PDS_MAILGUN_API_KEY` is unset or
+  empty instead of aborting the request.
+- `com.atproto.sync.getBlob` answers `BlobNotFound` for a taken-down or
+  unregistered blob instead of an internal error.
+
+### Added — reference-PDS compatibility fixture
+
+`tests/fixtures/ts-pds-0.5.27` is a data directory produced by the pinned
+reference PDS image (built by `pds-image/verify/build-ts-fixture.sh`), and
+`tests/ts_compat_tests.rs` boots rsky-pds over a copy of it and compares
+responses with the ones the reference PDS gave. `PDS_COMPAT_DATA_DIR` points
+the tests at a freshly built fixture.
 ## [1.1.0]
 
 ### Changed — password hashing switched from Argon2 to scrypt

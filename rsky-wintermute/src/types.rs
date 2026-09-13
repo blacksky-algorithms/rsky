@@ -19,6 +19,13 @@ pub enum WintermuteError {
     Repo(String),
     #[error("other: {0}")]
     Other(String),
+    /// The actor is fenced for reconciliation; the job must wait.
+    #[error("fenced: {0}")]
+    Fenced(String),
+    /// The job was obtained under an older generation; its source must be
+    /// fetched again.
+    #[error("stale generation: {0}")]
+    StaleGeneration(String),
 }
 
 impl WintermuteError {
@@ -71,6 +78,9 @@ pub struct CommitData {
     pub rev: String,
     pub ops: Vec<RepoOp>,
     pub blocks: Vec<u8>,
+    /// The commit's CID, so commit-level progress can name it.
+    #[serde(default)]
+    pub cid: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +106,10 @@ pub struct IndexJob {
     pub record: Option<serde_json::Value>,
     pub indexed_at: String,
     pub rev: String,
+    /// Where and under which generation the job's data was obtained;
+    /// absent on jobs persisted before provenance was recorded.
+    #[serde(default)]
+    pub provenance: Option<crate::reconcile::Provenance>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +117,10 @@ pub enum WriteAction {
     Create,
     Update,
     Delete,
+    /// A commit event itself, carried so that commit-level progress is
+    /// recorded even when the commit changed no record. `uri` is the
+    /// actor's `at://` URI and `cid` the commit's.
+    Commit,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

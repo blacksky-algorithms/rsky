@@ -19,6 +19,7 @@ pub async fn list_app_passwords(
                 .map(|password| AppPassword {
                     name: password.0,
                     created_at: password.1,
+                    privileged: Some(password.2),
                 })
                 .collect();
             Ok(Json(ListAppPasswordsOutput { passwords }))

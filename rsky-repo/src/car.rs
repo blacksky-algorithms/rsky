@@ -58,34 +58,37 @@ where
 
     // Create stream that reads from the duplex reader
     stream! {
-        let mut error_receiver = Some(error_receiver);
+        let mut error_receiver = error_receiver;
+        // the receiver is polled in place so that an error sent while a
+        // read completes is never lost with a dropped branch future
+        let mut error_pending = true;
         let mut buf = [0; 8192]; // 8KB read buffer
 
         loop {
             tokio::select! {
                 // Check for errors from writer task
-                res = async {
-                    // Safe to unwrap because this branch only runs if error_receiver.is_some()
-                    let rx = error_receiver.take().unwrap();
-                    rx.await
-                }, if error_receiver.is_some() => {
-                    match res {
-                        Ok(err) => {
-                            // Writer task sent an error, propagate it
-                            yield Err(err);
-                            break;
-                        }
-                        Err(_e) => {
-                            // Writer task completed without error, stop checking
-                            error_receiver = None;
-                        }
+                res = &mut error_receiver, if error_pending => {
+                    error_pending = false;
+                    if let Ok(err) = res {
+                        // Writer task sent an error, propagate it
+                        yield Err(err);
+                        break;
                     }
                 }
 
                 // Read data from the pipe
                 read_res = reader.read(&mut buf) => {
                     match read_res {
-                        Ok(0) => break, // EOF
+                        Ok(0) => {
+                            // EOF: the writer task is done; report its
+                            // error if it ended with one
+                            if error_pending {
+                                if let Ok(err) = (&mut error_receiver).await {
+                                    yield Err(err);
+                                }
+                            }
+                            break;
+                        }
                         Ok(n) => {
                             yield Ok(Vec::from(&buf[..n]));
                         }
@@ -397,6 +400,23 @@ mod tests {
         );
 
         (root, BlockMap { map })
+    }
+
+    #[tokio::test]
+    async fn a_writer_error_reaches_the_stream_reader() {
+        let (root, _) = fetch_valid_repo();
+        let stream = super::write_car_stream(Some(&root), |_writer| async move {
+            anyhow::bail!("writer gave up")
+        });
+        futures::pin_mut!(stream);
+        let mut saw_error = false;
+        while let Some(item) = futures::StreamExt::next(&mut stream).await {
+            if let Err(err) = item {
+                assert!(err.to_string().contains("writer gave up"), "{err}");
+                saw_error = true;
+            }
+        }
+        assert!(saw_error);
     }
 
     #[tokio::test]

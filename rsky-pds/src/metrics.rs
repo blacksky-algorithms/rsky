@@ -1,471 +1,516 @@
-//! Prometheus metrics for rsky-pds.
+//! Process-wide Prometheus metrics, served on `GET /metrics`.
 //!
-//! Modeled directly on `rsky-relay`'s `metrics.rs`: the `metrics` facade
-//! (idempotent `describe_*!` registration + free-standing `record_*`
-//! helpers) plus a `metrics-exporter-prometheus` recorder. Unlike the relay
-//! -- which binds its own bare TCP listener -- rsky-pds is Rocket-based, so
-//! the recorder is exposed through a normal Rocket route (see
-//! [`metrics_route`]) instead of a second socket.
-//!
-//! Metric names intentionally echo the attribute names the TypeScript
-//! reference PDS attaches to its XRPC spans/metrics (the lexicon NSID as
-//! `method`, the HTTP status as `status`), translated into Prometheus'
-//! label conventions so the two implementations stay comparable side by
-//! side.
-//!
-//! Coverage is not limited to `/xrpc/*`: the `/oauth/*` and
-//! `/.well-known/oauth-*` routes are a fixed, low-cardinality set (no
-//! request-controlled path segments), so [`XrpcMetrics`] records them under
-//! the same `method`/`status` labels -- see [`route_label`].
+//! Counters and histograms are updated where the work happens; the gauges
+//! that describe outstanding work are computed when scraped, from the same
+//! journals the drain status reads.
 
-use std::sync::OnceLock;
-use std::time::Instant;
-
-use metrics::{
-    counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram, Unit,
+use crate::actor_store::ActorStore;
+use crate::lifecycle::LifecycleStore;
+use crate::repair::RepairStore;
+use crate::sequencer::Sequencer;
+use anyhow::Result;
+use prometheus::{
+    Encoder, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    IntGaugeVec, Opts, Registry, TextEncoder,
 };
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
-use rocket::fairing::{Fairing, Info, Kind};
-use rocket::http::ContentType;
-use rocket::{Data, Request, Response};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::LazyLock;
 
-/// Count of HTTP requests to `/xrpc/*` and `/oauth/*` routes, labelled by
-/// `method` (the lexicon NSID for XRPC, the literal route path for OAuth)
-/// and HTTP status.
-pub const XRPC_REQUESTS: &str = "pds_xrpc_requests_total";
-/// Request latency in seconds for the same routes as [`XRPC_REQUESTS`].
-pub const XRPC_REQUEST_DURATION_SECONDS: &str = "pds_xrpc_request_duration_seconds";
-/// Sessions created, unified across every auth path (password
-/// `createSession` and OAuth's `authorization_code` token grant), labelled
-/// by `source` (password/oauth), `outcome` (success/failure) and, on
-/// failure, `reason`.
-pub const SESSION_CREATED: &str = "pds_session_created_total";
-/// Service-auth tokens minted via `com.atproto.server.getServiceAuth`.
-pub const AUTH_SERVICE_TOKENS_ISSUED: &str = "pds_auth_service_tokens_issued_total";
-/// Service-auth token requests denied via `com.atproto.server.getServiceAuth`,
-/// labelled by `reason`.
-pub const AUTH_SERVICE_TOKENS_DENIED: &str = "pds_auth_service_tokens_denied_total";
-/// Repo writes (record creates/updates/deletes) committed to an actor store.
-pub const REPO_WRITES: &str = "pds_repo_writes_total";
-/// Successful blob uploads via `com.atproto.repo.uploadBlob`.
-pub const BLOB_UPLOADS: &str = "pds_blob_uploads_total";
-/// Bytes accepted across all blob uploads.
-pub const BLOB_UPLOAD_BYTES: &str = "pds_blob_upload_bytes_total";
-/// Currently-connected `com.atproto.sync.subscribeRepos` (firehose) subscribers.
-pub const FIREHOSE_SUBSCRIBERS: &str = "pds_firehose_subscribers";
-/// Accounts created, labelled by `source` (self_service/admin), `invited`
-/// and `deactivated`.
-pub const ACCOUNTS_CREATED: &str = "pds_accounts_created_total";
-/// OAuth authorization grants, labelled by `client_first_party`.
-pub const OAUTH_AUTHORIZATION_GRANTS: &str = "pds_oauth_authorization_grants_total";
-/// OAuth sessions (rows in the `token` table) revoked in bulk for a DID, e.g.
-/// as part of an account takedown or deletion.
-pub const OAUTH_SESSIONS_REVOKED: &str = "pds_oauth_sessions_revoked_total";
-
-/// Register all rsky-pds metrics with descriptions. Idempotent: `describe_*!`
-/// macros just re-set the same description on repeated calls, so this is
-/// safe to call from multiple `build_rocket()` invocations (e.g. in tests).
-pub fn describe() {
-    describe_counter!(
-        XRPC_REQUESTS,
-        Unit::Count,
-        "XRPC and OAuth requests handled, by route and HTTP status"
-    );
-    describe_histogram!(
-        XRPC_REQUEST_DURATION_SECONDS,
-        Unit::Seconds,
-        "XRPC and OAuth request latency, by route and HTTP status"
-    );
-    describe_counter!(
-        SESSION_CREATED,
-        Unit::Count,
-        "Sessions created, by source (password/oauth), outcome (success/failure) and, \
-         on failure, reason"
-    );
-    describe_counter!(
-        AUTH_SERVICE_TOKENS_ISSUED,
-        Unit::Count,
-        "getServiceAuth service-auth tokens issued"
-    );
-    describe_counter!(
-        AUTH_SERVICE_TOKENS_DENIED,
-        Unit::Count,
-        "getServiceAuth service-auth token requests denied, by reason"
-    );
-    describe_counter!(
-        REPO_WRITES,
-        Unit::Count,
-        "Repo record writes committed, by operation (create/update/delete)"
-    );
-    describe_counter!(BLOB_UPLOADS, Unit::Count, "Successful blob uploads");
-    describe_counter!(
-        BLOB_UPLOAD_BYTES,
-        Unit::Bytes,
-        "Bytes accepted across all blob uploads"
-    );
-    describe_gauge!(
-        FIREHOSE_SUBSCRIBERS,
-        Unit::Count,
-        "Currently-connected subscribeRepos (firehose) subscribers"
-    );
-    describe_counter!(
-        ACCOUNTS_CREATED,
-        Unit::Count,
-        "Accounts created, by source (self_service/admin), invited, and deactivated"
-    );
-    describe_counter!(
-        OAUTH_AUTHORIZATION_GRANTS,
-        Unit::Count,
-        "OAuth authorization grants, by client_first_party"
-    );
-    describe_counter!(
-        OAUTH_SESSIONS_REVOKED,
-        Unit::Count,
-        "OAuth sessions bulk-revoked for a DID (account takedown/deletion)"
-    );
+pub struct Metrics {
+    registry: Registry,
+    pub http_requests: IntCounterVec,
+    pub http_request_duration: HistogramVec,
+    pub firehose_subscribers: IntGauge,
+    pub sqlite_busy_retries: IntCounter,
+    pub write_attempts: IntCounter,
+    pub control_journal_writes: IntCounterVec,
+    pub auth_failures: IntCounterVec,
+    pub rate_limit_store_errors: IntCounter,
+    pub blob_collector_outcomes: IntCounterVec,
+    pub sequencer_last_seq: IntGauge,
+    pub inflight_mutations: IntGaugeVec,
+    pub publish_intents_pending: IntGaugeVec,
+    pub blob_work_nonterminal: IntGaugeVec,
+    pub pending_work_accounts: IntGauge,
+    pub lifecycle_pending: IntGauge,
+    pub repair_pending: IntGauge,
+    pub export_duration: Histogram,
+    pub shutting_down: IntGauge,
+    pub xrpc_requests: IntCounterVec,
+    pub xrpc_request_duration: HistogramVec,
+    pub session_created: IntCounterVec,
+    pub auth_service_tokens_issued: IntCounter,
+    pub auth_service_tokens_denied: IntCounterVec,
+    pub repo_writes: IntCounterVec,
+    pub blob_uploads: IntCounter,
+    pub blob_upload_bytes: IntCounter,
+    pub accounts_created: IntCounterVec,
+    pub oauth_authorization_grants: IntCounterVec,
+    pub oauth_sessions_revoked: IntCounter,
+    draining: AtomicBool,
 }
 
-static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
+pub static METRICS: LazyLock<Metrics> = LazyLock::new(Metrics::new);
 
-/// Install the process-wide Prometheus recorder and return a handle to it.
-///
-/// Idempotent and safe to call from multiple `build_rocket()` invocations:
-/// the actual recorder is only ever built once per process (guarded by a
-/// `OnceLock`), so every caller -- including concurrent tests that each spin
-/// up their own Rocket instance -- gets a handle to the *same* underlying
-/// recorder rather than a disconnected one.
-pub fn install_recorder() -> PrometheusHandle {
-    PROMETHEUS_HANDLE
-        .get_or_init(|| {
-            let recorder = PrometheusBuilder::new().build_recorder();
-            let handle = recorder.handle();
-            // Tolerate "global recorder already set" (e.g. another crate in
-            // the same process installed one first). This closure only ever
-            // runs once per process (guarded by the OnceLock), so we always
-            // win the race for our own handle/recorder pair.
-            let _ = metrics::set_global_recorder(recorder);
-            describe();
-            handle
-        })
-        .clone()
+fn counter_vec(registry: &Registry, name: &str, help: &str, labels: &[&str]) -> IntCounterVec {
+    let vec = IntCounterVec::new(Opts::new(name, help), labels).expect("valid metric");
+    registry
+        .register(Box::new(vec.clone()))
+        .expect("unique metric");
+    vec
 }
 
-struct RequestStart(Instant);
+fn gauge_vec(registry: &Registry, name: &str, help: &str, labels: &[&str]) -> IntGaugeVec {
+    let vec = IntGaugeVec::new(Opts::new(name, help), labels).expect("valid metric");
+    registry
+        .register(Box::new(vec.clone()))
+        .expect("unique metric");
+    vec
+}
 
-/// Derives the `method` label for a request path, or `None` if the path
-/// shouldn't be recorded at all.
-///
-/// `/xrpc/<nsid>` yields the NSID. `/oauth/*` and `/.well-known/oauth-*` are
-/// a fixed, known set of literal routes (no request-controlled path
-/// segments, unlike e.g. a `did` or `rkey` in an XRPC path), so the raw path
-/// is used as-is -- cardinality stays bounded by the route table, not by
-/// caller input.
-fn route_label(path: &str) -> Option<String> {
+fn gauge(registry: &Registry, name: &str, help: &str) -> IntGauge {
+    let gauge = IntGauge::new(name, help).expect("valid metric");
+    registry
+        .register(Box::new(gauge.clone()))
+        .expect("unique metric");
+    gauge
+}
+
+fn counter(registry: &Registry, name: &str, help: &str) -> IntCounter {
+    let counter = IntCounter::new(name, help).expect("valid metric");
+    registry
+        .register(Box::new(counter.clone()))
+        .expect("unique metric");
+    counter
+}
+
+impl Metrics {
+    fn new() -> Self {
+        let registry = Registry::new();
+        let http_request_duration = HistogramVec::new(
+            HistogramOpts::new(
+                "pds_http_request_duration_seconds",
+                "Time from request receipt to response completion",
+            )
+            .buckets(vec![
+                0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+            ]),
+            &["route"],
+        )
+        .expect("valid metric");
+        registry
+            .register(Box::new(http_request_duration.clone()))
+            .expect("unique metric");
+        let xrpc_request_duration = HistogramVec::new(
+            HistogramOpts::new(
+                "pds_xrpc_request_duration_seconds",
+                "XRPC and OAuth request latency, by lexicon method and status",
+            )
+            .buckets(vec![
+                0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+            ]),
+            &["method", "status"],
+        )
+        .expect("valid metric");
+        registry
+            .register(Box::new(xrpc_request_duration.clone()))
+            .expect("unique metric");
+        let export_duration = Histogram::with_opts(
+            HistogramOpts::new(
+                "pds_repo_export_duration_seconds",
+                "Time to stream a repository export",
+            )
+            .buckets(vec![0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 300.0, 600.0]),
+        )
+        .expect("valid metric");
+        registry
+            .register(Box::new(export_duration.clone()))
+            .expect("unique metric");
+        Metrics {
+            http_requests: counter_vec(
+                &registry,
+                "pds_http_requests_total",
+                "Requests by route, method, and status",
+                &["route", "method", "status"],
+            ),
+            http_request_duration,
+            firehose_subscribers: gauge(
+                &registry,
+                "pds_firehose_subscribers",
+                "Open subscribeRepos connections",
+            ),
+            sqlite_busy_retries: counter(
+                &registry,
+                "pds_sqlite_busy_retries_total",
+                "Statements retried because sqlite reported busy",
+            ),
+            write_attempts: counter(
+                &registry,
+                "pds_write_attempts_total",
+                "Actor store write transactions opened",
+            ),
+            control_journal_writes: counter_vec(
+                &registry,
+                "pds_control_journal_writes_total",
+                "Writes to the rsky control journals by table",
+                &["table"],
+            ),
+            auth_failures: counter_vec(
+                &registry,
+                "pds_auth_failures_total",
+                "Rejected credentials by error",
+                &["kind"],
+            ),
+            rate_limit_store_errors: counter(
+                &registry,
+                "pds_rate_limit_store_errors_total",
+                "Rate limit consumptions allowed because the shared store did not answer",
+            ),
+            blob_collector_outcomes: counter_vec(
+                &registry,
+                "pds_blob_collector_outcomes_total",
+                "Blob collector decisions by outcome",
+                &["outcome"],
+            ),
+            sequencer_last_seq: gauge(
+                &registry,
+                "pds_sequencer_last_seq",
+                "Highest sequence number emitted to subscribers",
+            ),
+            inflight_mutations: gauge_vec(
+                &registry,
+                "pds_inflight_mutations",
+                "Write transactions in flight, by actor",
+                &["did"],
+            ),
+            publish_intents_pending: gauge_vec(
+                &registry,
+                "pds_publish_intents_pending",
+                "Commits not yet delivered to the sequencer, by actor",
+                &["did"],
+            ),
+            blob_work_nonterminal: gauge_vec(
+                &registry,
+                "pds_blob_work_nonterminal",
+                "Blob work still to run, by actor",
+                &["did"],
+            ),
+            pending_work_accounts: gauge(
+                &registry,
+                "pds_pending_work_accounts",
+                "Actors marked with undelivered work",
+            ),
+            lifecycle_pending: gauge(
+                &registry,
+                "pds_lifecycle_pending",
+                "Account deletions not yet complete",
+            ),
+            repair_pending: gauge(&registry, "pds_repair_pending", "Repairs not yet terminal"),
+            export_duration,
+            shutting_down: gauge(
+                &registry,
+                "pds_shutting_down",
+                "1 while the process drains before exit",
+            ),
+            xrpc_requests: counter_vec(
+                &registry,
+                "pds_xrpc_requests_total",
+                "XRPC and OAuth requests, by lexicon method and status",
+                &["method", "status"],
+            ),
+            xrpc_request_duration,
+            session_created: counter_vec(
+                &registry,
+                "pds_session_created_total",
+                "Sessions created, by source, outcome, and failure reason",
+                &["source", "outcome", "reason"],
+            ),
+            auth_service_tokens_issued: counter(
+                &registry,
+                "pds_auth_service_tokens_issued_total",
+                "Service-auth tokens issued by getServiceAuth",
+            ),
+            auth_service_tokens_denied: counter_vec(
+                &registry,
+                "pds_auth_service_tokens_denied_total",
+                "Service-auth token requests denied, by reason",
+                &["reason"],
+            ),
+            repo_writes: counter_vec(
+                &registry,
+                "pds_repo_writes_total",
+                "Record writes committed, by operation",
+                &["op"],
+            ),
+            blob_uploads: counter(
+                &registry,
+                "pds_blob_uploads_total",
+                "Successful blob uploads",
+            ),
+            blob_upload_bytes: counter(
+                &registry,
+                "pds_blob_upload_bytes_total",
+                "Bytes accepted across blob uploads",
+            ),
+            accounts_created: counter_vec(
+                &registry,
+                "pds_accounts_created_total",
+                "Accounts created, by source, invitation, and deactivation",
+                &["source", "invited", "deactivated"],
+            ),
+            oauth_authorization_grants: counter_vec(
+                &registry,
+                "pds_oauth_authorization_grants_total",
+                "OAuth authorization grants, by client kind",
+                &["client_first_party"],
+            ),
+            oauth_sessions_revoked: counter(
+                &registry,
+                "pds_oauth_sessions_revoked_total",
+                "OAuth sessions revoked in bulk by a takedown or deletion",
+            ),
+            draining: AtomicBool::new(false),
+            registry,
+        }
+    }
+
+    pub fn control_journal_write(&self, table: &str) {
+        self.control_journal_writes
+            .with_label_values(&[table])
+            .inc();
+    }
+
+    pub fn auth_failure(&self, kind: &str) {
+        self.auth_failures.with_label_values(&[kind]).inc();
+    }
+
+    pub fn record_request(&self, route: &str, method: &str, status: u16, seconds: f64) {
+        self.http_requests
+            .with_label_values(&[route, method, &status.to_string()])
+            .inc();
+        self.http_request_duration
+            .with_label_values(&[route])
+            .observe(seconds);
+    }
+
+    /// Counts a routed request under the lexicon method it named; OAuth
+    /// routes are counted under their literal path.
+    pub fn record_xrpc(&self, path: &str, status: u16, seconds: f64) {
+        let Some(method) = route_label(path) else {
+            return;
+        };
+        let status = status.to_string();
+        self.xrpc_requests
+            .with_label_values(&[method, &status])
+            .inc();
+        self.xrpc_request_duration
+            .with_label_values(&[method, &status])
+            .observe(seconds);
+    }
+
+    /// Keeps the per-actor gauge to actors with a write in flight.
+    pub fn set_inflight(&self, did: &str, count: usize) {
+        if count == 0 {
+            let _ = self.inflight_mutations.remove_label_values(&[did]);
+        } else {
+            self.inflight_mutations
+                .with_label_values(&[did])
+                .set(count as i64);
+        }
+    }
+
+    pub fn begin_shutdown(&self) {
+        self.draining.store(true, Ordering::SeqCst);
+        self.shutting_down.set(1);
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        self.draining.load(Ordering::SeqCst)
+    }
+
+    /// Recomputes the outstanding-work gauges from the journals.
+    pub async fn refresh(
+        &self,
+        actor_store: &ActorStore,
+        lifecycle: &LifecycleStore,
+        repairs: &RepairStore,
+        sequencer: &Sequencer,
+    ) -> Result<()> {
+        self.sequencer_last_seq.set(sequencer.last_seen());
+        self.lifecycle_pending
+            .set(lifecycle.open_tombstones().await?.len() as i64);
+        self.repair_pending.set(repairs.open_count().await?);
+        let pending = lifecycle.pending_work().await?;
+        self.pending_work_accounts.set(pending.len() as i64);
+        self.publish_intents_pending.reset();
+        self.blob_work_nonterminal.reset();
+        for did in pending {
+            let status = crate::drain::drain_status(actor_store, repairs, &did).await?;
+            self.publish_intents_pending
+                .with_label_values(&[&did])
+                .set(status.publish_intent_pending as i64);
+            self.blob_work_nonterminal
+                .with_label_values(&[&did])
+                .set(status.blob_work_nonterminal as i64);
+        }
+        Ok(())
+    }
+
+    /// The registry in the Prometheus text exposition format.
+    pub fn render(&self) -> Result<String> {
+        let mut out = Vec::new();
+        TextEncoder::new().encode(&self.registry.gather(), &mut out)?;
+        Ok(String::from_utf8(out)?)
+    }
+}
+
+/// The lexicon method of an XRPC path, or the literal path of an OAuth
+/// route; anything else is not counted by method.
+fn route_label(path: &str) -> Option<&str> {
     if let Some(nsid) = path.strip_prefix("/xrpc/") {
-        return Some(nsid.to_string());
+        return Some(nsid);
     }
     if path.starts_with("/oauth/") || path.starts_with("/.well-known/oauth-") {
-        return Some(path.to_string());
+        return Some(path);
     }
     None
 }
 
-/// Rocket fairing that records request count + latency for `/xrpc/*` and
-/// `/oauth/*` routes, labelled by [`route_label`] and HTTP status code.
-pub struct XrpcMetrics;
-
-#[rocket::async_trait]
-impl Fairing for XrpcMetrics {
-    fn info(&self) -> Info {
-        Info {
-            name: "XRPC request metrics",
-            kind: Kind::Request | Kind::Response,
-        }
-    }
-
-    async fn on_request(&self, request: &mut Request<'_>, _data: &mut Data<'_>) {
-        request.local_cache(|| RequestStart(Instant::now()));
-    }
-
-    async fn on_response<'r>(&self, request: &'r Request<'_>, response: &mut Response<'r>) {
-        let path = request.uri().path();
-        let Some(method) = route_label(path.as_str()) else {
-            return;
-        };
-        let status = response.status().code.to_string();
-        let start = request.local_cache(|| RequestStart(Instant::now()));
-        let elapsed = start.0.elapsed().as_secs_f64();
-        counter!(XRPC_REQUESTS, "method" => method.clone(), "status" => status.clone())
-            .increment(1);
-        histogram!(XRPC_REQUEST_DURATION_SECONDS, "method" => method, "status" => status)
-            .record(elapsed);
-    }
+pub fn record_login_success(source: &str) {
+    METRICS
+        .session_created
+        .with_label_values(&[source, "success", "n/a"])
+        .inc();
 }
 
-/// `/metrics` route handler: renders the process' Prometheus recorder as
-/// plain-text exposition format.
-#[rocket::get("/metrics")]
-pub async fn metrics_route(handle: &rocket::State<PrometheusHandle>) -> (ContentType, String) {
-    (
-        ContentType::new("text", "plain").with_params(("version", "0.0.4")),
-        handle.render(),
-    )
+pub fn record_login_failure(source: &str, reason: &str) {
+    METRICS
+        .session_created
+        .with_label_values(&[source, "failure", reason])
+        .inc();
 }
 
-#[inline]
-pub fn record_login_success(source: &'static str) {
-    counter!(SESSION_CREATED, "source" => source, "outcome" => "success", "reason" => "n/a")
-        .increment(1);
-}
-
-#[inline]
-pub fn record_login_failure(source: &'static str, reason: &'static str) {
-    counter!(SESSION_CREATED, "source" => source, "outcome" => "failure", "reason" => reason)
-        .increment(1);
-}
-
-#[inline]
 pub fn record_service_token_issued() {
-    counter!(AUTH_SERVICE_TOKENS_ISSUED).increment(1);
+    METRICS.auth_service_tokens_issued.inc();
 }
 
-#[inline]
-pub fn record_service_token_denied(reason: &'static str) {
-    counter!(AUTH_SERVICE_TOKENS_DENIED, "reason" => reason).increment(1);
+pub fn record_service_token_denied(reason: &str) {
+    METRICS
+        .auth_service_tokens_denied
+        .with_label_values(&[reason])
+        .inc();
 }
 
-#[inline]
-pub fn record_repo_write(op: &'static str) {
-    counter!(REPO_WRITES, "op" => op).increment(1);
+pub fn record_repo_write(op: &str) {
+    METRICS.repo_writes.with_label_values(&[op]).inc();
 }
 
-#[inline]
 pub fn record_blob_upload(bytes: u64) {
-    counter!(BLOB_UPLOADS).increment(1);
-    counter!(BLOB_UPLOAD_BYTES).increment(bytes);
+    METRICS.blob_uploads.inc();
+    METRICS.blob_upload_bytes.inc_by(bytes);
 }
 
-#[inline]
 pub fn record_firehose_subscriber_connected() {
-    gauge!(FIREHOSE_SUBSCRIBERS).increment(1.0);
+    METRICS.firehose_subscribers.inc();
 }
 
-#[inline]
 pub fn record_firehose_subscriber_disconnected() {
-    gauge!(FIREHOSE_SUBSCRIBERS).decrement(1.0);
+    METRICS.firehose_subscribers.dec();
 }
 
-#[inline]
-pub fn record_account_created(source: &'static str, invited: bool, deactivated: bool) {
-    counter!(
-        ACCOUNTS_CREATED,
-        "source" => source,
-        "invited" => invited.to_string(),
-        "deactivated" => deactivated.to_string(),
-    )
-    .increment(1);
+pub fn record_account_created(source: &str, invited: bool, deactivated: bool) {
+    METRICS
+        .accounts_created
+        .with_label_values(&[source, &invited.to_string(), &deactivated.to_string()])
+        .inc();
 }
 
-#[inline]
 pub fn record_oauth_authorization_granted(client_first_party: bool) {
-    counter!(OAUTH_AUTHORIZATION_GRANTS, "client_first_party" => client_first_party.to_string())
-        .increment(1);
+    METRICS
+        .oauth_authorization_grants
+        .with_label_values(&[&client_first_party.to_string()])
+        .inc();
 }
 
-#[inline]
 pub fn record_oauth_sessions_revoked(count: u64) {
     if count > 0 {
-        counter!(OAUTH_SESSIONS_REVOKED).increment(count);
+        METRICS.oauth_sessions_revoked.inc_by(count);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use metrics::with_local_recorder;
-    use metrics_exporter_prometheus::PrometheusBuilder;
 
     #[test]
-    fn describe_is_idempotent_under_local_recorder() {
-        let recorder = PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        with_local_recorder(&recorder, || {
-            describe();
-            describe();
-        });
-        // render() must not panic; output is plain Prometheus text or empty.
-        let _out = handle.render();
+    fn renders_every_family_and_bounds_the_inflight_labels() {
+        let metrics = Metrics::new();
+        metrics.record_request("/xrpc/_health", "GET", 200, 0.01);
+        metrics.control_journal_write("frontier_watermark");
+        metrics.auth_failure("ExpiredToken");
+        metrics.set_inflight("did:plc:a", 2);
+        metrics.set_inflight("did:plc:b", 1);
+        metrics.set_inflight("did:plc:b", 0);
+        assert!(!metrics.is_shutting_down());
+        metrics.begin_shutdown();
+        assert!(metrics.is_shutting_down());
+        let text = metrics.render().unwrap();
+        for needle in [
+            "pds_http_requests_total{method=\"GET\",route=\"/xrpc/_health\",status=\"200\"} 1",
+            "pds_http_request_duration_seconds_count{route=\"/xrpc/_health\"} 1",
+            "pds_control_journal_writes_total{table=\"frontier_watermark\"} 1",
+            "pds_auth_failures_total{kind=\"ExpiredToken\"} 1",
+            "pds_inflight_mutations{did=\"did:plc:a\"} 2",
+            "pds_shutting_down 1",
+            "pds_repo_export_duration_seconds_count 0",
+        ] {
+            assert!(text.contains(needle), "{needle} missing from:\n{text}");
+        }
+        assert!(!text.contains("did:plc:b"), "{text}");
     }
 
     #[test]
-    fn route_label_covers_xrpc_oauth_and_well_known_oauth() {
-        assert_eq!(
-            route_label("/xrpc/com.atproto.server.createSession"),
-            Some("com.atproto.server.createSession".to_string())
-        );
-        assert_eq!(
-            route_label("/oauth/token"),
-            Some("/oauth/token".to_string())
-        );
+    fn the_reference_counters_render_with_their_labels() {
+        let uploads_before = METRICS.blob_uploads.get();
+        let revoked_before = METRICS.oauth_sessions_revoked.get();
+        record_login_success("password");
+        record_login_failure("oauth", "invalid_credentials");
+        record_service_token_issued();
+        record_service_token_denied("bad_expiration");
+        record_repo_write("create");
+        record_blob_upload(1_024);
+        record_firehose_subscriber_connected();
+        record_firehose_subscriber_disconnected();
+        record_account_created("self_service", true, false);
+        record_oauth_authorization_granted(true);
+        record_oauth_sessions_revoked(0);
+        record_oauth_sessions_revoked(2);
+        METRICS.record_xrpc("/xrpc/com.atproto.server.getSession", 200, 0.01);
+        METRICS.record_xrpc("/oauth/token", 400, 0.01);
+        METRICS.record_xrpc("/robots.txt", 200, 0.01);
+        assert_eq!(METRICS.blob_uploads.get(), uploads_before + 1);
+        assert_eq!(METRICS.oauth_sessions_revoked.get(), revoked_before + 2);
         assert_eq!(
             route_label("/.well-known/oauth-authorization-server"),
-            Some("/.well-known/oauth-authorization-server".to_string())
+            Some("/.well-known/oauth-authorization-server")
         );
-        assert_eq!(route_label("/robots.txt"), None);
-        assert_eq!(route_label("/.well-known/atproto-did"), None);
-    }
-
-    #[test]
-    fn record_login_increments_labelled_counter() {
-        let recorder = PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        with_local_recorder(&recorder, || {
-            describe();
-            record_login_success("password");
-            record_login_success("oauth");
-            record_login_failure("password", "invalid_credentials");
-        });
-        let out = handle.render();
-        assert!(out.contains(SESSION_CREATED), "missing metric: {out}");
-        assert!(out.contains(r#"source="password""#));
-        assert!(out.contains(r#"source="oauth""#));
-        assert!(out.contains(r#"outcome="success""#));
-        assert!(out.contains(r#"outcome="failure""#));
-        assert!(out.contains(r#"reason="invalid_credentials""#));
-    }
-
-    #[test]
-    fn record_service_token_issued_increments_counter() {
-        let recorder = PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        with_local_recorder(&recorder, || {
-            describe();
-            record_service_token_issued();
-            record_service_token_issued();
-        });
-        let out = handle.render();
-        assert!(out.contains(AUTH_SERVICE_TOKENS_ISSUED));
-        assert!(out.contains(&format!("{AUTH_SERVICE_TOKENS_ISSUED} 2")));
-    }
-
-    #[test]
-    fn record_service_token_denied_uses_reason_label() {
-        let recorder = PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        with_local_recorder(&recorder, || {
-            describe();
-            record_service_token_denied("insufficient_privilege");
-            record_service_token_denied("bad_expiration");
-        });
-        let out = handle.render();
-        assert!(out.contains(AUTH_SERVICE_TOKENS_DENIED));
-        assert!(out.contains(r#"reason="insufficient_privilege""#));
-        assert!(out.contains(r#"reason="bad_expiration""#));
-    }
-
-    #[test]
-    fn record_repo_write_uses_op_label() {
-        let recorder = PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        with_local_recorder(&recorder, || {
-            describe();
-            record_repo_write("create");
-            record_repo_write("update");
-            record_repo_write("delete");
-        });
-        let out = handle.render();
-        assert!(out.contains("op=\"create\""));
-        assert!(out.contains("op=\"update\""));
-        assert!(out.contains("op=\"delete\""));
-    }
-
-    #[test]
-    fn record_blob_upload_increments_count_and_bytes() {
-        let recorder = PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        with_local_recorder(&recorder, || {
-            describe();
-            record_blob_upload(1_024);
-            record_blob_upload(2_048);
-        });
-        let out = handle.render();
-        assert!(out.contains(&format!("{BLOB_UPLOADS} 2")));
-        assert!(out.contains(&format!("{BLOB_UPLOAD_BYTES} 3072")));
-    }
-
-    #[test]
-    fn firehose_subscriber_gauge_tracks_connect_disconnect() {
-        let recorder = PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        with_local_recorder(&recorder, || {
-            describe();
-            record_firehose_subscriber_connected();
-            record_firehose_subscriber_connected();
-            record_firehose_subscriber_disconnected();
-        });
-        let out = handle.render();
-        assert!(out.contains(FIREHOSE_SUBSCRIBERS));
-        assert!(out.contains(&format!("{FIREHOSE_SUBSCRIBERS} 1")));
-    }
-
-    #[test]
-    fn record_account_created_uses_source_invited_deactivated_labels() {
-        let recorder = PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        with_local_recorder(&recorder, || {
-            describe();
-            record_account_created("self_service", true, false);
-            record_account_created("admin", false, true);
-        });
-        let out = handle.render();
-        assert!(out.contains(ACCOUNTS_CREATED));
-        assert!(out.contains(r#"source="self_service""#));
-        assert!(out.contains(r#"invited="true""#));
-        assert!(out.contains(r#"deactivated="false""#));
-        assert!(out.contains(r#"source="admin""#));
-    }
-
-    #[test]
-    fn record_oauth_authorization_granted_uses_first_party_label() {
-        let recorder = PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        with_local_recorder(&recorder, || {
-            describe();
-            record_oauth_authorization_granted(true);
-            record_oauth_authorization_granted(false);
-            record_oauth_authorization_granted(false);
-        });
-        let out = handle.render();
-        assert!(out.contains(OAUTH_AUTHORIZATION_GRANTS));
-        assert!(out.contains(r#"client_first_party="true""#));
-        assert!(out.contains(&format!(
-            "{OAUTH_AUTHORIZATION_GRANTS}{{client_first_party=\"false\"}} 2"
-        )));
-    }
-
-    #[test]
-    fn record_oauth_sessions_revoked_increments_by_count_and_ignores_zero() {
-        let recorder = PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        with_local_recorder(&recorder, || {
-            describe();
-            record_oauth_sessions_revoked(0);
-            record_oauth_sessions_revoked(3);
-        });
-        let out = handle.render();
-        assert!(out.contains(&format!("{OAUTH_SESSIONS_REVOKED} 3")));
-    }
-
-    #[test]
-    fn install_recorder_is_idempotent_and_returns_working_handle() {
-        // Calling twice in the same process must not panic, and both handles
-        // must reflect the same underlying (process-wide) recorder.
-        let h1 = install_recorder();
-        let h2 = install_recorder();
-        record_service_token_issued();
-        let out1 = h1.render();
-        let out2 = h2.render();
-        assert_eq!(out1, out2);
-        assert!(out1.contains(AUTH_SERVICE_TOKENS_ISSUED));
+        let out = METRICS.render().unwrap();
+        for needle in [
+            "pds_session_created_total{outcome=\"success\",reason=\"n/a\",source=\"password\"}",
+            "pds_session_created_total{outcome=\"failure\",reason=\"invalid_credentials\",source=\"oauth\"}",
+            "pds_auth_service_tokens_issued_total ",
+            "pds_auth_service_tokens_denied_total{reason=\"bad_expiration\"}",
+            "pds_repo_writes_total{op=\"create\"}",
+            "pds_blob_upload_bytes_total ",
+            "pds_accounts_created_total{deactivated=\"false\",invited=\"true\",source=\"self_service\"}",
+            "pds_oauth_authorization_grants_total{client_first_party=\"true\"}",
+            "pds_oauth_sessions_revoked_total ",
+            "pds_xrpc_requests_total{method=\"com.atproto.server.getSession\",status=\"200\"}",
+            "pds_xrpc_requests_total{method=\"/oauth/token\",status=\"400\"}",
+            "pds_xrpc_request_duration_seconds_bucket{method=\"/oauth/token\",status=\"400\"",
+        ] {
+            assert!(out.contains(needle), "{needle}\n{out}");
+        }
+        assert!(!out.contains("method=\"/robots.txt\""));
     }
 }

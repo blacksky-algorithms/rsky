@@ -1,0 +1,39 @@
+[package]
+name = "rsky-pds-router"
+version = "0.1.0"
+authors = ["Rudy Fraser <him@rudyfraser.com>"]
+description = "Stateless request router in front of two PDS implementations sharing one data directory"
+license = "Apache-2.0"
+edition = "2021"
+publish = false
+homepage = "https://blackskyweb.xyz"
+repository = "https://github.com/blacksky-algorithms/rsky/tree/main/rsky-pds-router"
+
+[[bin]]
+name = "pds-router"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+arc-swap = "1.7"
+axum = { version = "0.8", features = ["http1", "http2", "tokio"] }
+base64 = "0.22"
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "http2", "client"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
+prometheus = "0.13"
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = "1"
+tokio = { workspace = true }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+tempfile = "3"

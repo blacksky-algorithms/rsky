@@ -1,3 +1,4 @@
+use crate::safe_fetch::{NetworkPolicy, Redirects, SafeClient};
 use crate::types::HandleResolverOpts;
 use anyhow::Result;
 use hickory_resolver::config::*;
@@ -9,20 +10,34 @@ use url::Url;
 pub const SUBDOMAIN: &str = "_atproto";
 pub const PREFIX: &str = "did=";
 
+/// The most a well-known handle document may be.
+const WELL_KNOWN_LIMIT: usize = 8 * 1024;
+
 #[derive(Clone, Debug)]
 pub struct HandleResolver {
     pub timeout: Duration,
     backup_nameservers: Option<Vec<String>>,
     backup_nameserver_ips: Option<Vec<IpAddr>>,
+    /// The transport for the well-known lookup, bound to a network policy.
+    client: SafeClient,
 }
 
 impl HandleResolver {
     pub fn new(opts: HandleResolverOpts) -> Self {
+        let timeout = opts.timeout.unwrap_or(Duration::from_millis(3000));
         Self {
-            timeout: opts.timeout.unwrap_or(Duration::from_millis(3000)),
+            timeout,
             backup_nameservers: opts.backup_nameservers,
             backup_nameserver_ips: None,
+            client: SafeClient::new(NetworkPolicy::PUBLIC, timeout).expect("reqwest client"),
         }
+    }
+
+    /// Resolves well-known documents under `policy` instead of the public
+    /// default.
+    pub fn with_network(mut self, policy: NetworkPolicy) -> Self {
+        self.client = SafeClient::new(policy, self.timeout).expect("reqwest client");
+        self
     }
 
     pub async fn resolve(&mut self, handle: &String) -> Result<Option<String>> {
@@ -57,17 +72,13 @@ impl HandleResolver {
     }
 
     pub async fn resolve_http(&self, handle: &String) -> Result<Option<String>> {
-        let url = Url::parse(format!("https://{handle}/.well-known/atproto-did").as_str())?;
-        let client = reqwest::Client::new();
-
-        let res = client
-            .get(url.as_str())
-            .header("Connection", "Keep-Alive")
-            .header("Keep-Alive", "timeout=5, max=1000")
-            .send()
-            .await?;
-
-        let res = res.text().await?;
+        let mut url = Url::parse(format!("https://{handle}/.well-known/atproto-did").as_str())?;
+        if url.host_str() == Some("localhost") {
+            let _ = url.set_scheme("http");
+        }
+        let response = self.client.get(url, Redirects::Follow(3)).await?;
+        let (_, body) = SafeClient::read_bounded(response, WELL_KNOWN_LIMIT).await?;
+        let res = String::from_utf8_lossy(&body).to_string();
 
         let did = match res.split("\n").collect::<Vec<&str>>().first() {
             None => return Ok(None),

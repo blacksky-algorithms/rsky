@@ -1,12 +1,9 @@
 use crate::config::ServerConfig;
-use crate::metrics::{
-    record_firehose_subscriber_connected, record_firehose_subscriber_disconnected,
-};
 use crate::sequencer::events::{
     AccountEvt, CommitEvt, IdentityEvt, SeqEvt, SyncEvt, TypedAccountEvt, TypedCommitEvt,
     TypedIdentityEvt, TypedSyncEvt,
 };
-use crate::sequencer::outbox::{Outbox, OutboxOpts};
+use crate::sequencer::outbox::{Outbox, OutboxError};
 use crate::xrpc_server::stream::frames::{ErrorFrame, Frame, MessageFrame, MessageFrameOpts};
 use crate::xrpc_server::stream::types::{ErrorFrameBody, InfoFrameBody};
 use crate::SharedSequencer;
@@ -26,30 +23,27 @@ use std::time::SystemTime;
 use tokio::time::{interval, Duration as TokioDuration};
 use ws::Message;
 
-/// Tracks the `pds_firehose_subscribers` gauge for the lifetime of a single
-/// subscribeRepos connection: incremented on connect, decremented on drop
-/// (covers every exit path -- normal completion, an early `return`, a
-/// `break`, or the client simply disconnecting) so the count can never leak.
-struct FirehoseSubscriberGuard;
-
-impl FirehoseSubscriberGuard {
-    fn new() -> Self {
-        record_firehose_subscriber_connected();
-        FirehoseSubscriberGuard
-    }
-}
-
-impl Drop for FirehoseSubscriberGuard {
-    fn drop(&mut self) {
-        record_firehose_subscriber_disconnected();
-    }
-}
-
 fn get_backfill_limit(ms: u64) -> String {
     let system_time = SystemTime::now();
     let mut dt: DateTime<UtcOffset> = system_time.into();
     dt -= Duration::milliseconds(ms as i64);
     format!("{}", dt.format(RFC3339_VARIANT))
+}
+
+/// Counts the connection for as long as its stream lives.
+struct SubscriberGauge;
+
+impl SubscriberGauge {
+    fn new() -> Self {
+        crate::metrics::METRICS.firehose_subscribers.inc();
+        SubscriberGauge
+    }
+}
+
+impl Drop for SubscriberGauge {
+    fn drop(&mut self) {
+        crate::metrics::METRICS.firehose_subscribers.dec();
+    }
 }
 
 /// Repository event stream, aka Firehose endpoint. Outputs repo commits with diff data,
@@ -67,14 +61,9 @@ pub async fn subscribe_repos<'a>(
     ws: ws::WebSocket,
 ) -> ws::Stream!['a] {
     ws::Stream! { ws =>
-        let _firehose_subscriber_guard = FirehoseSubscriberGuard::new();
+        let _subscriber = SubscriberGauge::new();
         let sequencer_lock = sequencer.sequencer.read().await.clone();
-        let mut outbox = Outbox::new(
-            sequencer_lock.clone(),
-            Some(OutboxOpts {
-                max_buffer_size: cfg.subscription.max_buffer as usize,
-            })
-        );
+        let outbox = Outbox::new(sequencer_lock.clone());
 
         tracing::debug!("@LOG DEBUG: request to com.atproto.sync.subscribeRepos; Cursor={cursor:?}");
         let backfill_time = get_backfill_limit(cfg.subscription.repo_backfill_limit_ms);
@@ -160,8 +149,12 @@ pub async fn subscribe_repos<'a>(
                     let evt = match evt {
                         Some(Ok(evt)) => evt,
                         Some(Err(err)) => {
+                            let name = match err.downcast_ref::<OutboxError>() {
+                                Some(OutboxError::ConsumerTooSlow(_)) => "ConsumerTooSlow",
+                                _ => "EventStreamError",
+                            };
                             let error_frame = ErrorFrame::new(ErrorFrameBody {
-                                error: "EventStreamError".to_string(),
+                                error: name.to_string(),
                                 message: Some(err.to_string()),
                             });
                             yield Message::Binary(error_frame.to_bytes().expect("couldn't translate error to binary."));
@@ -346,5 +339,21 @@ pub async fn subscribe_repos<'a>(
                 _ = &mut shutdown => break
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SubscriberGauge;
+
+    #[test]
+    fn the_gauge_follows_the_connection() {
+        let gauge = &crate::metrics::METRICS.firehose_subscribers;
+        let before = gauge.get();
+        let guard = SubscriberGauge::new();
+        assert_eq!(gauge.get(), before + 1);
+        drop(guard);
+        assert_eq!(gauge.get(), before);
+        assert!(!super::get_backfill_limit(1000).is_empty());
     }
 }

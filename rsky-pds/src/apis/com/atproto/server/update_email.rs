@@ -1,10 +1,9 @@
-use crate::account_manager::helpers::account::{AccountHelperError, AvailabilityFlags};
+use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::{AccountManager, UpdateEmailOpts};
 use crate::apis::ApiError;
 use crate::auth_verifier::scope::{AccountEmail, Scoped};
 use crate::auth_verifier::AccessFull;
 use crate::models::models::EmailTokenPurpose;
-use anyhow::{bail, Result};
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::UpdateEmailInput;
 
@@ -12,11 +11,13 @@ async fn inner_update_email(
     body: Json<UpdateEmailInput>,
     auth: Scoped<AccountEmail, AccessFull>,
     account_manager: AccountManager,
-) -> Result<()> {
+) -> Result<(), ApiError> {
     let did = auth.did().await?;
     let UpdateEmailInput { email, token } = body.into_inner();
     if !mailchecker::is_valid(&email) {
-        bail!("This email address is not supported, please use a different email.")
+        return Err(ApiError::InvalidRequest(
+            "This email address is not supported, please use a different email.".to_string(),
+        ));
     }
     let account = account_manager
         .get_account(
@@ -28,32 +29,26 @@ async fn inner_update_email(
         )
         .await?;
 
-    if let Some(account) = account {
-        // require valid token if account email is confirmed
-        if account.email_confirmed_at.is_some() {
-            if let Some(token) = token {
+    let account = account.ok_or(ApiError::InvalidRequest("account not found".to_string()))?;
+    // require valid token if account email is confirmed
+    if account.email_confirmed_at.is_some() {
+        match token {
+            Some(token) => {
                 account_manager
                     .assert_valid_email_token(&did, EmailTokenPurpose::UpdateEmail, &token)
-                    .await?;
-            } else {
-                bail!("Confirmation token required")
+                    .await?
+            }
+            None => {
+                return Err(ApiError::InvalidRequest(
+                    "Confirmation token required".to_string(),
+                ))
             }
         }
-        match account_manager
-            .update_email(UpdateEmailOpts { did, email })
-            .await
-        {
-            Ok(_) => Ok(()),
-            Err(e) => match e.downcast_ref() {
-                Some(AccountHelperError::UserAlreadyExistsError) => {
-                    bail!("This email address is already in use, please use a different email.")
-                }
-                _ => Err(e),
-            },
-        }
-    } else {
-        bail!("Account not found")
     }
+    account_manager
+        .update_email(UpdateEmailOpts { did, email })
+        .await?;
+    Ok(())
 }
 
 #[tracing::instrument(skip_all)]
@@ -67,11 +62,5 @@ pub async fn update_email(
     auth: Scoped<AccountEmail, AccessFull>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    match inner_update_email(body, auth, account_manager).await {
-        Ok(_) => Ok(()),
-        Err(error) => {
-            tracing::error!("@LOG: ERROR: {error}");
-            Err(ApiError::RuntimeError)
-        }
-    }
+    inner_update_email(body, auth, account_manager).await
 }

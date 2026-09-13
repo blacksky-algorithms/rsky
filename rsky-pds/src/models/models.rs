@@ -4,15 +4,12 @@ use anyhow::{bail, Result};
 pub struct Account {
     pub did: String,
     pub email: String,
-    #[serde(rename = "recoveryKey")]
-    pub recovery_key: Option<String>,
-    pub password: String,
-    #[serde(rename = "createdAt")]
-    pub created_at: String,
-    #[serde(rename = "invitesDisabled")]
-    pub invites_disabled: i16,
+    #[serde(rename = "passwordScrypt")]
+    pub password_scrypt: String,
     #[serde(rename = "emailConfirmedAt")]
     pub email_confirmed_at: Option<String>,
+    #[serde(rename = "invitesDisabled")]
+    pub invites_disabled: i16,
 }
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
@@ -33,9 +30,11 @@ pub struct Actor {
 pub struct AppPassword {
     pub did: String,
     pub name: String,
-    pub password: String,
+    #[serde(rename = "passwordScrypt")]
+    pub password_scrypt: String,
     #[serde(rename = "createdAt")]
     pub created_at: String,
+    pub privileged: i16,
 }
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]

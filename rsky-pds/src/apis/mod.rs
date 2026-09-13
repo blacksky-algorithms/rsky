@@ -23,16 +23,28 @@ impl<'a> FromParam<'a> for Nsid {
     type Error = &'a str;
 
     fn from_param(param: &'a str) -> Result<Self, Self::Error> {
-        // This is how we make sure we allowlist lexicons and what gets proxied
-        if param.starts_with("app.bsky.")
-            || param.starts_with("chat.bsky")
-            || param.starts_with("community.blacksky.")
-        {
+        // any well-formed method name reaches the proxy, as on the reference
+        // PDS; which service answers is decided from the header or the
+        // method, not from an allowlist here
+        if is_nsid(param) {
             Ok(Nsid(param.to_string()))
         } else {
             Err(param)
         }
     }
+}
+
+/// A namespaced identifier: at least three dot-separated segments of
+/// letters, digits, and hyphens.
+pub fn is_nsid(value: &str) -> bool {
+    let segments: Vec<&str> = value.split('.').collect();
+    segments.len() >= 3
+        && segments.iter().all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
 }
 
 /// Privileged methods (e.g. chat.bsky.*) must not be reachable with
@@ -265,7 +277,15 @@ pub enum ApiError {
     AccountTakendown,
     InvalidRequest(String),
     ExpiredToken,
-    InvalidToken,
+    /// A refresh token that was revoked or already rotated past its grace period.
+    RefreshTokenRevoked,
+    /// An email token past its validity window.
+    ExpiredEmailToken,
+    InvalidToken(String),
+    /// No credentials were presented.
+    AuthMissing,
+    /// The credentials are valid but not accepted by this method.
+    Forbidden(String),
     /// A scope-limited token that does not cover the requested write.
     InsufficientScope(String),
     RecordNotFound,
@@ -285,8 +305,26 @@ pub enum ApiError {
     BlobNotFound,
     BadRequest(String, String),
     AuthRequiredError(String),
+    /// The repository does not exist on this server.
+    RepoNotFound(String),
+    /// The repository exists but has been taken down.
+    RepoTakendown(String),
+    /// The repository exists but its account is deactivated.
+    RepoDeactivated(String),
     /// Error passed through from an upstream service: status code, error, message
     UpstreamResponse(u16, String, String),
+    /// This server does not admit writes for the actor right now.
+    NotAdmitted(String),
+    /// This server serves reads only.
+    ReadOnly,
+    /// No route answers the path.
+    NotFound,
+    /// A body larger than the server accepts.
+    PayloadTooLarge,
+    /// Every slot for this kind of work is taken.
+    Overloaded(String),
+    /// A fixed-window limit is exhausted; carries the window's status.
+    RateLimitExceeded(crate::rate_limits::LimitStatus),
 }
 
 impl std::fmt::Display for ApiError {
@@ -321,35 +359,22 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 res.set_status(Status { code: 500u16 });
                 Ok(res)
             }
-            ApiError::InvalidLogin => {
-                let body = Json(ErrorBody {
-                    error: "InvalidLogin".to_string(),
-                    message: "Invalid identifier or password".to_string(),
-                });
-                let mut res =
-                    <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(::rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
-                res.set_status(Status { code: 400u16 });
-                Ok(res)
-            }
-            ApiError::AccountTakendown => {
-                let body = Json(ErrorBody {
-                    error: "AccountTakendown".to_string(),
-                    message: "Account has been taken down".to_string(),
-                });
-                let mut res =
-                    <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(::rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
-                res.set_status(Status { code: 400u16 });
-                Ok(res)
+            ApiError::InvalidLogin => json_error(
+                401,
+                "AuthenticationRequired",
+                "Invalid identifier or password".to_string(),
+                __req,
+            ),
+            ApiError::AccountTakendown => json_error(
+                401,
+                "AccountTakedown",
+                "Account has been taken down".to_string(),
+                __req,
+            ),
+            ApiError::RepoNotFound(message) => json_error(400, "RepoNotFound", message, __req),
+            ApiError::RepoTakendown(message) => json_error(400, "RepoTakendown", message, __req),
+            ApiError::RepoDeactivated(message) => {
+                json_error(400, "RepoDeactivated", message, __req)
             }
             ApiError::InvalidRequest(message) => {
                 let body = Json(ErrorBody {
@@ -367,35 +392,60 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 Ok(res)
             }
             ApiError::ExpiredToken => {
-                let body = Json(ErrorBody {
-                    error: "ExpiredToken".to_string(),
-                    message: "Token is expired".to_string(),
-                });
-                let mut res =
-                    <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
-                res.set_status(Status { code: 400u16 });
+                json_error(400, "ExpiredToken", "Token has expired".to_string(), __req)
+            }
+            ApiError::RefreshTokenRevoked => json_error(
+                400,
+                "ExpiredToken",
+                "Token has been revoked".to_string(),
+                __req,
+            ),
+            ApiError::ExpiredEmailToken => {
+                json_error(400, "ExpiredToken", "Token is expired".to_string(), __req)
+            }
+            ApiError::InvalidToken(message) => json_error(400, "InvalidToken", message, __req),
+            ApiError::AuthMissing => json_error(
+                401,
+                "AuthMissing",
+                "Authentication Required".to_string(),
+                __req,
+            ),
+            ApiError::Forbidden(message) => json_error(403, "Forbidden", message, __req),
+            ApiError::NotAdmitted(message) => {
+                let mut res = json_error(503, "NotAdmitted", message, __req)?;
+                res.set_header(Header::new("Retry-After", "1"));
                 Ok(res)
             }
-            ApiError::InvalidToken => {
-                let body = Json(ErrorBody {
-                    error: "InvalidToken".to_string(),
-                    message: "Token is invalid".to_string(),
-                });
-                let mut res =
-                    <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
-                res.set_status(Status { code: 400u16 });
+            ApiError::NotFound => json_error(404, "NotFound", "Not Found".to_string(), __req),
+            ApiError::PayloadTooLarge => json_error(
+                413,
+                "PayloadTooLarge",
+                "request entity too large".to_string(),
+                __req,
+            ),
+            ApiError::RateLimitExceeded(status) => {
+                let mut res = json_error(
+                    429,
+                    "RateLimitExceeded",
+                    "Rate Limit Exceeded".to_string(),
+                    __req,
+                )?;
+                for header in status.headers() {
+                    res.set_header(header);
+                }
                 Ok(res)
             }
+            ApiError::Overloaded(message) => {
+                let mut res = json_error(503, "ServiceUnavailable", message, __req)?;
+                res.set_header(Header::new("Retry-After", "5"));
+                Ok(res)
+            }
+            ApiError::ReadOnly => json_error(
+                503,
+                "ReadOnly",
+                "this server is serving reads only".to_string(),
+                __req,
+            ),
             ApiError::InsufficientScope(message) => {
                 let body = Json(ErrorBody {
                     error: "InsufficientScope".to_string(),
@@ -444,7 +494,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
             ApiError::InvalidEmail => {
                 let body = Json(ErrorBody {
                     error: "InvalidEmail".to_string(),
-                    message: "Invalid email".to_string(),
+                    message: "invalid email".to_string(),
                 });
                 let mut res =
                     <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
@@ -619,19 +669,7 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
                 Ok(res)
             }
             ApiError::AuthRequiredError(message) => {
-                let body = Json(ErrorBody {
-                    error: "AuthRequiredError".to_string(),
-                    message,
-                });
-                let mut res =
-                    <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, __req)?;
-                res.set_header(ContentType(::rocket::http::MediaType::const_new(
-                    "application",
-                    "json",
-                    &[],
-                )));
-                res.set_status(Status { code: 401u16 });
-                Ok(res)
+                json_error(401, "AuthenticationRequired", message, __req)
             }
             ApiError::UpstreamResponse(status, error, message) => {
                 let body = Json(ErrorBody { error, message });
@@ -666,27 +704,150 @@ impl<'r, 'o: 'r> ::rocket::response::Responder<'r, 'o> for ApiError {
     }
 }
 
+fn json_error<'r, 'o: 'r>(
+    status: u16,
+    error: &str,
+    message: String,
+    req: &'r Request<'_>,
+) -> response::Result<'o> {
+    let body = Json(ErrorBody {
+        error: error.to_string(),
+        message,
+    });
+    let mut res = <Json<ErrorBody> as ::rocket::response::Responder>::respond_to(body, req)?;
+    res.set_header(ContentType(rocket::http::MediaType::const_new(
+        "application",
+        "json",
+        &[],
+    )));
+    res.set_status(Status { code: status });
+    Ok(res)
+}
+
 impl From<Error> for ApiError {
-    fn from(_value: Error) -> Self {
+    fn from(value: Error) -> Self {
+        use crate::account_manager::helpers::account::AccountHelperError;
+        use crate::account_manager::helpers::email_token::EmailTokenError;
+        use crate::apis::com::atproto::repo::RepoUnavailable;
+        use crate::lifecycle::AccountDeleting;
+        if let Some(unavailable) = value.downcast_ref::<RepoUnavailable>() {
+            return match unavailable {
+                RepoUnavailable::NotFound(_) => ApiError::RepoNotFound(value.to_string()),
+                RepoUnavailable::Takendown(_) => ApiError::RepoTakendown(value.to_string()),
+                RepoUnavailable::Deactivated(_) => ApiError::RepoDeactivated(value.to_string()),
+            };
+        }
+        if let Some(token) = value.downcast_ref::<EmailTokenError>() {
+            return match token {
+                EmailTokenError::Invalid => ApiError::InvalidToken("Token is invalid".to_string()),
+                EmailTokenError::Expired => ApiError::ExpiredEmailToken,
+            };
+        }
+        if value.downcast_ref::<AccountDeleting>().is_some() {
+            return ApiError::InvalidRequest(value.to_string());
+        }
+        if let Some(refused) = value.downcast_ref::<crate::admission::NotAdmitted>() {
+            return ApiError::NotAdmitted(refused.to_string());
+        }
+        if value
+            .downcast_ref::<crate::actor_store::ReadOnlyMode>()
+            .is_some()
+        {
+            return ApiError::ReadOnly;
+        }
+        if let Some(limit) = value.downcast_ref::<crate::actor_store::WriteLimitError>() {
+            return ApiError::InvalidRequest(limit.to_string());
+        }
+        if let Some(AccountHelperError::UserAlreadyExistsError) = value.downcast_ref() {
+            return ApiError::InvalidRequest(
+                "This email address is already in use, please use a different email.".to_string(),
+            );
+        }
+        tracing::error!(error = ?value, "request failed with an internal error");
         ApiError::RuntimeError
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::ApiError;
+    use crate::apis::com::atproto::repo::RepoUnavailable;
+
+    #[test]
+    fn repo_unavailability_keeps_its_reference_error_name() {
+        let did = "did:plc:x".to_string();
+        for (error, expected) in [
+            (
+                RepoUnavailable::NotFound(did.clone()),
+                ApiError::RepoNotFound("Could not find repo for DID: did:plc:x".to_string()),
+            ),
+            (
+                RepoUnavailable::Takendown(did.clone()),
+                ApiError::RepoTakendown("Repo has been takendown: did:plc:x".to_string()),
+            ),
+            (
+                RepoUnavailable::Deactivated(did),
+                ApiError::RepoDeactivated("Repo has been deactivated: did:plc:x".to_string()),
+            ),
+        ] {
+            let converted: ApiError = anyhow::Error::from(error).into();
+            assert_eq!(format!("{converted:?}"), format!("{expected:?}"));
+        }
+        let other: ApiError = anyhow::anyhow!("disk on fire").into();
+        assert!(matches!(other, ApiError::RuntimeError));
+        let read_only: ApiError = anyhow::Error::from(crate::actor_store::ReadOnlyMode).into();
+        assert!(matches!(read_only, ApiError::ReadOnly));
+    }
+
+    #[test]
+    fn any_well_formed_method_reaches_the_proxy() {
+        use super::{is_nsid, Nsid};
+        use rocket::request::FromParam;
+        for method in [
+            "app.bsky.feed.getTimeline",
+            "chat.bsky.convo.listConvos",
+            "tools.ozone.moderation.queryStatuses",
+            "com.atproto.moderation.createReport",
+            "community.blacksky.pds.getConvergence",
+            "xyz.some-vendor.thing",
+        ] {
+            assert!(is_nsid(method), "{method}");
+            assert_eq!(Nsid::from_param(method).unwrap().0, method);
+        }
+        for junk in [
+            "",
+            "app.bsky",
+            "app..bsky",
+            "a.b.c/d",
+            "app.bsky.feed.get timeline",
+        ] {
+            assert!(!is_nsid(junk), "{junk:?}");
+            assert!(Nsid::from_param(junk).is_err(), "{junk:?}");
+        }
     }
 }
 
 /// Renders an [`AuthError`] as its wire-facing [`ApiError`].
 ///
 /// This is the single place auth guards translate a verification failure into
-/// the rendered error body. Previously every guard hardcoded `InvalidRequest`,
-/// which made an expired token indistinguishable from a malformed one; routing
-/// through here surfaces `ExpiredToken` so clients know to refresh, while every
-/// other case keeps its historical `InvalidRequest` rendering unchanged.
+/// the rendered error body, using the reference PDS's names: an expired
+/// session is `ExpiredToken` so clients know to refresh, a token that fails
+/// verification or scope is `InvalidToken`, and no credentials is `AuthMissing`.
 impl From<&AuthError> for ApiError {
     fn from(error: &AuthError) -> Self {
+        let rendered = error.to_string();
+        crate::metrics::METRICS.auth_failure(rendered.split(':').next().unwrap_or("unknown"));
         match error {
             AuthError::ExpiredToken => ApiError::ExpiredToken,
-            // A missing or revoked credential, or one from an untrusted
-            // issuer or for the wrong audience, is an authentication failure
-            // and surfaces as 401. A malformed token (`BadJwt`) stays a 400
-            // client error so the two remain distinguishable.
+            AuthError::AuthMissing => ApiError::AuthMissing,
+            AuthError::OAuth(code, description) => {
+                ApiError::UpstreamResponse(401, code.clone(), description.clone())
+            }
+            AuthError::Forbidden(message) => ApiError::Forbidden(message.clone()),
+            AuthError::BadJwt(message) => ApiError::InvalidToken(message.clone()),
+            // A revoked credential, or one from an untrusted issuer or for
+            // the wrong audience, is an authentication failure and surfaces
+            // as 401.
             AuthError::AuthRequired(_)
             | AuthError::BadJwtAudience(_)
             | AuthError::UntrustedIss(_) => ApiError::AuthRequiredError(error.to_string()),

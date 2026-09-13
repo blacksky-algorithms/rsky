@@ -164,7 +164,7 @@ fn dpop_credential(headers: &HeaderMap) -> Result<&str, ApiError> {
 /// Check the request's DPoP proof (RFC 9449). `access_token` is the credential
 /// the proof must hash into `ath`, and is absent at issuance, where the
 /// delegation token is a grant rather than a bound token.
-fn check_proof(
+async fn check_proof(
     state: &AppState,
     headers: &HeaderMap,
     method: &str,
@@ -186,8 +186,10 @@ fn check_proof(
                 dpop_headers: &proofs,
                 access_token,
             },
+            None,
             (state.now)(),
         )
+        .await
         .map_err(|e| ApiError::new(StatusCode::UNAUTHORIZED, "InvalidDpopProof", e.to_string()))?
         .ok_or_else(|| {
             ApiError::new(
@@ -206,7 +208,7 @@ fn check_proof(
 /// their hosts in turn, so as a bearer token it would be a shared secret any
 /// one of those hosts could replay against the others. `Bearer` is refused
 /// even with a valid proof beside it.
-fn require_space_credential(
+async fn require_space_credential(
     state: &AppState,
     headers: &HeaderMap,
     method: &str,
@@ -221,7 +223,7 @@ fn require_space_credential(
         (state.now)(),
     )
     .map_err(|e| ApiError::new(StatusCode::UNAUTHORIZED, "InvalidToken", e.to_string()))?;
-    let proof = check_proof(state, headers, method, nsid, Some(jwt))?;
+    let proof = check_proof(state, headers, method, nsid, Some(jwt)).await?;
     if proof.jkt != bound_jkt {
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
@@ -276,7 +278,7 @@ async fn get_space(
     headers: HeaderMap,
     Query(params): Query<GetSpaceParams>,
 ) -> Result<Json<GetSpaceOutput>, ApiError> {
-    require_space_credential(&state, &headers, "GET", "com.atproto.space.getSpace")?;
+    require_space_credential(&state, &headers, "GET", "com.atproto.space.getSpace").await?;
     require_this_space(&state, &params.space)?;
     Ok(Json(GetSpaceOutput {
         space: state.authority.space_uri(),
@@ -299,7 +301,8 @@ async fn get_space_credential(
         "POST",
         "com.atproto.space.getSpaceCredential",
         None,
-    )?;
+    )
+    .await?;
     let credential = state
         .authority
         .get_space_credential(
@@ -322,7 +325,7 @@ async fn list_repos(
     headers: HeaderMap,
     Query(params): Query<ListReposParams>,
 ) -> Result<Json<ListReposOutput>, ApiError> {
-    require_space_credential(&state, &headers, "GET", "com.atproto.space.listRepos")?;
+    require_space_credential(&state, &headers, "GET", "com.atproto.space.listRepos").await?;
     require_this_space(&state, &params.space)?;
     let limit = params
         .limit
@@ -340,7 +343,7 @@ async fn register_notify(
     headers: HeaderMap,
     Json(input): Json<RegisterNotifyInput>,
 ) -> Result<Json<RegisterNotifyOutput>, ApiError> {
-    require_space_credential(&state, &headers, "POST", "com.atproto.space.registerNotify")?;
+    require_space_credential(&state, &headers, "POST", "com.atproto.space.registerNotify").await?;
     require_this_space(&state, &input.space)?;
     // `service` names the subscriber, which is both where to deliver and who
     // the delivery is addressed to (proposals#100); `endpoint` is the

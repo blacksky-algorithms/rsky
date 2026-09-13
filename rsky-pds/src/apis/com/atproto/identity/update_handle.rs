@@ -6,6 +6,7 @@ use crate::auth_verifier::scope::{IdentityHandle, Scoped};
 use crate::auth_verifier::AccessStandardCheckTakedown;
 use crate::config::ServerConfig;
 use crate::handle::{normalize_and_validate_handle, HandleValidationContext, HandleValidationOpts};
+use crate::rate_limits::{Caller, RateLimits};
 use crate::{plc, SharedIdResolver, SharedSequencer};
 use anyhow::{bail, Result};
 use rocket::serde::json::Json;
@@ -72,16 +73,10 @@ async fn inner_update_handle(
         Ok(_) => (),
         Err(error) => tracing::error!("Error: {}; DID: {}; Handle: {}", error, &requester, &handle),
     };
-    match lock
-        .sequence_handle_update(requester.clone(), handle.clone())
-        .await
-    {
-        Ok(_) => (),
-        Err(error) => tracing::error!("Error: {}; DID: {}; Handle: {}", error, &requester, &handle),
-    };
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.identity.updateHandle",
@@ -95,7 +90,13 @@ pub async fn update_handle(
     id_resolver: &State<SharedIdResolver>,
     auth: Scoped<IdentityHandle, AccessStandardCheckTakedown>,
     account_manager: AccountManager,
+    limits: &State<RateLimits>,
+    caller: Caller,
 ) -> Result<(), ApiError> {
+    let did = auth.did().await?;
+    limits
+        .consume_all(&crate::rate_limits::UPDATE_HANDLE, &did, 1, caller.bypass)
+        .await?;
     match inner_update_handle(
         body,
         sequencer,

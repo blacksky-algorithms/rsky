@@ -53,8 +53,10 @@ async fn inner_activate_account(
         lock.sequence_sync_evt(requester, sync_data).await?;
         Ok(())
     } else {
-        tracing::error!("User not found");
-        Err(ApiError::RuntimeError)
+        Err(ApiError::BadRequest(
+            "AccountNotFound".to_string(),
+            "user not found".to_string(),
+        ))
     }
 }
 

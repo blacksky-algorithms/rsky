@@ -217,6 +217,7 @@ async fn open_authorize_page_scoped(
     let html = response.into_string().await.unwrap();
     assert!(html.contains("Sign in"));
     assert!(html.contains(request_uri));
+    assert!(!html.contains("name=\"email_otp\""));
     AuthorizeSession {
         cookie,
         csrf: extract_csrf(&html),
@@ -327,6 +328,77 @@ async fn activate_test_account(client: &Client) {
         .activate_account("did:plc:khvyd3oiw46vif5gm7hijslk")
         .await
         .unwrap();
+}
+
+/// Fetches a DPoP-bound resource, taking the server's nonce challenge on the
+/// first attempt and retrying with it.
+async fn dpop_get(client: &Client, key: &Jwk, access_token: &str, path: &str) -> (Status, Value) {
+    let htu = format!("{}{}", public_url(client), path.split('?').next().unwrap());
+    let response = client
+        .get(path)
+        .header(Header::new("Authorization", format!("DPoP {access_token}")))
+        .header(Header::new(
+            "DPoP",
+            dpop_proof(key, "GET", &htu, None, Some(access_token)),
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Unauthorized);
+    let nonce = response
+        .headers()
+        .get_one("DPoP-Nonce")
+        .expect("nonce challenge on resource request")
+        .to_string();
+    let response = client
+        .get(path)
+        .header(Header::new("Authorization", format!("DPoP {access_token}")))
+        .header(Header::new(
+            "DPoP",
+            dpop_proof(key, "GET", &htu, Some(&nonce), Some(access_token)),
+        ))
+        .dispatch()
+        .await;
+    let status = response.status();
+    let body: Value = serde_json::from_str(&response.into_string().await.unwrap()).unwrap();
+    (status, body)
+}
+
+/// An OAuth session with `transition:generic` can mint a service token for
+/// a non-privileged method, the way an app password can, but not for the
+/// chat surface it was never granted.
+#[tokio::test]
+async fn oauth_session_can_mint_service_auth_tokens() {
+    let (_dir, client) = get_oauth_client().await;
+    common::create_account(&client).await;
+    activate_test_account(&client).await;
+    let key = dpop_key();
+
+    let (request_uri, nonce) = run_par(&client, &key).await;
+    let session = open_authorize_page(&client, &request_uri).await;
+    let code = sign_in_and_accept(&client, &request_uri, &session).await;
+    let tokens = exchange_code(&client, &key, &code, &nonce).await;
+    let access_token = tokens["access_token"].as_str().unwrap().to_string();
+
+    let (status, body) = dpop_get(
+        &client,
+        &key,
+        &access_token,
+        "/xrpc/com.atproto.server.getServiceAuth\
+         ?aud=did:web:video.invalid&lxm=app.bsky.video.getUploadLimits",
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{body}");
+    assert!(body["token"].as_str().is_some());
+
+    let (status, _) = dpop_get(
+        &client,
+        &key,
+        &access_token,
+        "/xrpc/com.atproto.server.getServiceAuth\
+         ?aud=did:web:chat.invalid&lxm=chat.bsky.convo.getMessages",
+    )
+    .await;
+    assert_ne!(status, Status::Ok);
 }
 
 #[tokio::test]
@@ -578,7 +650,7 @@ async fn oauth_revocation() {
         .headers()
         .get_one("WWW-Authenticate")
         .unwrap()
-        .contains("revoked"));
+        .contains("error_description=\"Invalid token\""));
 }
 
 #[tokio::test]
@@ -1321,4 +1393,51 @@ async fn oauth_forbidden_declaration_still_accepts_a_legacy_session() {
     let body: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
     assert_eq!(status, Status::Ok, "body was {body}");
     assert_ne!(body["error"], "InsufficientScope", "body was {body}");
+}
+
+/// A second-factor gate in front of the sign-in route sends the browser
+/// back with a hint and, after a bad code, an error; the form then carries
+/// the code, which this server accepts and ignores.
+#[tokio::test]
+async fn the_sign_in_page_shows_a_second_factor_field_when_told_to() {
+    let (_dir, client) = get_oauth_client().await;
+    let key = dpop_key();
+    let (request_uri, _nonce) = run_par(&client, &key).await;
+    let response = client
+        .get(format!(
+            "{}&otp_hint=a%2A%2A%2A%40example.test&otp_error=true",
+            authorize_path(LOOPBACK_CLIENT_ID, &request_uri)
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let cookie = response
+        .cookies()
+        .get("device-id")
+        .expect("device cookie set")
+        .value()
+        .to_string();
+    let html = response.into_string().await.unwrap();
+    assert!(html.contains("name=\"email_otp\""), "{html}");
+    assert!(html.contains("a***@example.test"));
+    assert!(html.contains("The sign-in code was not accepted"));
+    let csrf = extract_csrf(&html);
+    let signed_in = client
+        .post("/oauth/authorize/sign-in")
+        .header(ContentType::Form)
+        .cookie(("device-id", cookie))
+        .body(form_encode(&[
+            ("client_id", LOOPBACK_CLIENT_ID),
+            ("request_uri", request_uri.as_str()),
+            ("csrf", csrf.as_str()),
+            ("identifier", "nobody.rsky.com"),
+            ("password", "wrong"),
+            ("email_otp", "12345"),
+        ]))
+        .dispatch()
+        .await;
+    assert_eq!(signed_in.status(), Status::Ok);
+    let html = signed_in.into_string().await.unwrap();
+    assert!(html.contains("class=\"error\""), "{html}");
+    assert!(!html.contains("name=\"email_otp\""));
 }

@@ -7,7 +7,7 @@ use crate::{context, SharedIdResolver, APP_USER_AGENT};
 use anyhow::{bail, Result};
 use lazy_static::lazy_static;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
-use reqwest::{Client, RequestBuilder, Response};
+use reqwest::{RequestBuilder, Response};
 use rocket::data::ToByteUnit;
 use rocket::http::{Method, Status};
 use rocket::request::{FromRequest, Outcome, Request};
@@ -17,7 +17,6 @@ use rsky_repo::types::Ids;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, HashSet};
-use std::str::FromStr;
 use std::time::Duration;
 use url::Url;
 
@@ -300,7 +299,8 @@ pub async fn format_url_and_aud(
             if let Some(ref params) = req.query {
                 url.set_query(Some(params.as_str()));
             }
-            if !req.cfg.service.dev_mode && !is_safe_url(url.clone()) {
+            if let Err(refused) = crate::outbound::client().check(&url) {
+                tracing::warn!(%refused, "proxy target refused");
                 bail!(InvalidRequestError::InvalidServiceUrl(url.to_string()));
             }
             Ok(UrlAndAud {
@@ -343,7 +343,8 @@ pub fn format_req_init(
 ) -> Result<RequestBuilder> {
     match req.method {
         Method::Get => {
-            let client = Client::builder()
+            let client = crate::outbound::client()
+                .builder()
                 .user_agent(APP_USER_AGENT)
                 .http2_keep_alive_while_idle(true)
                 .http2_keep_alive_timeout(Duration::from_secs(5))
@@ -352,7 +353,8 @@ pub fn format_req_init(
             Ok(client.get(url))
         }
         Method::Head => {
-            let client = Client::builder()
+            let client = crate::outbound::client()
+                .builder()
                 .user_agent(APP_USER_AGENT)
                 .http2_keep_alive_while_idle(true)
                 .http2_keep_alive_timeout(Duration::from_secs(5))
@@ -361,7 +363,8 @@ pub fn format_req_init(
             Ok(client.head(url))
         }
         Method::Post => {
-            let client = Client::builder()
+            let client = crate::outbound::client()
+                .builder()
                 .user_agent(APP_USER_AGENT)
                 .http2_keep_alive_while_idle(true)
                 .http2_keep_alive_timeout(Duration::from_secs(5))
@@ -381,7 +384,8 @@ pub fn format_req_init_with_value(
 ) -> Result<RequestBuilder> {
     match req.method {
         Method::Get => {
-            let client = Client::builder()
+            let client = crate::outbound::client()
+                .builder()
                 .user_agent(APP_USER_AGENT)
                 .http2_keep_alive_while_idle(true)
                 .http2_keep_alive_timeout(Duration::from_secs(5))
@@ -390,7 +394,8 @@ pub fn format_req_init_with_value(
             Ok(client.get(url))
         }
         Method::Head => {
-            let client = Client::builder()
+            let client = crate::outbound::client()
+                .builder()
                 .user_agent(APP_USER_AGENT)
                 .http2_keep_alive_while_idle(true)
                 .http2_keep_alive_timeout(Duration::from_secs(5))
@@ -399,7 +404,8 @@ pub fn format_req_init_with_value(
             Ok(client.head(url))
         }
         Method::Post => {
-            let client = Client::builder()
+            let client = crate::outbound::client()
+                .builder()
                 .user_agent(APP_USER_AGENT)
                 .http2_keep_alive_while_idle(true)
                 .http2_keep_alive_timeout(Duration::from_secs(5))
@@ -610,26 +616,23 @@ lazy_static! {
 
 }
 
+/// The service a method reaches without an `atproto-proxy` header, as the
+/// reference PDS decides it: every `tools.ozone.*` method goes to the
+/// moderation service, reports to the report service, everything else to
+/// the app view.
 pub async fn default_service(req: &ProxyRequest<'_>, nsid: &str) -> Option<ServiceConfig> {
-    let cfg = req.cfg;
-    match Ids::from_str(nsid) {
-        Ok(Ids::ToolsOzoneTeamAddMember) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneTeamDeleteMember) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneTeamUpdateMember) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneTeamListMembers) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneCommunicationCreateTemplate) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneCommunicationDeleteTemplate) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneCommunicationUpdateTemplate) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneCommunicationListTemplates) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneModerationEmitEvent) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneModerationGetEvent) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneModerationGetRecord) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneModerationGetRepo) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneModerationQueryEvents) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneModerationQueryStatuses) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneModerationSearchRepos) => cfg.mod_service.clone(),
-        Ok(Ids::ComAtprotoModerationCreateReport) => cfg.report_service.clone(),
-        _ => cfg.bsky_app_view.clone(),
+    default_service_for(req.cfg, nsid)
+}
+
+pub fn default_service_for(cfg: &ServerConfig, nsid: &str) -> Option<ServiceConfig> {
+    if nsid.starts_with("tools.ozone.") {
+        cfg.mod_service.clone()
+    } else if Ids::from_str(nsid)
+        .is_ok_and(|id| matches!(id, Ids::ComAtprotoModerationCreateReport))
+    {
+        cfg.report_service.clone()
+    } else {
+        cfg.bsky_app_view.clone()
     }
 }
 
@@ -650,17 +653,44 @@ pub async fn read_array_buffer_res(res: Response) -> Result<Vec<u8>> {
     }
 }
 
-pub fn is_safe_url(url: Url) -> bool {
-    if url.scheme() != "https" {
-        return false;
+#[cfg(test)]
+mod default_service_tests {
+    use super::default_service_for;
+    use crate::config::{env_to_cfg, ServiceConfig};
+
+    fn service(name: &str) -> Option<ServiceConfig> {
+        Some(ServiceConfig {
+            url: format!("https://{name}.example.com"),
+            did: format!("did:web:{name}.example.com"),
+            cdn_url_pattern: None,
+        })
     }
-    match url.host_str() {
-        None | Some("localhost") => false,
-        Some(hostname) => {
-            if std::net::IpAddr::from_str(hostname).is_ok() {
-                return false;
-            }
-            true
-        }
+
+    #[test]
+    fn methods_reach_the_reference_default_service() {
+        let mut cfg = env_to_cfg();
+        cfg.mod_service = service("mod");
+        cfg.report_service = service("report");
+        cfg.bsky_app_view = service("appview");
+        let did_for = |nsid: &str| default_service_for(&cfg, nsid).unwrap().did;
+        assert_eq!(
+            did_for("tools.ozone.moderation.queryStatuses"),
+            "did:web:mod.example.com"
+        );
+        assert_eq!(
+            did_for("tools.ozone.some.futureMethod"),
+            "did:web:mod.example.com"
+        );
+        assert_eq!(
+            did_for("com.atproto.moderation.createReport"),
+            "did:web:report.example.com"
+        );
+        assert_eq!(
+            did_for("app.bsky.feed.getTimeline"),
+            "did:web:appview.example.com"
+        );
+        assert_eq!(did_for("xyz.unknown.method"), "did:web:appview.example.com");
+        cfg.bsky_app_view = None;
+        assert!(default_service_for(&cfg, "app.bsky.feed.getTimeline").is_none());
     }
 }

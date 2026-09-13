@@ -219,6 +219,19 @@ impl Repo {
         to_write: RecordWriteEnum,
         keypair: &Keypair,
     ) -> Result<CommitData> {
+        self.format_commit_above(to_write, keypair, None).await
+    }
+
+    /// Formats a commit whose revision exceeds both the current revision
+    /// and `floor`, so a repository restored below a revision consumers
+    /// have already seen can move past it. `since` stays the current
+    /// revision.
+    pub async fn format_commit_above(
+        &mut self,
+        to_write: RecordWriteEnum,
+        keypair: &Keypair,
+        floor: Option<&str>,
+    ) -> Result<CommitData> {
         let writes = match to_write {
             RecordWriteEnum::List(to_write) => to_write,
             RecordWriteEnum::Single(to_write) => vec![to_write],
@@ -266,7 +279,11 @@ impl Repo {
         new_blocks.add_map(added_leaves.blocks.clone())?;
         relevant_blocks.add_map(added_leaves.blocks)?;
 
-        let rev = Ticker::new().next(Some(TID(self.commit.rev.clone())));
+        let after = match floor {
+            Some(floor) if floor > self.commit.rev.as_str() => floor.to_owned(),
+            _ => self.commit.rev.clone(),
+        };
+        let rev = Ticker::new().next(Some(TID(after)));
 
         let commit = util::sign_commit(
             UnsignedCommit {
@@ -366,7 +383,7 @@ mod tests {
     use secp256k1::Secp256k1;
     use serde_json::json;
 
-    const TEST_COLLECTIONS: [&'static str; 2] = ["com.example.posts", "com.example.likes"];
+    const TEST_COLLECTIONS: [&str; 2] = ["com.example.posts", "com.example.likes"];
     const COLL_NAME: &str = "com.example.posts";
 
     pub struct FillRepoOutput {
@@ -565,6 +582,34 @@ mod tests {
         let keypair = Keypair::new(&secp, &mut thread_rng());
         let did_key = encode_did_key(&keypair.public_key());
         let _ = Repo::create(Arc::new(RwLock::new(storage)), did_key, &keypair, None).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn formats_commits_above_a_revision_floor() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let did_key = encode_did_key(&keypair.public_key());
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            did_key.clone(),
+            &keypair,
+            None,
+        )
+        .await?;
+        let current = repo.commit.rev.clone();
+        let floor = Ticker::new().next(Some(TID(current.clone()))).to_string();
+        let above = repo
+            .format_commit_above(RecordWriteEnum::List(vec![]), &keypair, Some(&floor))
+            .await?;
+        assert!(above.rev > floor);
+        assert_eq!(above.since, Some(current.clone()));
+        // a floor below the current revision changes nothing
+        let ordinary = repo
+            .format_commit_above(RecordWriteEnum::List(vec![]), &keypair, Some("2"))
+            .await?;
+        assert!(ordinary.rev > current);
         Ok(())
     }
 
@@ -1265,7 +1310,6 @@ mod tests {
                 None => {
                     contents_from_ops
                         .insert(write.collection.clone(), CollectionContents::default());
-                    ()
                 }
             }
             let parsed = get_and_parse_record(&car.blocks, write.cid)?;

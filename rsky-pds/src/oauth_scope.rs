@@ -263,6 +263,12 @@ fn mime_matches(accepted: &[String], mime: &str) -> bool {
     })
 }
 
+/// A query value as the client wrote it: a `did:` or `#fragment` survives
+/// percent-encoding, and a value that does not decode is kept as is.
+fn percent_decoded(value: &str) -> String {
+    urlencoding::decode(value).map_or_else(|_| value.to_string(), |v| v.into_owned())
+}
+
 /// Parse an `rpc:` scope suffix into the methods it names and the audience
 /// it is bound to. `rpc:<nsid>` is shorthand for a single method with no
 /// `aud`; the query form allows several `lxm` values plus one `aud`.
@@ -284,8 +290,8 @@ pub(crate) fn parse_rpc_scope(suffix: &str) -> Option<(Vec<String>, String)> {
         for pair in params.split('&') {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
             match key {
-                "lxm" if !value.is_empty() => lxms.push(value.to_string()),
-                "aud" if !value.is_empty() => aud = Some(value.to_string()),
+                "lxm" if !value.is_empty() => lxms.push(percent_decoded(value)),
+                "aud" if !value.is_empty() => aud = Some(percent_decoded(value)),
                 _ => {}
             }
         }
@@ -322,6 +328,9 @@ impl OAuthScope {
         }
         if let Some(rest) = token.strip_prefix("account?") {
             return OAuthScope::Account(format!("?{rest}"));
+        }
+        if let Some(rest) = token.strip_prefix("rpc?") {
+            return OAuthScope::Rpc(format!("?{rest}"));
         }
         for (prefix, ctor) in [
             (

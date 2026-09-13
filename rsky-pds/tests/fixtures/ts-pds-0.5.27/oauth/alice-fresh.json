@@ -1,0 +1,36 @@
+{
+  "did": "did:plc:diecgddnxmwpv7mtpbtopth5",
+  "client_id": "http://localhost?redirect_uri=http%3A%2F%2F127.0.0.1%2Fcb&scope=atproto+transition%3Ageneric",
+  "redirect_uri": "http://127.0.0.1/cb",
+  "scope": "atproto transition:generic",
+  "dpop": {
+    "private_jwk": {
+      "kty": "EC",
+      "x": "lSeMTWnxO9IVVO_F02kyhGWLqBBzgAI7udEHL7lSdI8",
+      "y": "I51y_1jP38inGtn9TOwjEkycdz1D7hyyRcHrlZhfJbY",
+      "crv": "P-256",
+      "d": "Ekl2-Typlkq23nWD-XIiJ7A_6G7jKyDu6b0ggZDi1CA"
+    },
+    "public_jwk": {
+      "kty": "EC",
+      "x": "lSeMTWnxO9IVVO_F02kyhGWLqBBzgAI7udEHL7lSdI8",
+      "y": "I51y_1jP38inGtn9TOwjEkycdz1D7hyyRcHrlZhfJbY",
+      "crv": "P-256"
+    },
+    "jkt": "4gxp671bw3fiaGD20QgvG6GcfZeBDUqYuQJDgSire9M"
+  },
+  "cookies": {
+    "dev-id": "dev-8f83d6016c618678440c042a53d4a776",
+    "ses-id": "ses-e4d7e1a5455ec9007c9cd49a45827471",
+    "csrf-token": "5f6dcf59de9bb2d0db643ba2"
+  },
+  "token": {
+    "access_token": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJqdGkiOiJ0b2stNjZhOWU5MjU0NjA2YTY2YjMyYWQwOWFlOGZkZWU4MTQiLCJzdWIiOiJkaWQ6cGxjOmRpZWNnZGRueG13cHY3bXRwYnRvcHRoNSIsImlhdCI6MTc4OTE0MjY3OCwiZXhwIjoyMTAwMDAwMDAwLCJhdWQiOiJkaWQ6d2ViOmZpeHR1cmUudGVzdCIsImNuZiI6eyJqa3QiOiI0Z3hwNjcxYnczZmlhR0QyMFFndkc2R2NmWmVCRFVxWXVRSkRnU2lyZTlNIn0sImNsaWVudF9pZCI6Imh0dHA6Ly9sb2NhbGhvc3Q_cmVkaXJlY3RfdXJpPWh0dHAlM0ElMkYlMkYxMjcuMC4wLjElMkZjYiZzY29wZT1hdHByb3RvK3RyYW5zaXRpb24lM0FnZW5lcmljIiwiaXNzIjoiaHR0cHM6Ly9maXh0dXJlLnRlc3QifQ.x3YfcN7W5e9oBnaN7_s1E4NxZeEWjtNRQHt9O5IRPqo",
+    "token_type": "DPoP",
+    "refresh_token": "ref-23a56a3e752f538d2c7894f690c9d1268fa09c609894b2757a14df124d4e137e",
+    "scope": "atproto transition:generic",
+    "expires_in": 3599,
+    "sub": "did:plc:diecgddnxmwpv7mtpbtopth5",
+    "access_token_original": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJqdGkiOiJ0b2stNjZhOWU5MjU0NjA2YTY2YjMyYWQwOWFlOGZkZWU4MTQiLCJzdWIiOiJkaWQ6cGxjOmRpZWNnZGRueG13cHY3bXRwYnRvcHRoNSIsImlhdCI6MTc4OTE0MjY3OCwiZXhwIjoxNzg5MTQ2Mjc4LCJhdWQiOiJkaWQ6d2ViOmZpeHR1cmUudGVzdCIsImNuZiI6eyJqa3QiOiI0Z3hwNjcxYnczZmlhR0QyMFFndkc2R2NmWmVCRFVxWXVRSkRnU2lyZTlNIn0sImNsaWVudF9pZCI6Imh0dHA6Ly9sb2NhbGhvc3Q_cmVkaXJlY3RfdXJpPWh0dHAlM0ElMkYlMkYxMjcuMC4wLjElMkZjYiZzY29wZT1hdHByb3RvK3RyYW5zaXRpb24lM0FnZW5lcmljIiwiaXNzIjoiaHR0cHM6Ly9maXh0dXJlLnRlc3QifQ.UQqyY9ofsM7Aqwh_J7WTyZ00pP02ZNGee2aeLaz7lH8"
+  }
+}

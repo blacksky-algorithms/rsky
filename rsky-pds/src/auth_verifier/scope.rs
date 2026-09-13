@@ -25,7 +25,8 @@
 //! declared without being checked.
 
 use super::{
-    AccessFull, AccessFullImport, AccessOutput, AccessPrivileged, AccessStandard,
+    AccessFull, AccessFullAllowTakendown, AccessFullCheckTakedown, AccessFullImport,
+    AccessOrUserServiceAuth, AccessOutput, AccessPrivileged, AccessStandard,
     AccessStandardCheckTakedown, AccessStandardIncludeChecks, AccessStandardSignupQueued,
     AuthError, Credentials,
 };
@@ -76,8 +77,11 @@ access_tier!(
     AccessStandardIncludeChecks,
     AccessStandardSignupQueued,
     AccessFull,
+    AccessFullAllowTakendown,
+    AccessFullCheckTakedown,
     AccessFullImport,
     AccessPrivileged,
+    AccessOrUserServiceAuth,
 );
 
 /// What a route declares it requires of the calling session.

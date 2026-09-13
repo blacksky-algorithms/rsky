@@ -1,4 +1,4 @@
-use futures::StreamExt;
+use futures::{pin_mut, StreamExt};
 use lexicon_cid::Cid;
 use rocket::http::{ContentType, Header, Status};
 use rocket::local::asynchronous::Client;
@@ -10,7 +10,7 @@ use rsky_lexicon::com::atproto::sync::{
 };
 use rsky_pds::config::ServerConfig;
 use rsky_pds::sequencer::events::{CommitEvt, CommitEvtOpAction, IdentityEvt, SeqEvt, SyncEvt};
-use rsky_pds::sequencer::outbox::{Outbox, OutboxOpts};
+use rsky_pds::sequencer::outbox::Outbox;
 use rsky_pds::sequencer::{RequestSeqRangeOpts, Sequencer};
 use rsky_pds::xrpc_server::stream::frames::{Frame, MessageFrame, MessageFrameOpts};
 use rsky_pds::xrpc_server::stream::types::InfoFrameBody;
@@ -354,6 +354,9 @@ async fn data_root_of(evt: &CommitEvt) -> Cid {
 
 // ------------------------------------------------------- websocket upgrade
 
+/// A plain request to a subscription path is not served by the stream
+/// handler; the reference PDS sends it to the proxy catchall, which needs
+/// a session.
 #[tokio::test]
 async fn subscribe_repos_rejects_a_non_websocket_request() {
     let (_dir, client) = common::get_client().await;
@@ -363,8 +366,8 @@ async fn subscribe_repos_rejects_a_non_websocket_request() {
         .await;
     let status = response.status();
     let body: Value = response.into_json().await.unwrap();
-    assert_eq!(status, Status::BadRequest);
-    assert_eq!(body["error"], "InvalidRequest");
+    assert_eq!(status, Status::Unauthorized);
+    assert_eq!(body["error"], "AuthMissing");
 }
 
 #[tokio::test]
@@ -495,22 +498,18 @@ async fn cursor_primitives_report_the_next_and_current_sequence() {
 }
 
 /// The outbox is what `subscribe_repos` puts between the sequencer and the
-/// socket, so a cursor's backfill is really an `Outbox::get_backfill` drain.
+/// socket, so a cursor's backfill is the first phase of `Outbox::events`.
 #[tokio::test]
 async fn the_outbox_backfills_every_event_after_a_zero_cursor() {
     let harness = Harness::new().await;
     harness.create_record("outbox-a", "a").await;
     harness.create_record("outbox-b", "b").await;
 
-    let mut outbox = Outbox::new(
-        harness.sequencer().await,
-        Some(OutboxOpts {
-            max_buffer_size: 500,
-        }),
-    );
+    let outbox = Outbox::new(harness.sequencer().await);
     let backfill: Vec<SeqEvt> = outbox
-        .get_backfill(0)
+        .events(Some(0))
         .await
+        .take(6)
         .map(|evt| evt.unwrap())
         .collect()
         .await;
@@ -521,7 +520,6 @@ async fn the_outbox_backfills_every_event_after_a_zero_cursor() {
     );
     assert_eq!(backfill[0].seq(), 1);
     assert_eq!(backfill[5].seq(), 6);
-    assert_eq!(outbox.last_seen, 6);
 }
 
 #[tokio::test]
@@ -530,25 +528,24 @@ async fn the_outbox_backfills_only_what_follows_a_mid_stream_cursor() {
     let cursor = harness.curr().await;
     harness.create_record("outbox-mid", "m").await;
 
-    let mut outbox = Outbox::new(harness.sequencer().await, None);
+    let outbox = Outbox::new(harness.sequencer().await);
     let backfill: Vec<SeqEvt> = outbox
-        .get_backfill(cursor)
+        .events(Some(cursor))
         .await
+        .take(1)
         .map(|evt| evt.unwrap())
         .collect()
         .await;
 
     assert_eq!(types_of(&backfill), vec!["commit"]);
     assert_eq!(backfill[0].seq(), cursor + 1);
-    // A cursor at the head backfills nothing.
-    let mut caught_up = Outbox::new(harness.sequencer().await, None);
-    let empty: Vec<SeqEvt> = caught_up
-        .get_backfill(cursor + 1)
-        .await
-        .map(|evt| evt.unwrap())
-        .collect()
-        .await;
-    assert_eq!(empty.len(), 0);
+    // A cursor at the head backfills nothing: the next event is a live one.
+    let caught_up = Outbox::new(harness.sequencer().await);
+    let live = caught_up.events(Some(cursor + 1)).await;
+    pin_mut!(live);
+    harness.create_record("outbox-live", "l").await;
+    let next = live.next().await.unwrap().unwrap();
+    assert_eq!(next.seq(), cursor + 2);
 }
 
 // ------------------------------------------------------------ event blocks
@@ -805,9 +802,7 @@ async fn apply_writes_rejects_more_than_two_hundred_operations() {
             json!({ "repo": harness.did, "validate": false, "writes": too_many }),
         )
         .await;
-    // @NOTE the reference PDS answers 400 InvalidRequest here; rsky-pds funnels
-    // the bail through ApiError::RuntimeError.
-    assert_eq!(status, Status::InternalServerError);
+    assert_eq!(status, Status::BadRequest);
     assert_eq!(harness.events_since(cursor).await.len(), 0);
 
     let at_the_cap: Vec<Value> = (0..200).map(write).collect();

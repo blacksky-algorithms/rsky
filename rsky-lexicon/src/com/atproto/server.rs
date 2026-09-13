@@ -56,6 +56,14 @@ pub struct CreateSessionInput {
     /// Handle or other identifier supported by the server for the authenticating user.
     pub identifier: String,
     pub password: String,
+    /// When true, instead of throwing an error for a taken-down account, a session is
+    /// returned with a scope that only allows the account to be recovered.
+    #[serde(
+        rename = "allowTakendown",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allow_takendown: Option<bool>,
 }
 
 /// Delete an actor's account with a token and password. Can only be called after
@@ -160,10 +168,16 @@ pub struct CreateSessionOutput {
     pub handle: String,
     pub did: String,
     #[serde(rename = "didDoc", skip_serializing_if = "Option::is_none")]
-    pub did_doc: Option<String>,
+    pub did_doc: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
     #[serde(rename = "emailConfirmed", skip_serializing_if = "Option::is_none")]
     pub email_confirmed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
+    /// Why the account is inactive: `takendown`, `suspended`, or `deactivated`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 /// Get information about the current auth session. Requires auth.
@@ -171,12 +185,17 @@ pub struct CreateSessionOutput {
 pub struct GetSessionOutput {
     pub handle: String,
     pub did: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
     #[serde(rename = "emailConfirmed", skip_serializing_if = "Option::is_none")]
     pub email_confirmed: Option<bool>,
     #[serde(rename = "didDoc", skip_serializing_if = "Option::is_none")]
-    pub did_doc: Option<String>,
+    pub did_doc: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
+    /// Why the account is inactive: `takendown`, `suspended`, or `deactivated`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 /// Describes the server's account creation requirements and capabilities. Implemented by PDS.
@@ -199,6 +218,9 @@ pub struct DescribeServerOutput {
     /// Contact information
     pub contact: DescribeServerRefContact,
     pub did: String,
+    /// Maximum size, in bytes, of a single blob upload.
+    #[serde(rename = "blobUploadLimit", skip_serializing_if = "Option::is_none")]
+    pub blob_upload_limit: Option<u64>,
 }
 
 /// Get a signed token on behalf of the requesting DID for the requested service.
@@ -243,11 +265,24 @@ pub struct RefreshSessionOutput {
     pub handle: String,
     pub did: String,
     #[serde(rename = "didDoc", skip_serializing_if = "Option::is_none")]
-    pub did_doc: Option<String>,
+    pub did_doc: Option<Value>,
     #[serde(rename = "accessJwt")]
     pub access_jwt: String,
     #[serde(rename = "refreshJwt")]
     pub refresh_jwt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(
+        rename = "emailConfirmed",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub email_confirmed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
+    /// Why the account is inactive: `takendown`, `suspended`, or `deactivated`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 /// Request a token in order to update email.
@@ -301,4 +336,6 @@ pub struct AppPassword {
     pub name: String,
     #[serde(rename = "createdAt")]
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privileged: Option<bool>,
 }

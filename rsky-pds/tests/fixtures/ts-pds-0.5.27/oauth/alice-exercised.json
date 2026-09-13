@@ -1,0 +1,79 @@
+{
+  "did": "did:plc:diecgddnxmwpv7mtpbtopth5",
+  "client_id": "http://localhost?redirect_uri=http%3A%2F%2F127.0.0.1%2Fcb&scope=atproto+transition%3Ageneric",
+  "redirect_uri": "http://127.0.0.1/cb",
+  "scope": "atproto transition:generic",
+  "dpop": {
+    "private_jwk": {
+      "kty": "EC",
+      "x": "-vR2T8dLj-2tFPS_oy7lpnQgncBkHj9K8sHhrQIOSn4",
+      "y": "gpAzPlRf6pw60YhreF4mN0W9Ct_2jIvoJFoXrp3MVNc",
+      "crv": "P-256",
+      "d": "YMzcXAxJZJm6j61oc3aenqbXCnPENINbWP3pn9V7c4Q"
+    },
+    "public_jwk": {
+      "kty": "EC",
+      "x": "-vR2T8dLj-2tFPS_oy7lpnQgncBkHj9K8sHhrQIOSn4",
+      "y": "gpAzPlRf6pw60YhreF4mN0W9Ct_2jIvoJFoXrp3MVNc",
+      "crv": "P-256"
+    },
+    "jkt": "bRxAGVk48vdXyss4VFSvSLC6i1-Kvtj8vUjYOQ40hKA"
+  },
+  "cookies": {
+    "dev-id": "dev-feef87d2bf90c2a224d2a36b183ccadd",
+    "ses-id": "ses-ceedc4f6f2917340c8da0df65a326776",
+    "csrf-token": "64a079c6f78bb3e7d29693e3"
+  },
+  "token": {
+    "access_token": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJqdGkiOiJ0b2stYmY2Mjc5YzQ4Y2UwNmI1ZWU3MjNhOGE2NDFmYmRjNTMiLCJzdWIiOiJkaWQ6cGxjOmRpZWNnZGRueG13cHY3bXRwYnRvcHRoNSIsImlhdCI6MTc4OTE0MjY3NywiZXhwIjoyMTAwMDAwMDAwLCJhdWQiOiJkaWQ6d2ViOmZpeHR1cmUudGVzdCIsImNuZiI6eyJqa3QiOiJiUnhBR1ZrNDh2ZFh5c3M0VkZTdlNMQzZpMS1LdnRqOHZVallPUTQwaEtBIn0sImNsaWVudF9pZCI6Imh0dHA6Ly9sb2NhbGhvc3Q_cmVkaXJlY3RfdXJpPWh0dHAlM0ElMkYlMkYxMjcuMC4wLjElMkZjYiZzY29wZT1hdHByb3RvK3RyYW5zaXRpb24lM0FnZW5lcmljIiwiaXNzIjoiaHR0cHM6Ly9maXh0dXJlLnRlc3QifQ.3m3iNYU4t3CtqL3SpUDRHk-fRFSTrZy4-reewFxYiWg",
+    "token_type": "DPoP",
+    "refresh_token": "ref-5fa77e00a97fa45dfb9842081fbe24daec6837ed241c3c1dd0b56d597a3870e1",
+    "scope": "atproto transition:generic",
+    "expires_in": 3599,
+    "sub": "did:plc:diecgddnxmwpv7mtpbtopth5",
+    "access_token_original": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJqdGkiOiJ0b2stYmY2Mjc5YzQ4Y2UwNmI1ZWU3MjNhOGE2NDFmYmRjNTMiLCJzdWIiOiJkaWQ6cGxjOmRpZWNnZGRueG13cHY3bXRwYnRvcHRoNSIsImlhdCI6MTc4OTE0MjY3NywiZXhwIjoxNzg5MTQ2Mjc3LCJhdWQiOiJkaWQ6d2ViOmZpeHR1cmUudGVzdCIsImNuZiI6eyJqa3QiOiJiUnhBR1ZrNDh2ZFh5c3M0VkZTdlNMQzZpMS1LdnRqOHZVallPUTQwaEtBIn0sImNsaWVudF9pZCI6Imh0dHA6Ly9sb2NhbGhvc3Q_cmVkaXJlY3RfdXJpPWh0dHAlM0ElMkYlMkYxMjcuMC4wLjElMkZjYiZzY29wZT1hdHByb3RvK3RyYW5zaXRpb24lM0FnZW5lcmljIiwiaXNzIjoiaHR0cHM6Ly9maXh0dXJlLnRlc3QifQ.21uC3YW1qY5mtAZm1q01bQnGxUpLs8e_Zaf2dRTBkB8"
+  },
+  "session": {
+    "status": 200,
+    "body": {
+      "did": "did:plc:diecgddnxmwpv7mtpbtopth5",
+      "handle": "alice.fixture.test",
+      "active": true
+    }
+  },
+  "forbidden_method": {
+    "status": 403,
+    "body": {
+      "error": "Forbidden",
+      "message": "OAuth credentials are not supported for this endpoint"
+    },
+    "www_authenticate": null
+  },
+  "refreshed": {
+    "status": 200,
+    "body": {
+      "access_token": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJqdGkiOiJ0b2stNTI3ZTllOWI0Zjk3YmZlODM4OTA5ZTFmNzU3MDZiNjciLCJzdWIiOiJkaWQ6cGxjOmRpZWNnZGRueG13cHY3bXRwYnRvcHRoNSIsImlhdCI6MTc4OTE0MjY3NywiZXhwIjoyMTAwMDAwMDAwLCJhdWQiOiJkaWQ6d2ViOmZpeHR1cmUudGVzdCIsImNuZiI6eyJqa3QiOiJiUnhBR1ZrNDh2ZFh5c3M0VkZTdlNMQzZpMS1LdnRqOHZVallPUTQwaEtBIn0sImNsaWVudF9pZCI6Imh0dHA6Ly9sb2NhbGhvc3Q_cmVkaXJlY3RfdXJpPWh0dHAlM0ElMkYlMkYxMjcuMC4wLjElMkZjYiZzY29wZT1hdHByb3RvK3RyYW5zaXRpb24lM0FnZW5lcmljIiwiaXNzIjoiaHR0cHM6Ly9maXh0dXJlLnRlc3QifQ.EWSRQMtMAtbSFP7RrBPSi77YHma6kQIZaRtI1FOmbmw",
+      "token_type": "DPoP",
+      "refresh_token": "ref-fa7bb485fa1352526856a6eec350b6ad5755050c7a966ff24c171ad819091114",
+      "scope": "atproto transition:generic",
+      "expires_in": 3599,
+      "sub": "did:plc:diecgddnxmwpv7mtpbtopth5",
+      "access_token_original": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJIUzI1NiJ9.eyJqdGkiOiJ0b2stNTI3ZTllOWI0Zjk3YmZlODM4OTA5ZTFmNzU3MDZiNjciLCJzdWIiOiJkaWQ6cGxjOmRpZWNnZGRueG13cHY3bXRwYnRvcHRoNSIsImlhdCI6MTc4OTE0MjY3NywiZXhwIjoxNzg5MTQ2Mjc3LCJhdWQiOiJkaWQ6d2ViOmZpeHR1cmUudGVzdCIsImNuZiI6eyJqa3QiOiJiUnhBR1ZrNDh2ZFh5c3M0VkZTdlNMQzZpMS1LdnRqOHZVallPUTQwaEtBIn0sImNsaWVudF9pZCI6Imh0dHA6Ly9sb2NhbGhvc3Q_cmVkaXJlY3RfdXJpPWh0dHAlM0ElMkYlMkYxMjcuMC4wLjElMkZjYiZzY29wZT1hdHByb3RvK3RyYW5zaXRpb24lM0FnZW5lcmljIiwiaXNzIjoiaHR0cHM6Ly9maXh0dXJlLnRlc3QifQ.uJNlaWLaqjklDfR5FS4pQ7zh4aEshkj7lzAKfwwqhN0"
+    }
+  },
+  "session_after_refresh": {
+    "status": 401,
+    "body": {
+      "error": "invalid_token",
+      "message": "Invalid token"
+    },
+    "www_authenticate": "DPoP algs=\"RS256 RS384 RS512 PS256 PS384 PS512 ES256 ES256K ES384 ES512\", error=\"invalid_token\", error_description=\"Invalid token\""
+  },
+  "refresh_replayed": {
+    "status": 400,
+    "body": {
+      "error": "invalid_grant",
+      "error_description": "Refresh token replayed"
+    }
+  }
+}
