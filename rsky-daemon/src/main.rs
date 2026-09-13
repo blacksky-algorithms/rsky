@@ -6,12 +6,11 @@ use rsky_daemon::config::Config;
 use rsky_daemon::engine::CommitKeyResolver;
 use rsky_daemon::runner::SpaceWorkerParts;
 use rsky_daemon::{
-    intake_router, notify_router, run_multi, AppviewProjector, CombinedSource, CredentialSource,
-    DaemonError, FeedsProjector, HttpProjectionIngress, HttpRepoHost, HttpSpaceHost,
-    HttpSpaceSource, InMemoryIndex, IntakeState, InternalCredentialProvider, JournalConsumer,
-    MultiRunnerOptions, NotifyState, PersistedSpaces, Result, Router, SharedJournalConsumer,
-    SpaceCredentialSource, SpaceIndex, SpaceLifecycleAcker, SpaceRegistry, SqliteIndex,
-    StaticCredential, StaticSpaces, SupervisorCommand,
+    notify_router, run_multi, AppviewProjector, CombinedSource, CredentialSource, DaemonError,
+    FeedsProjector, HttpProjectionIngress, HttpRepoHost, HttpSpaceHost, HttpSpaceSource,
+    InMemoryIndex, InternalCredentialProvider, JournalConsumer, MultiRunnerOptions, NotifyState,
+    Result, Router, SharedJournalConsumer, SpaceCredentialSource, SpaceIndex, SpaceLifecycleAcker,
+    SpaceRegistry, SqliteIndex, StaticCredential, StaticSpaces,
 };
 use rsky_identity::did::atproto_data::{get_did_key_from_multibase, VerificationMaterial};
 use rsky_identity::types::{IdentityResolverOpts, MemoryCache};
@@ -179,26 +178,17 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         sources.push(Box::new(StaticSpaces::new([cfg.space_uri.clone()])));
     }
     if !cfg.spaces_url.is_empty() {
-        let http_source = HttpSpaceSource::new(
+        sources.push(Box::new(HttpSpaceSource::new(
             &cfg.spaces_url,
             &cfg.spaces_api_key,
             authority_filter.clone(),
             &cfg.space_type,
-        );
-        sources.push(Box::new(if let Some(db) = &db {
-            http_source.with_persistence(db.clone())
-        } else {
-            http_source
-        }));
-    }
-    if let Some(db) = &db {
-        sources.push(Box::new(PersistedSpaces::new(db.clone())));
+        )));
     }
     let source = Arc::new(CombinedSource(sources));
     let registry = SpaceRegistry::new();
 
-    let (supervisor_tx, supervisor_rx) = mpsc::channel::<SupervisorCommand>(1024);
-    let (legacy_notify_tx, _legacy_notify_rx) = mpsc::channel(1);
+    let (notify_tx, notify_rx) = mpsc::channel(1024);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let notify_endpoint = cfg.notify_endpoint();
     let notify_state = NotifyState {
@@ -209,10 +199,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         notify_endpoint: notify_endpoint.clone(),
         resolver: keys.clone(),
         index: Arc::new(InMemoryIndex::new()),
-        tx: legacy_notify_tx,
+        tx: notify_tx,
         now_fn: rsky_daemon::unix_now,
-        supervisor: Some(supervisor_tx.clone()),
-        db: db.clone(),
     };
     let listener = tokio::net::TcpListener::bind(&cfg.notify_bind).await?;
     tracing::info!(
@@ -224,29 +212,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     );
 
     let mut serve_shutdown = shutdown_rx.clone();
-    let db_for_server = db.clone();
-    let intake_issuer_did = cfg.intake_issuer_did.clone();
-    let service_identity_for_server = cfg.service_identity.clone();
-    let space_type_for_server = cfg.space_type.clone();
-    let keys_for_server = keys.clone();
-    let supervisor_tx_for_server = supervisor_tx.clone();
-    let intake_enabled = cfg.intake_accept_enabled;
     let server = tokio::spawn(async move {
-        let app = if intake_enabled {
-            let intake_state = IntakeState {
-                db: db_for_server.expect("intake validation requires a SQLite database"),
-                supervisor: supervisor_tx_for_server.clone(),
-                issuer_did: intake_issuer_did,
-                service_identity: service_identity_for_server,
-                space_type: space_type_for_server,
-                resolver: keys_for_server,
-                now_fn: rsky_daemon::unix_now,
-            };
-            notify_router(notify_state).merge(intake_router(intake_state))
-        } else {
-            notify_router(notify_state)
-        };
-        axum::serve(listener, app)
+        axum::serve(listener, notify_router(notify_state))
             .with_graceful_shutdown(async move {
                 let _ = serve_shutdown.changed().await;
             })
@@ -292,12 +259,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         ))
     });
     let opts = MultiRunnerOptions {
-        refresh_interval_secs: cfg.discovery_interval_secs,
+        refresh_interval_secs: cfg.sweep_interval_secs,
         sweep_interval_secs: cfg.sweep_interval_secs,
         notify_endpoint,
         service_identity: cfg.service_identity.clone(),
         now_fn: rsky_daemon::unix_now,
-        db: db.clone(),
     };
     let runner = tokio::spawn(run_multi(
         opts,
@@ -306,7 +272,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         factory,
         host,
         keys,
-        supervisor_rx,
+        notify_rx,
         shutdown_rx,
     ));
 
