@@ -108,6 +108,8 @@ Mount a volume at `PDS_DATA_DIRECTORY` to persist data.
 | `PDS_INVITE_INTERVAL`, `PDS_INVITE_EPOCH` | Invite issuance schedule |
 | `PDS_EMAIL_FROM_ADDRESS`, `PDS_EMAIL_FROM_NAME` | Transactional mail sender |
 | `PDS_MODERATION_EMAIL_FROM_ADDRESS`, `PDS_MODERATION_EMAIL_FROM_NAME` | Moderation mail sender |
+| `PDS_EMAIL_SMTP_URL` | SMTP URL for transactional mail (`smtp://` or `smtps://`; URL credentials are supported) |
+| `PDS_MODERATION_EMAIL_SMTP_URL`, `PDS_MODERATION_EMAIL_ADDRESS` | SMTP URL and sender address for moderation mail |
 | `PDS_MAILGUN_API_KEY`, `PDS_MAILGUN_DOMAIN` | Mailgun credentials |
 | `PDS_MAX_SUBSCRIPTION_BUFFER` | Firehose subscriber buffer size |
 | `PDS_REPO_BACKFILL_LIMIT_MS` | Backfill window for `subscribeRepos` |

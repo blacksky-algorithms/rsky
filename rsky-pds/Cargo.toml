@@ -1,6 +1,6 @@
 [package]
 name = "rsky-pds"
-version = "1.1.0"
+version = "1.1.1"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "Rust reference implementation of an atproto PDS."
 license = "Apache-2.0"
@@ -41,6 +41,7 @@ lexicon_cid = { workspace = true }
 lru = "0.14"
 mailchecker = "6.0.1"
 mailgun-rs = "0.1.10"
+lettre = { version = "0.11.19", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-native-tls"] }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.17", default-features = false }
 opentelemetry = "0.32"
@@ -91,5 +92,4 @@ subtle = "2.6.1"
 [dev-dependencies]
 tempfile = "3.10"
 http-auth-basic = { version = "0.3.5" }
-
 
