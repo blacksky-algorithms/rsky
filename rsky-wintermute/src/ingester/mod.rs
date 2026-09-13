@@ -978,7 +978,7 @@ impl IngesterManager {
             // Resolve DID to get current handle from DID document
             let mut resolver = IdResolver::new(IdentityResolverOpts {
                 timeout: Some(std::time::Duration::from_secs(5)),
-                plc_url: None,
+                plc_url: std::env::var("PLC_URL").ok(),
                 did_cache: None,
                 backup_nameservers: None,
             });
@@ -1124,7 +1124,7 @@ impl IngesterManager {
         use rsky_identity::types::IdentityResolverOpts;
         let resolver = IdResolver::new(IdentityResolverOpts {
             timeout: Some(std::time::Duration::from_secs(5)),
-            plc_url: None,
+            plc_url: std::env::var("PLC_URL").ok(),
             did_cache: None,
             backup_nameservers: None,
         });

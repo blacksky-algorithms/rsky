@@ -95,6 +95,8 @@ curl https://localhost:9000/xrpc/com.atproto.sync.listHosts?limit=10
 
 ## Logging
 
+`RELAY_PLC_URL` points the resolver at a PLC directory other than `https://plc.directory`.
+
 rsky-relay uses the `RUST_LOG` environment variable to control log levels. Example:
 
 ```bash

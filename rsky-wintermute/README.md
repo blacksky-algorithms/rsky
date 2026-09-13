@@ -96,6 +96,7 @@ RUST_LOG=info \
 |----------|---------|-------------|
 | `LABELER_HOSTS` | (empty) | Comma-separated labeler hosts for label subscription |
 | `METRICS_PORT` | `9090` | Port for Prometheus metrics endpoint |
+| `PLC_URL` | `https://plc.directory` | PLC directory used to resolve DID documents |
 | `RUST_LOG` | (none) | Log level (`error`, `warn`, `info`, `debug`, `trace`) |
 | `INDEXER_WORKERS` | `16` | Concurrent index workers per queue |
 | `INDEXER_BATCH_SIZE` | `1000` | Records per batch (test only) |

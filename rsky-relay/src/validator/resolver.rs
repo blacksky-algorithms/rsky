@@ -43,7 +43,14 @@ const TCP_KEEPALIVE: Duration = Duration::from_secs(300);
 // their next event once capacity frees.
 const MAX_INFLIGHT_FETCHES: usize = 4096;
 
-const PLC_URL: &str = "https://plc.directory";
+/// The PLC directory to resolve against; `RELAY_PLC_URL` overrides the
+/// public directory for a private deployment.
+static PLC_URL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    std::env::var("RELAY_PLC_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "https://plc.directory".to_owned())
+});
 const PLC_EXPORT: &str = "export?count=1000&after";
 const DOC_PATH: &str = ".well-known/did.json";
 
@@ -203,11 +210,17 @@ impl Resolver {
             (self.client.get(format!("https://{web}/{DOC_PATH}")), Query::Did(did.to_owned()))
         } else if let (Some(did), Some(plc)) = (did, plc) {
             tracing::trace!("fetching did");
-            (self.client.get(format!("{PLC_URL}/did:plc:{plc}")), Query::Did(did.to_owned()))
+            (
+                self.client.get(format!("{}/did:plc:{plc}", PLC_URL.as_str())),
+                Query::Did(did.to_owned()),
+            )
         } else if let Some(after) = self.after.take() {
             tracing::trace!(%after, "fetching after");
             self.last = Instant::now();
-            (self.client.get(format!("{PLC_URL}/{PLC_EXPORT}={after}")), Query::Export(after))
+            (
+                self.client.get(format!("{}/{PLC_EXPORT}={after}", PLC_URL.as_str())),
+                Query::Export(after),
+            )
         } else {
             return;
         };
