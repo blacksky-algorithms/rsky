@@ -28,7 +28,10 @@ pub type WriteNotice = (String, String);
 pub struct ServiceAuthClaims {
     pub iss: String,
     pub aud: String,
+    pub lxm: String,
+    pub iat: u64,
     pub exp: u64,
+    pub jti: String,
 }
 
 /// Verify a service-auth bearer JWT from the space host: `iss` is the
@@ -42,6 +45,24 @@ pub fn verify_service_auth(
     did_key: &str,
     now: u64,
 ) -> Result<()> {
+    verify_service_auth_method(
+        jwt,
+        expected_iss,
+        expected_aud,
+        "com.atproto.space.notifyWrite",
+        did_key,
+        now,
+    )
+}
+
+pub fn verify_service_auth_method(
+    jwt: &str,
+    expected_iss: &str,
+    expected_aud: &str,
+    expected_lxm: &str,
+    did_key: &str,
+    now: u64,
+) -> Result<()> {
     let claims = decode_claims(jwt)?;
     if claims.iss != expected_iss {
         return Err(rsky_space::SpaceError::InvalidClaim("iss != space host".into()).into());
@@ -49,7 +70,12 @@ pub fn verify_service_auth(
     if claims.aud != expected_aud {
         return Err(rsky_space::SpaceError::InvalidClaim("aud != this syncer".into()).into());
     }
-    if now >= claims.exp {
+    if claims.lxm != expected_lxm
+        || claims.jti.is_empty()
+        || claims.iat > now.saturating_add(30)
+        || claims.exp <= now
+        || claims.exp.saturating_sub(claims.iat) > 60
+    {
         return Err(rsky_space::SpaceError::Expired.into());
     }
     let parts: Vec<&str> = jwt.split('.').collect();
@@ -97,6 +123,8 @@ pub struct NotifyState {
     pub resolver: Arc<dyn CommitKeyResolver>,
     pub index: Arc<dyn SpaceIndex>,
     pub tx: mpsc::Sender<WriteNotice>,
+    pub refresh_tx: mpsc::Sender<()>,
+    pub refresh_issuer: Option<String>,
     pub now_fn: fn() -> u64,
 }
 
@@ -108,6 +136,7 @@ pub fn router(state: NotifyState) -> Router {
             "/xrpc/com.atproto.space.notifySpaceDeleted",
             post(notify_space_deleted),
         )
+        .route("/internal/v1/spaces/refresh", post(refresh_spaces))
         .with_state(state)
 }
 
@@ -163,7 +192,12 @@ fn error_body(error: &str, message: impl std::fmt::Display) -> Json<Value> {
     Json(json!({ "error": error, "message": message.to_string() }))
 }
 
-async fn authenticate(headers: &HeaderMap, state: &NotifyState, space_uri: &str) -> Result<()> {
+async fn authenticate(
+    headers: &HeaderMap,
+    state: &NotifyState,
+    space_uri: &str,
+    method: &str,
+) -> Result<()> {
     let authority = rsky_space::space_id::SpaceId::parse(space_uri)?.authority;
     let jwt = headers
         .get(header::AUTHORIZATION)
@@ -175,10 +209,11 @@ async fn authenticate(headers: &HeaderMap, state: &NotifyState, space_uri: &str)
             ))
         })?;
     let did_key = state.resolver.signing_key(&authority).await?;
-    verify_service_auth(
+    verify_service_auth_method(
         jwt,
         &authority,
         &state.service_identity,
+        method,
         &did_key,
         (state.now_fn)(),
     )
@@ -195,7 +230,14 @@ async fn notify_write(
             error_body("InvalidRequest", "space is not synced by this daemon"),
         );
     }
-    if let Err(e) = authenticate(&headers, &state, &input.space).await {
+    if let Err(e) = authenticate(
+        &headers,
+        &state,
+        &input.space,
+        "com.atproto.space.notifyWrite",
+    )
+    .await
+    {
         return (
             StatusCode::UNAUTHORIZED,
             error_body("AuthenticationRequired", e),
@@ -222,7 +264,14 @@ async fn notify_space_deleted(
             error_body("InvalidRequest", "space is not synced by this daemon"),
         );
     }
-    if let Err(e) = authenticate(&headers, &state, &input.space).await {
+    if let Err(e) = authenticate(
+        &headers,
+        &state,
+        &input.space,
+        "com.atproto.space.notifySpaceDeleted",
+    )
+    .await
+    {
         return (
             StatusCode::UNAUTHORIZED,
             error_body("AuthenticationRequired", e),
@@ -236,6 +285,60 @@ async fn notify_space_deleted(
         );
     }
     (StatusCode::OK, Json(json!({})))
+}
+
+async fn refresh_spaces(
+    State(state): State<NotifyState>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<Value>) {
+    let Some(expected_issuer) = state.refresh_issuer.as_deref() else {
+        return (
+            StatusCode::NOT_FOUND,
+            error_body("NotFound", "refresh is disabled"),
+        );
+    };
+    let jwt = match headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        Some(value) => value,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                error_body("AuthenticationRequired", "missing bearer token"),
+            )
+        }
+    };
+    let did_key = match state.resolver.signing_key(expected_issuer).await {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                error_body("AuthenticationRequired", error),
+            )
+        }
+    };
+    if let Err(error) = verify_service_auth_method(
+        jwt,
+        expected_issuer,
+        &state.service_identity,
+        "community.blacksky.internal.spaceRefresh",
+        &did_key,
+        (state.now_fn)(),
+    ) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            error_body("AuthenticationRequired", error),
+        );
+    }
+    if state.refresh_tx.send(()).await.is_err() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            error_body("ShuttingDown", "refresh queue closed"),
+        );
+    }
+    (StatusCode::ACCEPTED, Json(json!({})))
 }
 
 #[cfg(test)]
@@ -263,9 +366,24 @@ mod tests {
     }
 
     fn service_jwt(secret: &SecretKey, iss: &str, aud: &str, exp: u64) -> String {
+        service_jwt_method(secret, iss, aud, exp, "com.atproto.space.notifyWrite")
+    }
+
+    fn service_jwt_method(
+        secret: &SecretKey,
+        iss: &str,
+        aud: &str,
+        exp: u64,
+        method: &str,
+    ) -> String {
         let header = URL_SAFE_NO_PAD.encode(br#"{"typ":"JWT","alg":"ES256K"}"#);
-        let payload =
-            URL_SAFE_NO_PAD.encode(json!({ "iss": iss, "aud": aud, "exp": exp }).to_string());
+        let payload = URL_SAFE_NO_PAD.encode(
+            json!({
+                "iss": iss, "aud": aud, "lxm": method,
+                "iat": exp - 60, "exp": exp, "jti": "test-jti"
+            })
+            .to_string(),
+        );
         let input = format!("{header}.{payload}");
         let digest = Sha256::digest(input.as_bytes());
         let msg = Message::from_digest_slice(&digest).unwrap();
@@ -308,6 +426,8 @@ mod tests {
             resolver: Arc::new(FixedKey(did_key.to_string())),
             index,
             tx,
+            refresh_tx: mpsc::channel(1).0,
+            refresh_issuer: None,
             now_fn: fixed_now,
         }
     }
@@ -484,6 +604,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authenticated_refresh_wakes_discovery_without_carrying_state() {
+        let (secret, did_key) = host_key();
+        let (tx, _rx) = mpsc::channel(4);
+        let (refresh_tx, mut refresh_rx) = mpsc::channel(1);
+        let mut notify_state = state(&did_key, Arc::new(InMemoryIndex::new()), tx);
+        notify_state.refresh_issuer = Some(AUTHORITY.to_string());
+        notify_state.refresh_tx = refresh_tx;
+        let app = router(notify_state);
+        let jwt = service_jwt_method(
+            &secret,
+            AUTHORITY,
+            SYNCER,
+            NOW + 60,
+            "community.blacksky.internal.spaceRefresh",
+        );
+        let resp = app
+            .oneshot(request(
+                "/internal/v1/spaces/refresh",
+                Some(&jwt),
+                json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        assert!(refresh_rx.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn refresh_rejects_a_token_bound_to_another_method() {
+        let (secret, did_key) = host_key();
+        let (tx, _rx) = mpsc::channel(4);
+        let (refresh_tx, _refresh_rx) = mpsc::channel(1);
+        let mut notify_state = state(&did_key, Arc::new(InMemoryIndex::new()), tx);
+        notify_state.refresh_issuer = Some(AUTHORITY.to_string());
+        notify_state.refresh_tx = refresh_tx;
+        let app = router(notify_state);
+        let jwt = service_jwt(&secret, AUTHORITY, SYNCER, NOW + 60);
+        let resp = app
+            .oneshot(request(
+                "/internal/v1/spaces/refresh",
+                Some(&jwt),
+                json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn notify_space_deleted_purges_the_index() {
         let (secret, did_key) = host_key();
         let index = Arc::new(InMemoryIndex::new());
@@ -493,7 +662,13 @@ mod tests {
             .unwrap();
         let (tx, _rx) = mpsc::channel(4);
         let app = router(state(&did_key, index.clone(), tx));
-        let jwt = service_jwt(&secret, AUTHORITY, SYNCER, NOW + 60);
+        let jwt = service_jwt_method(
+            &secret,
+            AUTHORITY,
+            SYNCER,
+            NOW + 60,
+            "com.atproto.space.notifySpaceDeleted",
+        );
 
         let resp = app
             .oneshot(request(
@@ -524,7 +699,13 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
-        let jwt = service_jwt(&secret, AUTHORITY, SYNCER, NOW + 60);
+        let jwt = service_jwt_method(
+            &secret,
+            AUTHORITY,
+            SYNCER,
+            NOW + 60,
+            "com.atproto.space.notifySpaceDeleted",
+        );
         let resp = app
             .oneshot(request(
                 "/xrpc/com.atproto.space.notifySpaceDeleted",
@@ -588,7 +769,13 @@ mod tests {
         let (secret, did_key) = host_key();
         let (tx, _rx) = mpsc::channel(4);
         let app = router(state(&did_key, Arc::new(FailingIndex), tx));
-        let jwt = service_jwt(&secret, AUTHORITY, SYNCER, NOW + 60);
+        let jwt = service_jwt_method(
+            &secret,
+            AUTHORITY,
+            SYNCER,
+            NOW + 60,
+            "com.atproto.space.notifySpaceDeleted",
+        );
 
         let resp = app
             .oneshot(request(
@@ -650,6 +837,8 @@ mod tests {
             ]))),
             index: Arc::new(InMemoryIndex::new()),
             tx,
+            refresh_tx: mpsc::channel(1).0,
+            refresh_issuer: None,
             now_fn: fixed_now,
         });
 

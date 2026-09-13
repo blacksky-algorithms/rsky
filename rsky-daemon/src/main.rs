@@ -189,6 +189,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let registry = SpaceRegistry::new();
 
     let (notify_tx, notify_rx) = mpsc::channel(1024);
+    let (refresh_tx, refresh_rx) = mpsc::channel(64);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let notify_endpoint = cfg.notify_endpoint();
     let notify_state = NotifyState {
@@ -200,6 +201,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         resolver: keys.clone(),
         index: Arc::new(InMemoryIndex::new()),
         tx: notify_tx,
+        refresh_tx,
+        refresh_issuer: (!cfg.refresh_issuer_did.is_empty())
+            .then(|| cfg.refresh_issuer_did.clone()),
         now_fn: rsky_daemon::unix_now,
     };
     let listener = tokio::net::TcpListener::bind(&cfg.notify_bind).await?;
@@ -273,6 +277,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         host,
         keys,
         notify_rx,
+        refresh_rx,
         shutdown_rx,
     ));
 

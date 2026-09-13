@@ -113,6 +113,10 @@ pub struct Config {
     #[arg(long, env = "DAEMON_NOTIFY_ENDPOINT", default_value = "")]
     pub notify_endpoint: String,
 
+    /// Issuer DID allowed to wake discovery after a committed lifecycle change.
+    #[arg(long, env = "DAEMON_REFRESH_ISSUER_DID", default_value = "")]
+    pub refresh_issuer_did: String,
+
     /// SQLite path for the synced index (empty = in-memory, dev only).
     #[arg(long, env = "DAEMON_INDEX_DB_PATH", default_value = "")]
     pub index_db_path: String,

@@ -58,6 +58,7 @@ pub async fn run_multi(
     host: Arc<dyn SpaceHostClient>,
     keys: Arc<dyn CommitKeyResolver>,
     mut notices: mpsc::Receiver<WriteNotice>,
+    mut refreshes: mpsc::Receiver<()>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     struct Worker {
@@ -84,6 +85,7 @@ pub async fn run_multi(
                 }
                 registry.replace(workers.keys().cloned().collect());
             }
+            Some(()) = refreshes.recv() => refresh.reset_immediately(),
             Some(notice) = notices.recv() => { if let Some(worker) = workers.get(&notice.0) { let _ = worker.notices.send(notice).await; } else { tracing::warn!(space = %notice.0, "notice for a space we do not sync"); } }
         }
     }
