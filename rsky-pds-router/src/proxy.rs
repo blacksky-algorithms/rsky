@@ -144,8 +144,15 @@ pub fn empty_body() -> Body {
 
 /// A JSON error response in the XRPC shape.
 pub fn json_error(status: StatusCode, error: &str, message: &str) -> Response<Body> {
-    let body = serde_json::json!({ "error": error, "message": message }).to_string();
-    let mut response = Response::new(full_body(Bytes::from(body)));
+    json_response(
+        status,
+        &serde_json::json!({ "error": error, "message": message }),
+    )
+}
+
+/// A JSON document as a response.
+pub fn json_response(status: StatusCode, value: &serde_json::Value) -> Response<Body> {
+    let mut response = Response::new(full_body(Bytes::from(value.to_string())));
     *response.status_mut() = status;
     response.headers_mut().insert(
         http::header::CONTENT_TYPE,

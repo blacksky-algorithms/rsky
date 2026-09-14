@@ -17,11 +17,17 @@ use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// The most of a JSON mutation body the router reads to find its target.
 pub const JSON_BODY_LIMIT: usize = 1024 * 1024;
+
+/// How long the health answer reuses the version a backend reported.
+const VERSION_TTL: Duration = Duration::from_secs(60);
+
+/// How long the health answer waits for the default read backend's version.
+const VERSION_DEADLINE: Duration = Duration::from_secs(2);
 
 /// OAuth UI API endpoints that only create, list, or revoke device and
 /// OAuth sessions; they touch no repository or account state.
@@ -54,6 +60,7 @@ pub struct Router {
     pub lookup: AccountLookup,
     pub forwarder: Forwarder,
     round_robin: AtomicUsize,
+    backend_version: Mutex<Option<(Instant, String)>>,
 }
 
 impl Router {
@@ -72,7 +79,58 @@ impl Router {
             lookup,
             forwarder: Forwarder::new(),
             round_robin: AtomicUsize::new(0),
+            backend_version: Mutex::new(None),
         }
+    }
+
+    /// The health answer keeps the reference shape, `{"version": ...}`,
+    /// carrying the default read backend's version. The version is learned
+    /// at most once a minute and the router's own stands in while the
+    /// backend is silent, so the probe never depends on a backend.
+    async fn health(&self) -> Response<Body> {
+        let version = self.backend_version().await;
+        let mut response =
+            proxy::json_response(StatusCode::OK, &serde_json::json!({ "version": version }));
+        proxy::stamp(&mut response, "router", "health");
+        response
+    }
+
+    async fn backend_version(&self) -> String {
+        if let Some((learned, version)) = self.backend_version.lock().unwrap().as_ref() {
+            if learned.elapsed() < VERSION_TTL {
+                return version.clone();
+            }
+        }
+        let upstream = match self.routing.policy().reads_default {
+            Backend::Rsky => self.upstreams.rsky.clone(),
+            Backend::Ts => self.ts_pool(ReadClass::Main),
+        };
+        let forwarded = self
+            .forwarder
+            .forward(
+                &upstream,
+                Method::GET,
+                "/xrpc/_health",
+                &HeaderMap::new(),
+                proxy::empty_body(),
+                VERSION_DEADLINE,
+            )
+            .await;
+        let reported = match forwarded {
+            Ok(response) => match response.into_body().collect().await {
+                Ok(collected) => serde_json::from_slice::<Value>(&collected.to_bytes())
+                    .ok()
+                    .and_then(|value| value.get("version")?.as_str().map(str::to_owned)),
+                Err(_) => None,
+            },
+            Err(err) => {
+                tracing::warn!(%upstream, %err, "the default read backend reported no version");
+                None
+            }
+        };
+        let version = reported.unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned());
+        *self.backend_version.lock().unwrap() = Some((Instant::now(), version.clone()));
+        version
     }
 
     /// The TypeScript pool a read class falls back to.
@@ -596,11 +654,7 @@ impl Router {
             .unwrap_or_else(|| path.clone());
         let body: Body = body.map_err(proxy::BoxError::from).boxed_unsync();
         match classify::classify(&parts.method, &path, query.as_deref(), &parts.headers) {
-            Kind::RouterHealth => {
-                let mut response = proxy::json_error(StatusCode::OK, "ok", "router");
-                proxy::stamp(&mut response, "router", "health");
-                response
-            }
+            Kind::RouterHealth => self.health().await,
             Kind::OauthAs => {
                 let started = Instant::now();
                 let result = self

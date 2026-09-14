@@ -37,6 +37,14 @@ async fn echo(
     body: Bytes,
 ) -> (StatusCode, [(&'static str, &'static str); 1], String) {
     mock.hits.fetch_add(1, Ordering::SeqCst);
+    if uri.path() == "/xrpc/_health" {
+        let health = json!({ "version": format!("{}-version", mock.name) }).to_string();
+        return (
+            StatusCode::OK,
+            [("content-type", "application/json")],
+            health,
+        );
+    }
     if headers.contains_key("x-mock-hold") {
         mock.release.notified().await;
     }
@@ -348,13 +356,30 @@ fn canary_policy(extra: &str) -> String {
 }
 
 #[tokio::test]
-async fn health_is_answered_by_the_router_itself() {
+async fn health_carries_the_default_read_backend_version() {
     let h = Harness::start().await;
     let answer = h.get("/xrpc/_health").await;
     assert_eq!(answer.status, 200);
     assert_eq!(answer.backend, "router");
     assert_eq!(answer.reason, "health");
+    assert_eq!(answer.body["version"], "ts-read-1-version");
     assert_eq!(h.ts_main.hits() + h.rsky.hits(), 0);
+    h.get("/xrpc/_health").await;
+    assert_eq!(
+        h.ts_read[0].hits(),
+        1,
+        "the version is reused, not re-fetched"
+    );
+}
+
+#[tokio::test]
+async fn health_stands_on_its_own_when_the_backend_is_silent() {
+    let h = Harness::start_with(Some(Mock::closed("rsky").await)).await;
+    h.set_policy("version = 1\n[reads]\ndefault = \"rsky\"\n[writes]\n");
+    let answer = h.get("/xrpc/_health").await;
+    assert_eq!(answer.status, 200);
+    assert_eq!(answer.backend, "router");
+    assert_eq!(answer.body["version"], env!("CARGO_PKG_VERSION"));
 }
 
 #[tokio::test]
