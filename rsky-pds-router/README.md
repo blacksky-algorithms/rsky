@@ -42,7 +42,8 @@ A mutation's targets decide its backend:
 | a target is in `writes.canary_fence` | `503 RouterFenced` |
 | a target is in `writes.canary_rsky` and `kill_switch` is set | `503 RouterKillSwitch` |
 | a target is in `writes.canary_rsky` and the allowlist entry is not `active` | `503 RouterNotAdmitted` |
-| a target is in `writes.canary_rsky` and the request is an OAuth UI API endpoint | `503 RouterNoEquivalent` |
+| a target is in `writes.canary_rsky` and the request is an OAuth UI API endpoint that changes the account (handle, email, deactivation, deletion, password) | `503 RouterNoEquivalent` |
+| a target is in `writes.canary_rsky` and the request only creates or revokes device or OAuth sessions (`sign-in`, `sign-out`, `revoke-*-session`) | TS, reason `session-ui` |
 | targets are split across writers | `503 RouterSplitTargets` |
 | a target is a canary | rsky |
 | the request cannot be attributed and any canary exists | `503 RouterUnattributable` |

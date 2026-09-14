@@ -1150,6 +1150,31 @@ async fn oauth_ui_api_mutations_reach_ts_for_others_and_503_for_the_canary() {
         )
         .await;
     assert_eq!((canary.status, canary.error()), (503, "RouterNoEquivalent"));
+    // session-only endpoints keep working for a canary on the reference UI
+    let canary_sign_in = h
+        .post(
+            "/@atproto/oauth-provider/~api/sign-in",
+            json!({ "username": "canary.test", "password": "pw" }),
+        )
+        .await;
+    assert_eq!(
+        (
+            canary_sign_in.status,
+            canary_sign_in.served_by(),
+            canary_sign_in.reason.as_str()
+        ),
+        (200, "ts-main", "session-ui")
+    );
+    let canary_sign_out = h
+        .post(
+            "/@atproto/oauth-provider/~api/sign-out",
+            json!({ "did": CANARY }),
+        )
+        .await;
+    assert_eq!(
+        (canary_sign_out.status, canary_sign_out.served_by()),
+        (200, "ts-main")
+    );
     let signout_all = h
         .post(
             "/@atproto/oauth-provider/~api/sign-out",

@@ -23,6 +23,15 @@ use std::time::{Duration, Instant};
 /// The most of a JSON mutation body the router reads to find its target.
 pub const JSON_BODY_LIMIT: usize = 1024 * 1024;
 
+/// OAuth UI API endpoints that only create, list, or revoke device and
+/// OAuth sessions; they touch no repository or account state.
+const SESSION_API_ENDPOINTS: [&str; 4] = [
+    "sign-in",
+    "sign-out",
+    "revoke-account-session",
+    "revoke-oauth-session",
+];
+
 pub struct Upstreams {
     pub ts_main: String,
     pub ts_sync: String,
@@ -394,7 +403,7 @@ impl Router {
                 return response;
             }
         };
-        let (backend, reason) = match self.write_backend(&dids) {
+        let (mut backend, mut reason) = match self.write_backend(&dids) {
             Ok((backend, _)) if proxied => (backend, "proxied"),
             Ok(decision) => decision,
             Err(response) => {
@@ -409,16 +418,25 @@ impl Router {
             }
         };
         if backend == Backend::Rsky && nsid.starts_with("~api/") {
-            METRICS
-                .writes_rejected
-                .with_label_values(&["no-equivalent"])
-                .inc();
-            return refused(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "RouterNoEquivalent",
-                "the account's writer does not serve this endpoint",
-                "no-equivalent",
-            );
+            // Device and OAuth sessions live in the shared account database
+            // and change nothing the account's writer owns, so the reference
+            // UI keeps serving them for an rsky-written account; endpoints
+            // that change the account itself have no rsky equivalent.
+            if SESSION_API_ENDPOINTS.contains(&&nsid["~api/".len()..]) {
+                backend = Backend::Ts;
+                reason = "session-ui";
+            } else {
+                METRICS
+                    .writes_rejected
+                    .with_label_values(&["no-equivalent"])
+                    .inc();
+                return refused(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "RouterNoEquivalent",
+                    "the account's writer does not serve this endpoint",
+                    "no-equivalent",
+                );
+            }
         }
         let upstream = self.write_upstream(backend, nsid);
         let journaled =
