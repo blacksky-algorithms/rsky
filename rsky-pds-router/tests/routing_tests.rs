@@ -1226,11 +1226,23 @@ async fn authorization_server_traffic_passes_through() {
 #[tokio::test]
 async fn unknown_and_unattributable_mutations_are_refused() {
     let h = Harness::start().await;
-    let unknown = h.post("/xrpc/com.example.unknown.mutate", json!({})).await;
+    // a procedure the PDS does not implement itself is one it proxies to
+    // another service, so the router forwards it to the default writer
+    let proxied = h
+        .post_as("/xrpc/community.blacksky.example.doThing", ALICE, json!({}))
+        .await;
     assert_eq!(
-        (unknown.status, unknown.error()),
-        (503, "RouterUnknownMutation")
+        (proxied.status, proxied.served_by(), proxied.reason.as_str()),
+        (200, "ts-main", "proxied")
     );
+    let entry = h
+        .journal()
+        .into_iter()
+        .rev()
+        .find(|entry| entry["phase"] == "start")
+        .expect("the proxied procedure is journaled");
+    assert_eq!(entry["nsid"], "community.blacksky.example.doThing");
+    assert_eq!(entry["backend"], "ts");
     let not_xrpc = h.post("/tls-check", json!({})).await;
     assert_eq!(not_xrpc.status, 503);
     let unknown_api = h
@@ -1328,7 +1340,8 @@ async fn unknown_and_unattributable_mutations_are_refused() {
         (too_large.status, too_large.error()),
         (413, "PayloadTooLarge")
     );
-    assert_eq!(h.ts_main.hits(), 2);
+    // the proxied procedure and the two attributable mutations reached TS
+    assert_eq!(h.ts_main.hits(), 3);
 }
 
 #[tokio::test]
@@ -1380,7 +1393,8 @@ async fn metrics_render_every_family_after_traffic() {
     ));
     h.get(&format!("/xrpc/app.bsky.actor.getProfile?actor={ALICE}"))
         .await;
-    h.post("/xrpc/com.example.unknown", json!({})).await;
+    h.post("/@atproto/oauth-provider/~api/brand-new", json!({}))
+        .await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move {

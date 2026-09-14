@@ -352,17 +352,26 @@ impl Router {
         body: Body,
     ) -> Response<Body> {
         let started = Instant::now();
-        let Some(target) = target else {
-            METRICS
-                .writes_rejected
-                .with_label_values(&["unknown"])
-                .inc();
-            return refused(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "RouterUnknownMutation",
-                "this mutation is not in the router's inventory",
-                "unknown",
-            );
+        // A procedure outside the pinned lexicon set is not a repository
+        // mutation: the PDS's catchall proxies it to the service it names
+        // (chat, appview, moderation), so it follows the default writer and
+        // is journaled like any other. The OAuth UI API is a closed set, so
+        // an endpoint missing from it is still refused.
+        let (target, proxied) = match target {
+            Some(target) => (target, false),
+            None if nsid.starts_with("~api/") => {
+                METRICS
+                    .writes_rejected
+                    .with_label_values(&["unknown"])
+                    .inc();
+                return refused(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "RouterUnknownMutation",
+                    "this mutation is not in the router's inventory",
+                    "unknown",
+                );
+            }
+            None => (Target::None, true),
         };
         // targets read from the body need it buffered; raw bodies never are
         let needs_body = !matches!(target, Target::AuthSubject | Target::None);
@@ -386,6 +395,7 @@ impl Router {
             }
         };
         let (backend, reason) = match self.write_backend(&dids) {
+            Ok((backend, _)) if proxied => (backend, "proxied"),
             Ok(decision) => decision,
             Err(response) => {
                 let reason = response

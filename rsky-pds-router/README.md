@@ -27,9 +27,13 @@ Every request is classified by method, path, query, and headers:
   every mutating XRPC procedure of the pinned lexicon set and every OAuth UI
   API endpoint together with a rule for finding the account it mutates
   (`body.repo`, the bearer subject, `body.did`, an email token resolved
-  through the account database, and so on). A mutation the inventory does not
-  know is refused with `503 RouterUnknownMutation`; a build fails if a
-  procedure from `procedures-0.5.27.txt` is missing from the table.
+  through the account database, and so on). A procedure the inventory does
+  not know is one the PDS does not implement itself and proxies to another
+  service (chat, appview, moderation), so it is forwarded to the default
+  writer with reason `proxied` and journaled; an OAuth UI API endpoint the
+  inventory does not know is refused with `503 RouterUnknownMutation`. A
+  build fails if a procedure from `procedures-0.5.27.txt` is missing from
+  the table.
 
 A mutation's targets decide its backend:
 
