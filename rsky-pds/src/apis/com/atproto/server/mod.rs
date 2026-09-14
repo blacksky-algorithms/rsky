@@ -39,7 +39,7 @@ pub async fn did_doc_for_session(
     if !enabled {
         return None;
     }
-    let lock = id_resolver.id_resolver.write().await;
+    let lock = id_resolver.id_resolver.read().await;
     match lock.did.ensure_resolve(&did.to_string(), None).await {
         Ok(doc) => serde_json::to_value(doc).ok(),
         Err(error) => {
@@ -66,7 +66,7 @@ pub async fn safe_resolve_did_doc(
     did: &String,
     force_refresh: Option<bool>,
 ) -> Result<Option<DidDocument>> {
-    let lock = id_resolver.id_resolver.write().await;
+    let lock = id_resolver.id_resolver.read().await;
     match lock.did.resolve(did.clone(), force_refresh).await {
         Ok(did_doc) => Ok(did_doc),
         Err(err) => {

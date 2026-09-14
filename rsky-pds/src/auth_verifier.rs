@@ -1311,7 +1311,7 @@ pub async fn verify_service_jwt(
                 } else {
                     "atproto"
                 };
-                let lock = id_resolver.id_resolver.write().await;
+                let lock = id_resolver.id_resolver.read().await;
                 let did_doc: DidDocument =
                     match lock.did.ensure_resolve(&did, Some(force_refresh)).await {
                         Err(err) => bail!("could not resolve iss did: `{err}`"),

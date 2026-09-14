@@ -18,7 +18,7 @@ async fn inner_describe_repo(
     account_manager: AccountManager,
 ) -> Result<DescribeRepoOutput, ApiError> {
     let account = assert_repo_availability(&repo, false, &account_manager).await?;
-    let lock = id_resolver.id_resolver.write().await;
+    let lock = id_resolver.id_resolver.read().await;
     let did_doc: DidDocument = match lock.did.ensure_resolve(&account.did, None).await {
         Err(err) => {
             return Err(ApiError::InvalidRequest(format!(

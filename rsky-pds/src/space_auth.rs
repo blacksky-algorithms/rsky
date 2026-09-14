@@ -154,7 +154,7 @@ pub async fn resolve_signing_did_key(
         return Ok(encode_did_key(&keypair.public_key()));
     }
     let did_doc = {
-        let lock = id_resolver.id_resolver.write().await;
+        let lock = id_resolver.id_resolver.read().await;
         lock.did.ensure_resolve(&did.to_string(), None).await?
     };
     for key_id in key_ids {
