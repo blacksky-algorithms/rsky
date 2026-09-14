@@ -351,6 +351,55 @@ impl Answer {
     }
 }
 
+/// After the cutover the router runs with `writes.default = "rsky"` and the
+/// allowlist default `active`. Every account, not only the named canaries,
+/// then writes to rsky; a fleet-wide draining default stops new writes.
+#[tokio::test]
+async fn after_the_cutover_every_account_writes_to_rsky() {
+    let h = Harness::start().await;
+    h.set_policy("version = 1\n[reads]\ndefault = \"rsky\"\n[writes]\ndefault = \"rsky\"\n");
+    h.set_allowlist("version = 1\ndefault = \"active\"\n[entries]\n");
+
+    // an ordinary, never-pinned account's write now lands on rsky
+    let create = h
+        .post_as(
+            "/xrpc/com.atproto.repo.createRecord",
+            ALICE,
+            json!({ "repo": "alice.test", "collection": "app.bsky.feed.post", "record": { "text": "hi" } }),
+        )
+        .await;
+    assert_eq!((create.status, create.served_by()), (200, "rsky"));
+    assert_eq!(create.reason.as_str(), "default");
+
+    // and so does its OAuth token grant, rather than the retired TS server
+    let grant = h
+        .send(
+            h.client
+                .post(format!("{}/oauth/token", h.url))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body("grant_type=refresh_token&refresh_token=ref-alice"),
+        )
+        .await;
+    assert_eq!(
+        (grant.served_by(), grant.reason.as_str()),
+        ("rsky", "oauth-canary")
+    );
+
+    // a fleet-wide draining default fences new writes for an ordinary account
+    h.set_allowlist("version = 1\ndefault = \"draining\"\n[entries]\n");
+    let drained = h
+        .post_as(
+            "/xrpc/com.atproto.repo.createRecord",
+            ALICE,
+            json!({ "repo": "alice.test" }),
+        )
+        .await;
+    assert_eq!(
+        (drained.status, drained.error()),
+        (503, "RouterNotAdmitted")
+    );
+}
+
 fn canary_policy(extra: &str) -> String {
     format!("version = 1\n{extra}[reads]\n[writes]\ncanary_rsky = [\"{CANARY}\"]\n")
 }
@@ -834,7 +883,7 @@ async fn mutations_default_to_ts_main_with_raw_uploads_on_the_sync_worker() {
     assert_eq!((create.status, create.served_by()), (200, "ts-main"));
     assert_eq!(
         (create.backend.as_str(), create.reason.as_str()),
-        ("ts", "target")
+        ("ts", "default")
     );
     assert!(create.body["body"]
         .as_str()

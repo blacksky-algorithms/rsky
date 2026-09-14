@@ -209,7 +209,8 @@ impl Router {
     fn write_backend(&self, dids: &[String]) -> Result<(Backend, &'static str), Response<Body>> {
         let policy = self.routing.policy();
         let allowlist = self.routing.allowlist();
-        let mut backend = None;
+        let mut backend: Option<Backend> = None;
+        let mut reason: &'static str = "default";
         for did in dids {
             if policy.canary_fence.contains(did) {
                 return Err(refused(
@@ -219,7 +220,18 @@ impl Router {
                     "fenced",
                 ));
             }
-            if policy.canary_rsky.contains(did) {
+            // An account writes to rsky when it is a named canary or, after
+            // the cutover, when rsky is the fleet default. Either way rsky is
+            // its single writer, so the kill switch and admission gate apply
+            // the same way and a rollback that sets the allowlist default to
+            // draining stops new writes for every account, not only canaries.
+            let is_canary = policy.canary_rsky.contains(did);
+            let want = if is_canary {
+                Backend::Rsky
+            } else {
+                policy.writes_default
+            };
+            if want == Backend::Rsky {
                 if policy.kill_switch {
                     return Err(refused(
                         StatusCode::SERVICE_UNAVAILABLE,
@@ -236,36 +248,24 @@ impl Router {
                         "not-admitted",
                     ));
                 }
-                match backend {
-                    None | Some(Backend::Rsky) => backend = Some(Backend::Rsky),
-                    Some(Backend::Ts) => {
-                        return Err(refused(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "RouterSplitTargets",
-                            "the request names accounts on different writers",
-                            "split-targets",
-                        ))
-                    }
+            }
+            match backend {
+                None => {
+                    backend = Some(want);
+                    reason = if is_canary { "canary" } else { "default" };
                 }
-            } else {
-                match backend {
-                    None | Some(Backend::Ts) => backend = Some(Backend::Ts),
-                    Some(Backend::Rsky) => {
-                        return Err(refused(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "RouterSplitTargets",
-                            "the request names accounts on different writers",
-                            "split-targets",
-                        ))
-                    }
+                Some(current) if current == want => {}
+                Some(_) => {
+                    return Err(refused(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "RouterSplitTargets",
+                        "the request names accounts on different writers",
+                        "split-targets",
+                    ))
                 }
             }
         }
-        Ok(match backend {
-            Some(Backend::Rsky) => (Backend::Rsky, "canary"),
-            Some(Backend::Ts) => (Backend::Ts, "target"),
-            None => (policy.writes_default, "default"),
-        })
+        Ok((backend.unwrap_or(policy.writes_default), reason))
     }
 
     fn write_upstream(&self, backend: Backend, nsid: &str) -> String {

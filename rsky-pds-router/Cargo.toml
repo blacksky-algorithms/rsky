@@ -1,6 +1,6 @@
 [package]
 name = "rsky-pds-router"
-version = "0.3.2"
+version = "0.3.3"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "Stateless request router in front of two PDS implementations sharing one data directory"
 license = "Apache-2.0"
