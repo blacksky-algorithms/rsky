@@ -1205,27 +1205,23 @@ pub async fn accepted_mime(mime: String, accepted: Vec<String>) -> bool {
     accepted.contains(&mime)
 }
 
+/// A record's blob reference that disagrees with the stored blob.
+#[derive(Debug, thiserror::Error)]
+pub enum BlobMismatch {
+    #[error("Referenced Mimetype does not match stored blob. Expected: {expected}, Got: {got}")]
+    MimeType { expected: String, got: String },
+}
+
+/// The stored blob must be what the record says it is. Like the
+/// reference, this checks the mime type only; lexicon size and type
+/// constraints are not enforced on writes.
 pub async fn verify_blob(blob: &PreparedBlobRef, found: &BlobRow) -> Result<()> {
-    if let Some(max_size) = blob.constraints.max_size {
-        if found.size as usize > max_size {
-            bail!(
-                "BlobTooLarge: This file is too large. It is {:?} but the maximum size is {:?}",
-                found.size,
-                max_size
-            )
-        }
-    }
     if blob.mime_type != found.mime_type {
-        bail!("InvalidMimeType: Referenced MimeType does not match stored blob. Expected: {:?}, Got: {:?}",found.mime_type, blob.mime_type)
-    }
-    if let Some(ref accept) = blob.constraints.accept {
-        if !accepted_mime(blob.mime_type.clone(), accept.clone()).await {
-            bail!(
-                "Wrong type of file. It is {:?} but it must match {:?}.",
-                blob.mime_type,
-                accept
-            )
+        return Err(BlobMismatch::MimeType {
+            expected: found.mime_type.clone(),
+            got: blob.mime_type.clone(),
         }
+        .into());
     }
     Ok(())
 }
@@ -1344,32 +1340,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verify_blob_enforces_constraints() {
+    async fn verify_blob_checks_the_stored_mime_type_only() {
         let t = test_reader().await;
         let blob = upload(&t, b"constrained").await;
         let mut wrong_mime = prepared_ref(&blob);
         wrong_mime.mime_type = "image/png".to_owned();
-        assert!(t
+        let err = t
             .reader
             .verify_blob_and_make_permanent(wrong_mime)
             .await
-            .is_err());
+            .unwrap_err();
+        assert!(err.downcast_ref::<BlobMismatch>().is_some());
+        assert_eq!(
+            err.to_string(),
+            "Referenced Mimetype does not match stored blob. Expected: text/plain, Got: image/png"
+        );
 
+        // lexicon constraints are not enforced on writes, as in the reference
         let mut too_large = prepared_ref(&blob);
         too_large.constraints.max_size = Some(1);
-        assert!(t
-            .reader
+        t.reader
             .verify_blob_and_make_permanent(too_large)
             .await
-            .is_err());
+            .unwrap();
 
         let mut wrong_accept = prepared_ref(&blob);
         wrong_accept.constraints.accept = Some(vec!["image/*".to_owned()]);
-        assert!(t
-            .reader
+        t.reader
             .verify_blob_and_make_permanent(wrong_accept)
             .await
-            .is_err());
+            .unwrap();
 
         let mut accept_any = prepared_ref(&blob);
         accept_any.constraints.accept = Some(vec!["*/*".to_owned()]);
