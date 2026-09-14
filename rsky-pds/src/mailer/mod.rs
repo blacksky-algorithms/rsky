@@ -11,6 +11,7 @@ extern crate mailgun_rs;
 use anyhow::{anyhow, bail, Context, Result};
 use lettre::message::{header, Mailbox, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
+use lettre::transport::smtp::client::{Tls, TlsParameters};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message as Mail, Tokio1Executor};
 use mailgun_rs::{EmailAddress, Mailgun, MailgunRegion, Message};
 use std::collections::HashMap;
@@ -152,8 +153,9 @@ pub fn plain_text(html: &str) -> String {
 }
 
 /// An SMTP transport from a `smtp://` or `smtps://` URL as the reference
-/// reads it: `smtps` for implicit TLS, `smtp` for STARTTLS, and `smtp`
-/// with `ignoreTLS=true` for a plain connection; credentials in the URL.
+/// reads it: `smtps` for implicit TLS, `smtp` for STARTTLS when the server
+/// offers it and a plain session otherwise, and `smtp` with
+/// `ignoreTLS=true` for a plain session only; credentials in the URL.
 pub fn smtp_transport(url: &str) -> Result<AsyncSmtpTransport<Tokio1Executor>> {
     let parsed = url::Url::parse(url).with_context(|| "PDS_EMAIL_SMTP_URL is not a URL")?;
     let host = parsed
@@ -172,8 +174,9 @@ pub fn smtp_transport(url: &str) -> Result<AsyncSmtpTransport<Tokio1Executor>> {
         }
         ("smtp", true) => AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&host)
             .port(parsed.port().unwrap_or(25)),
-        ("smtp", false) => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&host)?
-            .port(parsed.port().unwrap_or(587)),
+        ("smtp", false) => AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&host)
+            .port(parsed.port().unwrap_or(587))
+            .tls(Tls::Opportunistic(TlsParameters::new(host.clone())?)),
         (other, _) => bail!("unsupported SMTP scheme {other}"),
     };
     if !parsed.username().is_empty() {
@@ -539,6 +542,7 @@ pub(crate) mod tests {
         assert!(smtp_transport("smtps://user:p%40ss@mail.example.test:465").is_ok());
         assert!(smtp_transport("smtp://mail.example.test:587").is_ok());
         assert!(smtp_transport("smtp://127.0.0.1:2525?ignoreTLS=true").is_ok());
+        assert!(smtp_transport("smtp://127.0.0.1:2525").is_ok());
         assert!(smtp_transport("http://mail.example.test").is_err());
         assert!(smtp_transport("not a url").is_err());
         assert!(smtp_transport("smtp:///nohost").is_err());
@@ -703,13 +707,11 @@ pub(crate) mod tests {
             .await
             .is_err());
 
-        // html bodies go out with a text alternative and an explicit sender
+        // html bodies go out with a text alternative and an explicit sender;
+        // a plain smtp URL stays plain when the server offers no STARTTLS
         let (port, captured) = smtp_server(false);
-        let mailer = Mailer::smtp(
-            &format!("smtp://127.0.0.1:{port}?ignoreTLS=true"),
-            "noreply@example.test",
-        )
-        .unwrap();
+        let mailer =
+            Mailer::smtp(&format!("smtp://127.0.0.1:{port}"), "noreply@example.test").unwrap();
         let from: Mailbox = "Moderation <mod@example.test>".parse().unwrap();
         mailer
             .send_html(
