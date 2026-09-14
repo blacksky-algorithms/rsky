@@ -1363,4 +1363,6 @@ fn a_store_without_the_publication_journal_owes_no_intents() {
         .unwrap();
     assert!(super::pending_intents_in(&conn).unwrap().is_empty());
     assert!(super::all_intents_in(&conn).unwrap().is_empty());
+    assert!(!super::local_table_exists(&conn, "repair_step").unwrap());
+    assert!(super::local_table_exists(&conn, "repo_root").unwrap());
 }

@@ -185,16 +185,20 @@ fn stored_intent_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredInt
 const SELECT_INTENT: &str = "SELECT id, rev, cid, \"eventType\", event, state, \"seqFloor\", seq \
                              FROM publish_intent";
 
-/// Whether the store carries rsky's publication journal. A store another
+/// Whether the store carries one of rsky's local tables. A store another
 /// implementation created, or one restored from such a backup, has none
-/// and owes nothing until its first admitted write migrates it.
-fn has_intent_journal(conn: &rusqlite::Connection) -> Result<bool> {
+/// of them and owes nothing until its first admitted write migrates it.
+pub fn local_table_exists(conn: &rusqlite::Connection, name: &str) -> Result<bool> {
     let count: i64 = conn.query_row(
-        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'publish_intent'",
-        [],
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [name],
         |row| row.get(0),
     )?;
     Ok(count > 0)
+}
+
+fn has_intent_journal(conn: &rusqlite::Connection) -> Result<bool> {
+    local_table_exists(conn, "publish_intent")
 }
 
 /// The undelivered intents of a store, oldest first.
@@ -848,6 +852,9 @@ impl ActorStoreReader {
         self.record
             .db
             .run(move |conn| {
+                if !local_table_exists(conn, "repair_step")? {
+                    return Ok(Vec::new());
+                }
                 let mut stmt = conn.prepare(
                     "SELECT \"stepNo\", rev, cid FROM repair_step WHERE \"repairId\" = ?1 \
                      ORDER BY \"stepNo\"",
