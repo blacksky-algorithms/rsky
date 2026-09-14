@@ -268,6 +268,20 @@ pub struct RateLimits {
     store: Store,
 }
 
+/// The redis URL for the reference's `PDS_REDIS_SCRATCH_ADDRESS` (`host:port`)
+/// and optional `PDS_REDIS_SCRATCH_PASSWORD`; an address that already carries
+/// a scheme is used as given.
+pub fn scratch_redis_url(address: &str, password: Option<&str>) -> String {
+    if address.contains("://") {
+        return address.to_string();
+    }
+    let auth = password
+        .filter(|password| !password.is_empty())
+        .map(|password| format!(":{password}@"))
+        .unwrap_or_default();
+    format!("redis://{auth}{address}")
+}
+
 impl RateLimits {
     pub fn new(enabled: bool, bypass_key: Option<String>, bypass_ips: Vec<IpAddr>) -> Self {
         RateLimits {
@@ -327,7 +341,9 @@ impl RateLimits {
         let (enabled, bypass_key, bypass_ips) = Self::env_settings();
         match env_str("PDS_REDIS_SCRATCH_ADDRESS").filter(|url| enabled && !url.is_empty()) {
             None => RateLimits::new(enabled, bypass_key, bypass_ips),
-            Some(url) => {
+            Some(address) => {
+                let url =
+                    scratch_redis_url(&address, env_str("PDS_REDIS_SCRATCH_PASSWORD").as_deref());
                 match RateLimits::with_redis(enabled, bypass_key, bypass_ips, &url).await {
                     Ok(limits) => {
                         tracing::info!("rate limits shared through redis");
@@ -539,6 +555,26 @@ mod tests {
 
     /// Tests that change limit settings in the environment take this lock.
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[test]
+    fn the_reference_redis_address_becomes_a_url() {
+        assert_eq!(
+            scratch_redis_url("127.0.0.1:6379", None),
+            "redis://127.0.0.1:6379"
+        );
+        assert_eq!(
+            scratch_redis_url("127.0.0.1:6379", Some("")),
+            "redis://127.0.0.1:6379"
+        );
+        assert_eq!(
+            scratch_redis_url("redis-host:6379", Some("s3cret")),
+            "redis://:s3cret@redis-host:6379"
+        );
+        assert_eq!(
+            scratch_redis_url("rediss://cache:6380/1", Some("ignored")),
+            "rediss://cache:6380/1"
+        );
+    }
 
     #[tokio::test]
     async fn windows_fill_reset_and_report_like_the_reference() {

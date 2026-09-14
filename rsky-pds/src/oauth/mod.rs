@@ -90,10 +90,7 @@ async fn replay_store_for(
     let Some(address) = address else {
         return Box::new(InMemoryReplayStore::default());
     };
-    let auth = password
-        .map(|password| format!(":{password}@"))
-        .unwrap_or_default();
-    let url = format!("redis://{auth}{address}");
+    let url = crate::rate_limits::scratch_redis_url(&address, password.as_deref());
     match replay::RedisReplayStore::connect(&url).await {
         Ok(store) => Box::new(store),
         Err(error) => panic!("PDS_REDIS_SCRATCH_ADDRESS is set but redis is unreachable: {error}"),
