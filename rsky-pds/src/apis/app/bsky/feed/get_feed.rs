@@ -12,6 +12,7 @@ use rocket::request::{FromRequest, Outcome, Request};
 use rocket::State;
 use rsky_lexicon::app::bsky::feed::AuthorFeed;
 use rsky_repo::types::Ids;
+use rsky_syntax::aturi::AtUri;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -73,18 +74,33 @@ impl<'r> FromRequest<'r> for GetFeedPipeThrough {
                         let id_resolver = req.guard::<&State<SharedIdResolver>>().await.unwrap();
                         let cfg = req.guard::<&State<ServerConfig>>().await.unwrap();
                         let actor_store = req.guard::<&State<ActorStore>>().await.unwrap();
-                        // The generator is looked up on the same app view the
-                        // request names, with the requester's own service
-                        // auth: the reference does the same, and the app view
-                        // answers an unauthenticated lookup differently.
+                        // The generator's DID comes from its record, fetched
+                        // from the app view the request names with the
+                        // requester's own service auth, exactly as the
+                        // reference does; the app view's own generator lookup
+                        // answers differently for generators it has not
+                        // hydrated.
+                        let feed_uri = match AtUri::new(feed.clone(), None) {
+                            Ok(uri) => uri,
+                            Err(error) => {
+                                req.local_cache(|| {
+                                    Some(ApiError::InvalidRequest(format!(
+                                        "`feed` is invalid: {error}"
+                                    )))
+                                });
+                                return Outcome::Error((Status::BadRequest, anyhow!(error)));
+                            }
+                        };
                         let lookup = ProxyRequest {
                             headers: headers.clone(),
                             query: Some(
                                 url::form_urlencoded::Serializer::new(String::new())
-                                    .append_pair("feed", &feed)
+                                    .append_pair("repo", feed_uri.get_hostname())
+                                    .append_pair("collection", &feed_uri.get_collection())
+                                    .append_pair("rkey", &feed_uri.get_rkey())
                                     .finish(),
                             ),
-                            path: format!("/xrpc/{}", Ids::AppBskyFeedGetFeedGenerator.as_str()),
+                            path: format!("/xrpc/{}", Ids::ComAtprotoRepoGetRecord.as_str()),
                             method: req.method(),
                             id_resolver,
                             cfg,
@@ -104,11 +120,11 @@ impl<'r> FromRequest<'r> for GetFeedPipeThrough {
                             serde_json::from_slice::<serde_json::Value>(&res.buffer)
                                 .map_err(|error| error.to_string())
                         })
-                        .and_then(|view| {
-                            view["view"]["did"]
+                        .and_then(|record| {
+                            record["value"]["did"]
                                 .as_str()
                                 .map(str::to_owned)
-                                .ok_or_else(|| "feed generator view has no did".to_owned())
+                                .ok_or_else(|| "could not resolve feed did".to_owned())
                         }) {
                             Ok(did) => did,
                             Err(error) => {
