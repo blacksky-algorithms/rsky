@@ -612,7 +612,9 @@ impl Router {
             Err(ProxyError::Timeout(_)) | Err(ProxyError::Upstream(..))
         );
         let response = self.finish(result, backend.as_str(), reason, "write", started);
-        if backend == Backend::Ts {
+        // session-only endpoints go to the reference for rsky-written
+        // accounts on purpose, so they are not a misroute
+        if backend == Backend::Ts && reason != "session-ui" {
             let now = self.routing.policy();
             if dids
                 .iter()

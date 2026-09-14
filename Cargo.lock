@@ -8589,7 +8589,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-pds-router"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "arc-swap",

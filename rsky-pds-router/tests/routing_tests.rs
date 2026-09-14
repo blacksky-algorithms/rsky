@@ -1436,6 +1436,26 @@ async fn a_policy_change_during_a_ts_mutation_is_counted_as_a_misroute() {
     assert_eq!(misroutes(), before + 1);
 }
 
+#[tokio::test]
+async fn session_only_ui_endpoints_for_rsky_accounts_are_not_misroutes() {
+    let h = Harness::start().await;
+    h.set_policy(&canary_policy(""));
+    h.set_allowlist(&format!(
+        "version = 1\n[entries]\n\"{CANARY}\" = \"active\"\n"
+    ));
+    let before = misroutes();
+    let answer = h
+        .post(
+            "/@atproto/oauth-provider/~api/sign-out",
+            json!({ "did": CANARY }),
+        )
+        .await;
+    assert_eq!(answer.status, 200, "body was {}", answer.body);
+    assert_eq!(answer.backend, "ts");
+    assert_eq!(answer.reason, "session-ui");
+    assert_eq!(misroutes(), before);
+}
+
 fn misroutes() -> u64 {
     rsky_pds_router::metrics::METRICS.misroutes.get()
 }
