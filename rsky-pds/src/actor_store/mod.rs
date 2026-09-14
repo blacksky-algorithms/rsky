@@ -185,8 +185,23 @@ fn stored_intent_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredInt
 const SELECT_INTENT: &str = "SELECT id, rev, cid, \"eventType\", event, state, \"seqFloor\", seq \
                              FROM publish_intent";
 
+/// Whether the store carries rsky's publication journal. A store another
+/// implementation created, or one restored from such a backup, has none
+/// and owes nothing until its first admitted write migrates it.
+fn has_intent_journal(conn: &rusqlite::Connection) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'publish_intent'",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
 /// The undelivered intents of a store, oldest first.
 pub fn pending_intents_in(conn: &rusqlite::Connection) -> Result<Vec<StoredIntent>> {
+    if !has_intent_journal(conn)? {
+        return Ok(Vec::new());
+    }
     let mut stmt = conn.prepare(&format!(
         "{SELECT_INTENT} WHERE state = 'pending' ORDER BY id"
     ))?;
@@ -197,6 +212,9 @@ pub fn pending_intents_in(conn: &rusqlite::Connection) -> Result<Vec<StoredInten
 }
 
 pub fn all_intents_in(conn: &rusqlite::Connection) -> Result<Vec<StoredIntent>> {
+    if !has_intent_journal(conn)? {
+        return Ok(Vec::new());
+    }
     let mut stmt = conn.prepare(&format!("{SELECT_INTENT} ORDER BY id"))?;
     let rows = stmt
         .query_map([], stored_intent_from_row)?

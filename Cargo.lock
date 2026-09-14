@@ -8509,7 +8509,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-pds"
-version = "1.8.1"
+version = "1.8.3"
 dependencies = [
  "anyhow",
  "argon2",

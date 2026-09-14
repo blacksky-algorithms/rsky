@@ -1355,3 +1355,12 @@ async fn a_queued_transaction_rechecks_its_authority_under_the_lock() {
     let refused = queued.await.unwrap().map(drop).unwrap_err();
     assert!(refused.to_string().contains("delet"), "{refused}");
 }
+
+#[test]
+fn a_store_without_the_publication_journal_owes_no_intents() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE repo_root (did TEXT PRIMARY KEY, cid TEXT, rev TEXT)")
+        .unwrap();
+    assert!(super::pending_intents_in(&conn).unwrap().is_empty());
+    assert!(super::all_intents_in(&conn).unwrap().is_empty());
+}
