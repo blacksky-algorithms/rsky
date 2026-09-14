@@ -308,7 +308,8 @@ async fn health(
         .await;
     match result {
         Ok(_) => {
-            let env_version = env::var("VERSION").unwrap_or("0.3.0-beta.3".into());
+            let env_version =
+                env::var("VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_owned());
             let version = ServerVersion {
                 version: env_version,
             };
