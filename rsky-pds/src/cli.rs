@@ -37,6 +37,7 @@ pub const USAGE: &str = "usage: rsky-pds [<maintenance command>]\n\
   --quarantine-close <seq> --external verified|accepted [--justification <text>]\n\
   --quarantine-status <seq>\n\
   --converge <did>\n\
+  --record-restore <did>               record an actor-store restore at the store's current revision\n\
   --converge-file <file>               one DID per line; reports the ones that diverge\n\
   --collect <did>                      run the blob collector for one actor (never in coexistence)\n\
   --collect-all                        run the blob collector over every actor and open purge";
@@ -75,6 +76,9 @@ pub enum Command {
         seq: i64,
     },
     Converge {
+        did: String,
+    },
+    RecordRestore {
         did: String,
     },
     ConvergeFile {
@@ -136,6 +140,7 @@ pub fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Option<Comma
         "--converge-file",
         "--collect",
         "--collect-all",
+        "--record-restore",
         "--timeout-secs",
         "--did",
         "--kind",
@@ -184,6 +189,8 @@ pub fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Option<Comma
         Command::QuarantineStatus { seq }
     } else if let Some(did) = value("--converge")? {
         Command::Converge { did }
+    } else if let Some(did) = value("--record-restore")? {
+        Command::RecordRestore { did }
     } else if let Some(file) = value("--converge-file")? {
         Command::ConvergeFile { file: file.into() }
     } else if let Some(did) = value("--collect")? {
@@ -429,6 +436,26 @@ pub async fn run(command: Command) -> Result<(serde_json::Value, i32)> {
             let code = if report.converged { 0 } else { 1 };
             Ok((serde_json::to_value(report)?, code))
         }
+        Command::RecordRestore { did } => {
+            let reader = maintenance
+                .actor_store
+                .read(did.clone(), maintenance.blobstores.blobstore(did.clone()))
+                .await?;
+            let root = reader.storage.read().await.get_root_detailed().await?;
+            maintenance
+                .lifecycle
+                .record_restore_event(&did, &root.rev)
+                .await?;
+            let restore_events = maintenance.lifecycle.restore_event_count(&did).await?;
+            Ok((
+                serde_json::json!({
+                    "did": did,
+                    "resultingRev": root.rev,
+                    "restoreEvents": restore_events,
+                }),
+                0,
+            ))
+        }
         Command::Collect { did } => {
             let collector = maintenance.collector().await?;
             let factory = maintenance.blobstores_with_generations(&collector.generations);
@@ -615,6 +642,12 @@ mod tests {
         assert_eq!(
             parse(&["--converge", "did:plc:a"]).unwrap().unwrap(),
             Command::Converge {
+                did: "did:plc:a".to_owned()
+            }
+        );
+        assert_eq!(
+            parse(&["--record-restore", "did:plc:a"]).unwrap().unwrap(),
+            Command::RecordRestore {
                 did: "did:plc:a".to_owned()
             }
         );
