@@ -5,13 +5,8 @@ use crate::config::ServerConfig;
 use crate::pipethrough::{pipethrough, OverrideOpts, ProxyRequest};
 use crate::read_after_write::util::ReadAfterWriteResponse;
 use crate::xrpc_server::types::HandlerPipeThrough;
-use crate::{SharedATPAgent, SharedIdResolver};
+use crate::SharedIdResolver;
 use anyhow::{anyhow, Result};
-use atrium_api::app::bsky::feed::get_feed_generator::{
-    Output as AppBskyFeedGetFeedGeneratorOutput, Parameters as AppBskyFeedGetFeedGeneratorParams,
-    ParametersData as AppBskyFeedGetFeedGeneratorData,
-};
-use ipld_core::ipld::Ipld as AtriumIpld;
 use rocket::http::Status;
 use rocket::request::{FromRequest, Outcome, Request};
 use rocket::State;
@@ -68,84 +63,89 @@ impl<'r> FromRequest<'r> for GetFeedPipeThrough {
                 }
                 match req.query_value::<String>("feed") {
                     Some(Ok(feed)) => {
-                        let app_view_agent = req.guard::<&State<SharedATPAgent>>().await.unwrap();
+                        let headers = req.headers().clone().into_iter().fold(
+                            BTreeMap::new(),
+                            |mut acc: BTreeMap<String, String>, cur| {
+                                let _ = acc.insert(cur.name().to_string(), cur.value().to_string());
+                                acc
+                            },
+                        );
+                        let id_resolver = req.guard::<&State<SharedIdResolver>>().await.unwrap();
                         let cfg = req.guard::<&State<ServerConfig>>().await.unwrap();
-                        match (&cfg.bsky_app_view, &app_view_agent.app_view_agent) {
-                            (Some(_), Some(app_view_agent_unwrapped)) => {
-                                let lock = app_view_agent_unwrapped.read().await;
-                                let AppBskyFeedGetFeedGeneratorOutput { data, .. } = match lock
-                                    .service
-                                    .app
-                                    .bsky
-                                    .feed
-                                    .get_feed_generator(AppBskyFeedGetFeedGeneratorParams {
-                                        data: AppBskyFeedGetFeedGeneratorData { feed },
-                                        extra_data: AtriumIpld::Null,
-                                    })
-                                    .await
-                                {
-                                    Ok(res) => res,
-                                    Err(error) => {
-                                        req.local_cache(|| {
-                                            Some(ApiError::InvalidRequest(error.to_string()))
-                                        });
-                                        return Outcome::Error((
-                                            Status::BadRequest,
-                                            anyhow!(error.to_string()),
-                                        ));
-                                    }
-                                };
-                                let headers = req.headers().clone().into_iter().fold(
-                                    BTreeMap::new(),
-                                    |mut acc: BTreeMap<String, String>, cur| {
-                                        let _ = acc.insert(
-                                            cur.name().to_string(),
-                                            cur.value().to_string(),
-                                        );
-                                        acc
-                                    },
-                                );
-                                let proxy_req = ProxyRequest {
-                                    headers,
-                                    query: req.uri().query().map(|query| query.to_string()),
-                                    path: req.uri().path().to_string(),
-                                    method: req.method(),
-                                    id_resolver: req
-                                        .guard::<&State<SharedIdResolver>>()
-                                        .await
-                                        .unwrap(),
-                                    cfg: req.guard::<&State<ServerConfig>>().await.unwrap(),
-                                    actor_store: req.guard::<&State<ActorStore>>().await.unwrap(),
-                                };
-                                match pipethrough(
-                                    &proxy_req,
-                                    requester,
-                                    OverrideOpts {
-                                        aud: Some(data.view.did.to_string()),
-                                        lxm: Some(
-                                            Ids::AppBskyFeedGetFeedSkeleton.as_str().to_string(),
-                                        ),
-                                    },
-                                )
-                                .await
-                                {
-                                    Ok(res) => Outcome::Success(Self {
-                                        encoding: res.encoding,
-                                        buffer: res.buffer,
-                                        headers: res.headers,
-                                    }),
-                                    Err(error) => {
-                                        req.local_cache(|| {
-                                            Some(ApiError::InvalidRequest(error.to_string()))
-                                        });
-                                        Outcome::Error((Status::BadRequest, error))
-                                    }
-                                }
+                        let actor_store = req.guard::<&State<ActorStore>>().await.unwrap();
+                        // The generator is looked up on the same app view the
+                        // request names, with the requester's own service
+                        // auth: the reference does the same, and the app view
+                        // answers an unauthenticated lookup differently.
+                        let lookup = ProxyRequest {
+                            headers: headers.clone(),
+                            query: Some(
+                                url::form_urlencoded::Serializer::new(String::new())
+                                    .append_pair("feed", &feed)
+                                    .finish(),
+                            ),
+                            path: format!("/xrpc/{}", Ids::AppBskyFeedGetFeedGenerator.as_str()),
+                            method: req.method(),
+                            id_resolver,
+                            cfg,
+                            actor_store,
+                        };
+                        let generator_did = match pipethrough(
+                            &lookup,
+                            requester.clone(),
+                            OverrideOpts {
+                                aud: None,
+                                lxm: None,
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string())
+                        .and_then(|res| {
+                            serde_json::from_slice::<serde_json::Value>(&res.buffer)
+                                .map_err(|error| error.to_string())
+                        })
+                        .and_then(|view| {
+                            view["view"]["did"]
+                                .as_str()
+                                .map(str::to_owned)
+                                .ok_or_else(|| "feed generator view has no did".to_owned())
+                        }) {
+                            Ok(did) => did,
+                            Err(error) => {
+                                req.local_cache(|| Some(ApiError::InvalidRequest(error.clone())));
+                                return Outcome::Error((Status::BadRequest, anyhow!(error)));
                             }
-                            _ => Outcome::Error((
-                                Status::InternalServerError,
-                                anyhow!("internal error"),
-                            )),
+                        };
+                        let proxy_req = ProxyRequest {
+                            headers,
+                            query: req.uri().query().map(|query| query.to_string()),
+                            path: req.uri().path().to_string(),
+                            method: req.method(),
+                            id_resolver,
+                            cfg,
+                            actor_store,
+                        };
+                        match pipethrough(
+                            &proxy_req,
+                            requester,
+                            OverrideOpts {
+                                aud: Some(generator_did),
+                                lxm: Some(Ids::AppBskyFeedGetFeedSkeleton.as_str().to_string()),
+                            },
+                        )
+                        .await
+                        {
+                            Ok(res) => Outcome::Success(Self {
+                                encoding: res.encoding,
+                                buffer: res.buffer,
+                                headers: res.headers,
+                            }),
+                            Err(error) => {
+                                req.local_cache(|| {
+                                    Some(ApiError::InvalidRequest(error.to_string()))
+                                });
+                                Outcome::Error((Status::BadRequest, error))
+                            }
                         }
                     }
                     _ => {

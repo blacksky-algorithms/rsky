@@ -74,8 +74,11 @@ fn query_param<'a>(query: Option<&'a str>, name: &str) -> Option<&'a str> {
     })
 }
 
-/// The `sub` claim of a bearer token, read without verification: it only
-/// decides which backend answers, and the backend authenticates.
+/// The account a bearer token acts for, read without verification: the
+/// `sub` of a session token, or the `iss` of a service token, which a
+/// service (the video processor, for one) presents when it acts for the
+/// account and which carries no `sub`. It only decides which backend
+/// answers; the backend authenticates.
 pub fn bearer_subject(headers: &HeaderMap) -> Option<String> {
     let value = headers.get(http::header::AUTHORIZATION)?.to_str().ok()?;
     let token = value
@@ -86,7 +89,11 @@ pub fn bearer_subject(headers: &HeaderMap) -> Option<String> {
         .decode(payload)
         .ok()?;
     let claims: Value = serde_json::from_slice(&bytes).ok()?;
-    claims.get("sub")?.as_str().map(str::to_owned)
+    claims
+        .get("sub")
+        .or_else(|| claims.get("iss"))?
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// Decodes a percent-encoded query value.
@@ -523,6 +530,18 @@ mod tests {
         );
         assert_eq!(
             attribute(Target::AuthSubject, None, &bearer),
+            Attribution::Identifier("did:plc:me".into())
+        );
+        let service_payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::json!({ "iss": "did:plc:me", "aud": "did:web:pds.test", "lxm": "com.atproto.repo.uploadBlob" })
+                .to_string(),
+        );
+        let service = headers_with(
+            AUTHORIZATION,
+            &format!("Bearer eyJhbGciOiJFUzI1NksifQ.{service_payload}.sig"),
+        );
+        assert_eq!(
+            attribute(Target::AuthSubject, None, &service),
             Attribution::Identifier("did:plc:me".into())
         );
         assert!(matches!(
