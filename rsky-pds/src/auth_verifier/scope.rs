@@ -280,8 +280,34 @@ impl ScopeDecl for OAuthForbidden {
         credentials: &Option<Credentials>,
     ) -> Result<(), ApiError> {
         if is_oauth_session(credentials) {
-            return Err(ApiError::InsufficientScope(
+            return Err(ApiError::Forbidden(
                 "OAuth credentials are not supported for this endpoint".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn check(_credentials: &Option<Credentials>, _target: &()) -> Result<(), ApiError> {
+        Ok(())
+    }
+}
+
+/// [`OAuthForbidden`] for the email endpoints, whose refusal points the
+/// account holder at the account manager, as the reference does.
+pub struct OAuthForbiddenEmail;
+
+#[rocket::async_trait]
+impl ScopeDecl for OAuthForbiddenEmail {
+    type Target = ();
+
+    async fn precheck(
+        _req: &Request<'_>,
+        credentials: &Option<Credentials>,
+    ) -> Result<(), ApiError> {
+        if is_oauth_session(credentials) {
+            return Err(ApiError::Forbidden(
+                "Use the account manager interface to update email address associated with an account"
+                    .to_string(),
             ));
         }
         Ok(())
@@ -590,7 +616,12 @@ mod tests {
         let req = request.inner();
         assert!(matches!(
             OAuthForbidden::precheck(req, &oauth_session(&["atproto", "transition:generic"])).await,
-            Err(ApiError::InsufficientScope(_))
+            Err(ApiError::Forbidden(_))
+        ));
+        assert!(matches!(
+            OAuthForbiddenEmail::precheck(req, &oauth_session(&["atproto", "transition:email"]))
+                .await,
+            Err(ApiError::Forbidden(message)) if message.starts_with("Use the account manager")
         ));
         assert!(OAuthForbidden::precheck(req, &legacy_session())
             .await

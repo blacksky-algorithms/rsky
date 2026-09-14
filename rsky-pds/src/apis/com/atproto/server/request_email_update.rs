@@ -1,7 +1,7 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
-use crate::auth_verifier::scope::{OAuthForbidden, Scoped};
+use crate::auth_verifier::scope::{OAuthForbiddenEmail, Scoped};
 use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::mailer;
 use crate::mailer::TokenParam;
@@ -13,7 +13,7 @@ use rocket::State;
 use rsky_lexicon::com::atproto::server::RequestEmailUpdateOutput;
 
 async fn inner_request_email_update(
-    auth: Scoped<OAuthForbidden, AccessStandardIncludeChecks>,
+    auth: Scoped<OAuthForbiddenEmail, AccessStandardIncludeChecks>,
     account_manager: AccountManager,
 ) -> Result<RequestEmailUpdateOutput> {
     let did = auth.did().await?;
@@ -48,7 +48,7 @@ async fn inner_request_email_update(
 #[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.server.requestEmailUpdate")]
 pub async fn request_email_update(
-    auth: Scoped<OAuthForbidden, AccessStandardIncludeChecks>,
+    auth: Scoped<OAuthForbiddenEmail, AccessStandardIncludeChecks>,
     account_manager: AccountManager,
     limits: &State<RateLimits>,
     caller: Caller,
