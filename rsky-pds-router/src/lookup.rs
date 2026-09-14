@@ -56,6 +56,40 @@ impl AccountLookup {
             &token.trim().to_ascii_uppercase(),
         )
     }
+
+    /// The account an OAuth refresh token belongs to, current or already
+    /// rotated (a rotated token still names its account for the grace
+    /// window and for revocation).
+    pub fn did_for_refresh_token(&self, refresh_token: &str) -> rusqlite::Result<Option<String>> {
+        if let Some(did) = self.one(
+            "SELECT did FROM token WHERE \"currentRefreshToken\" = ?1",
+            refresh_token,
+        )? {
+            return Ok(Some(did));
+        }
+        self.one(
+            "SELECT t.did FROM used_refresh_token u JOIN token t ON t.id = u.\"tokenId\" \
+             WHERE u.\"refreshToken\" = ?1",
+            refresh_token,
+        )
+    }
+
+    /// The account an authorization code was issued to, before or after
+    /// its exchange.
+    pub fn did_for_authorization_code(&self, code: &str) -> rusqlite::Result<Option<String>> {
+        if let Some(did) = self.one(
+            "SELECT did FROM authorization_request WHERE code = ?1",
+            code,
+        )? {
+            return Ok(Some(did));
+        }
+        self.one("SELECT did FROM token WHERE code = ?1", code)
+    }
+
+    /// The account behind an OAuth token id (the `jti` of an access token).
+    pub fn did_for_token_id(&self, token_id: &str) -> rusqlite::Result<Option<String>> {
+        self.one("SELECT did FROM token WHERE \"tokenId\" = ?1", token_id)
+    }
 }
 
 #[cfg(test)]
@@ -71,6 +105,12 @@ mod tests {
             "CREATE TABLE actor (did TEXT PRIMARY KEY, handle TEXT);
              CREATE TABLE account (did TEXT PRIMARY KEY, email TEXT);
              CREATE TABLE email_token (purpose TEXT, did TEXT, token TEXT);
+             CREATE TABLE token (id INTEGER PRIMARY KEY, \"tokenId\" TEXT, did TEXT, code TEXT, \"currentRefreshToken\" TEXT);
+             CREATE TABLE used_refresh_token (id INTEGER PRIMARY KEY, \"refreshToken\" TEXT, \"tokenId\" INTEGER);
+             CREATE TABLE authorization_request (id TEXT PRIMARY KEY, did TEXT, code TEXT);
+             INSERT INTO token VALUES (1, 'tok-1', 'did:plc:oauth', 'code-used', 'ref-current');
+             INSERT INTO used_refresh_token VALUES (1, 'ref-old', 1);
+             INSERT INTO authorization_request VALUES ('req-1', 'did:plc:oauth', 'code-fresh');
              INSERT INTO actor VALUES ('did:plc:a', 'alice.test');
              INSERT INTO account VALUES ('did:plc:a', 'alice@example.com');
              INSERT INTO email_token VALUES ('reset_password', 'did:plc:a', 'ABCDE-FGHIJ');",
@@ -101,6 +141,41 @@ mod tests {
             Some("did:plc:a")
         );
         assert!(lookup.did_for_email_token("nope").unwrap().is_none());
+        assert_eq!(
+            lookup
+                .did_for_refresh_token("ref-current")
+                .unwrap()
+                .as_deref(),
+            Some("did:plc:oauth")
+        );
+        assert_eq!(
+            lookup.did_for_refresh_token("ref-old").unwrap().as_deref(),
+            Some("did:plc:oauth")
+        );
+        assert!(lookup.did_for_refresh_token("ref-none").unwrap().is_none());
+        assert_eq!(
+            lookup
+                .did_for_authorization_code("code-fresh")
+                .unwrap()
+                .as_deref(),
+            Some("did:plc:oauth")
+        );
+        assert_eq!(
+            lookup
+                .did_for_authorization_code("code-used")
+                .unwrap()
+                .as_deref(),
+            Some("did:plc:oauth")
+        );
+        assert!(lookup
+            .did_for_authorization_code("code-none")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            lookup.did_for_token_id("tok-1").unwrap().as_deref(),
+            Some("did:plc:oauth")
+        );
+        assert!(lookup.did_for_token_id("tok-none").unwrap().is_none());
         assert!(AccountLookup::open(&dir.path().join("missing.sqlite")).is_err());
     }
 }

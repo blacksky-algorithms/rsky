@@ -179,6 +179,11 @@ impl Harness {
             "CREATE TABLE actor (did TEXT PRIMARY KEY, handle TEXT);
              CREATE TABLE account (did TEXT PRIMARY KEY, email TEXT);
              CREATE TABLE email_token (purpose TEXT, did TEXT, token TEXT);
+             CREATE TABLE token (id INTEGER PRIMARY KEY, \"tokenId\" TEXT, did TEXT, code TEXT, \"currentRefreshToken\" TEXT);
+             CREATE TABLE used_refresh_token (id INTEGER PRIMARY KEY, \"refreshToken\" TEXT, \"tokenId\" INTEGER);
+             CREATE TABLE authorization_request (id TEXT PRIMARY KEY, did TEXT, code TEXT);
+             INSERT INTO token VALUES (1, 'tok-canary', '{CANARY}', NULL, 'ref-canary'), (2, 'tok-alice', '{ALICE}', NULL, 'ref-alice');
+             INSERT INTO authorization_request VALUES ('req-canary', '{CANARY}', 'code-canary');
              INSERT INTO actor VALUES ('{ALICE}', 'alice.test'), ('{BOB}', 'bob.test'), ('{CANARY}', 'canary.test');
              INSERT INTO account VALUES ('{ALICE}', 'alice@example.com'), ('{CANARY}', 'canary@example.com');
              INSERT INTO email_token VALUES ('reset_password', '{CANARY}', 'CANARY-TOKEN'), ('reset_password', '{ALICE}', 'ALICE-TOKEN');"
@@ -1530,4 +1535,66 @@ async fn an_unanswered_mutation_is_journaled_as_ambiguous() {
         .await;
     assert_eq!(answered.status, 200);
     assert_eq!(h.journal().last().unwrap()["phase"], "end");
+}
+
+#[tokio::test]
+async fn oauth_grants_follow_the_account_their_credential_names() {
+    let h = Harness::start().await;
+    h.set_policy(&canary_policy(""));
+    h.set_allowlist(&format!(
+        "version = 1\n[entries]\n\"{CANARY}\" = \"active\"\n"
+    ));
+    let grant = |form: &str| {
+        h.client
+            .post(format!("{}/oauth/token", h.url))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(form.to_owned())
+    };
+    let canary = h
+        .send(grant("grant_type=refresh_token&refresh_token=ref-canary"))
+        .await;
+    assert_eq!(
+        (canary.status, canary.served_by(), canary.reason.as_str()),
+        (200, "rsky", "oauth-canary")
+    );
+    let canary_code = h
+        .send(grant("grant_type=authorization_code&code=code-canary"))
+        .await;
+    assert_eq!(
+        (canary_code.served_by(), canary_code.reason.as_str()),
+        ("rsky", "oauth-canary")
+    );
+    let alice = h
+        .send(grant("grant_type=refresh_token&refresh_token=ref-alice"))
+        .await;
+    assert_eq!(
+        (alice.served_by(), alice.reason.as_str()),
+        ("oauth", "oauth-target")
+    );
+    let unknown = h
+        .send(grant("grant_type=refresh_token&refresh_token=ref-none"))
+        .await;
+    assert_eq!(
+        (unknown.served_by(), unknown.reason.as_str()),
+        ("oauth", "authorization-server")
+    );
+    let revoke = h
+        .send(
+            h.client
+                .post(format!("{}/oauth/revoke", h.url))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body("token=ref-canary".to_owned()),
+        )
+        .await;
+    assert_eq!(
+        (revoke.served_by(), revoke.reason.as_str()),
+        ("rsky", "oauth-canary")
+    );
+    let par = h.post("/oauth/par", json!({})).await;
+    assert_eq!(par.served_by(), "oauth");
+    // the forwarded body is the original form, byte for byte
+    assert!(canary.body["body"]
+        .as_str()
+        .unwrap()
+        .contains("refresh_token=ref-canary"));
 }

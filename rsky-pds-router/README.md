@@ -49,6 +49,16 @@ A mutation's targets decide its backend:
 | the request cannot be attributed and any canary exists | `503 RouterUnattributable` |
 | otherwise | `writes.default` (`uploadBlob` and `importRepo` go to the sync worker) |
 
+OAuth grant requests (`POST /oauth/token`, `POST /oauth/revoke`) follow the
+account their credential names: the refresh token, authorization code, or
+access-token `jti` is resolved through the shared `token`,
+`used_refresh_token`, and `authorization_request` tables, and a canary's
+grant goes to rsky (reason `oauth-canary`) while any other known account's
+goes to the authorization server (`oauth-target`); a credential the tables
+do not know follows the authorization server (`authorization-server`).
+Every other authorization-server path (`/oauth/par`, the authorize UI, the
+metadata documents) is one implementation for every account.
+
 A required target that is missing from the body is a schema violation and is
 answered `400 InvalidRequest`. Bodies of JSON mutations are buffered up to 1
 MiB to find their target; raw uploads are streamed untouched.

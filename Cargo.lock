@@ -8589,7 +8589,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-pds-router"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -8612,6 +8612,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

@@ -25,6 +25,10 @@ pub enum Kind {
     RouterHealth,
     /// Authorization-server protocol traffic and assets: pass-through.
     OauthAs,
+    /// A token or revocation request on the authorization server, which
+    /// carries a credential the router can resolve to the account it
+    /// belongs to.
+    OauthGrant,
     /// A read; `identity` is the account it concerns when one is named.
     Read {
         class: ReadClass,
@@ -84,16 +88,17 @@ pub fn bearer_subject(headers: &HeaderMap) -> Option<String> {
     let token = value
         .strip_prefix("Bearer ")
         .or_else(|| value.strip_prefix("DPoP "))?;
+    jwt_claim(token, "sub").or_else(|| jwt_claim(token, "iss"))
+}
+
+/// A string claim of a JWT's payload, read without verification.
+pub fn jwt_claim(token: &str, claim: &str) -> Option<String> {
     let payload = token.split('.').nth(1)?;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload)
         .ok()?;
     let claims: Value = serde_json::from_slice(&bytes).ok()?;
-    claims
-        .get("sub")
-        .or_else(|| claims.get("iss"))?
-        .as_str()
-        .map(str::to_owned)
+    claims.get(claim)?.as_str().map(str::to_owned)
 }
 
 /// Decodes a percent-encoded query value.
@@ -147,6 +152,9 @@ pub fn read_identity(path: &str, query: Option<&str>, headers: &HeaderMap) -> Op
 pub fn classify(method: &Method, path: &str, query: Option<&str>, headers: &HeaderMap) -> Kind {
     if path == "/xrpc/_health" {
         return Kind::RouterHealth;
+    }
+    if *method == Method::POST && (path == "/oauth/token" || path == "/oauth/revoke") {
+        return Kind::OauthGrant;
     }
     if OAUTH_AS_PREFIXES
         .iter()
@@ -335,6 +343,14 @@ mod tests {
         );
         assert_eq!(
             classify(&Method::POST, "/oauth/token", None, &none),
+            Kind::OauthGrant
+        );
+        assert_eq!(
+            classify(&Method::POST, "/oauth/revoke", None, &none),
+            Kind::OauthGrant
+        );
+        assert_eq!(
+            classify(&Method::POST, "/oauth/par", None, &none),
             Kind::OauthAs
         );
         assert_eq!(

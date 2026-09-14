@@ -223,6 +223,87 @@ impl Router {
         }
     }
 
+    /// A token or revocation request goes to the writer of the account its
+    /// credential names: rsky for a canary, the authorization server for
+    /// everyone else. A credential the shared tables do not know follows
+    /// the authorization server, which answers it as it would today.
+    async fn forward_grant(
+        &self,
+        path_and_query: &str,
+        headers: &HeaderMap,
+        body: Body,
+    ) -> Response<Body> {
+        let started = Instant::now();
+        let (bytes, form) = match buffer_form(headers, body).await {
+            Ok(buffered) => buffered,
+            Err(response) => return response,
+        };
+        let did = match self.grant_account(&form) {
+            Ok(did) => did,
+            Err(err) => return lookup_unavailable("grant lookup failed", &err),
+        };
+        let dids: Vec<String> = did.into_iter().collect();
+        let (backend, reason) = if dids.is_empty() {
+            (None, "authorization-server")
+        } else {
+            match self.write_backend(&dids) {
+                Ok((Backend::Rsky, _)) => (Some(Backend::Rsky), "oauth-canary"),
+                Ok((Backend::Ts, _)) => (None, "oauth-target"),
+                Err(response) => {
+                    let reason = response
+                        .headers()
+                        .get("x-router-reason")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("refused")
+                        .to_owned();
+                    METRICS.writes_rejected.with_label_values(&[&reason]).inc();
+                    return response;
+                }
+            }
+        };
+        let (upstream, label) = match backend {
+            Some(Backend::Rsky) => (self.upstreams.rsky.clone(), "rsky"),
+            _ => (self.upstreams.oauth.clone(), "oauth"),
+        };
+        let result = self
+            .forwarder
+            .forward(
+                &upstream,
+                Method::POST,
+                path_and_query,
+                headers,
+                proxy::full_body(bytes),
+                self.deadlines.write,
+            )
+            .await;
+        self.finish(result, label, reason, "oauth", started)
+    }
+
+    /// The account a grant request's credential names, if the shared
+    /// tables know it.
+    fn grant_account(&self, form: &[(String, String)]) -> rusqlite::Result<Option<String>> {
+        let field = |name: &str| {
+            form.iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        if let Some(refresh_token) = field("refresh_token") {
+            return self.lookup.did_for_refresh_token(refresh_token);
+        }
+        if let Some(code) = field("code") {
+            return self.lookup.did_for_authorization_code(code);
+        }
+        if let Some(token) = field("token") {
+            if let Some(did) = self.lookup.did_for_refresh_token(token)? {
+                return Ok(Some(did));
+            }
+            if let Some(token_id) = classify::jwt_claim(token, "jti") {
+                return self.lookup.did_for_token_id(&token_id);
+            }
+        }
+        Ok(None)
+    }
+
     fn forward_read<'a>(
         &'a self,
         class: ReadClass,
@@ -535,6 +616,10 @@ impl Router {
                     .await;
                 self.finish(result, "oauth", "authorization-server", "oauth", started)
             }
+            Kind::OauthGrant => {
+                self.forward_grant(&path_and_query, &parts.headers, body)
+                    .await
+            }
             Kind::Read { class, identity } => {
                 self.forward_read(
                     class,
@@ -683,4 +768,52 @@ pub fn metrics_app() -> axum::Router {
         "/metrics",
         axum::routing::get(|| async { METRICS.render() }),
     )
+}
+
+/// The form fields of a grant request, buffered so the same bytes can be
+/// forwarded; a body that is not a form has no fields.
+async fn buffer_form(
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<(Bytes, Vec<(String, String)>), Response<Body>> {
+    let is_form = headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.starts_with("application/x-www-form-urlencoded"))
+        .unwrap_or(false);
+    let mut body = body;
+    let mut buffer = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(err) => {
+                tracing::warn!(%err, "grant body failed");
+                return Err(refused(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidRequest",
+                    "the request body could not be read",
+                    "body",
+                ));
+            }
+        };
+        if let Ok(data) = frame.into_data() {
+            if buffer.len() + data.len() > JSON_BODY_LIMIT {
+                return Err(refused(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "PayloadTooLarge",
+                    "the request body exceeds the router's limit",
+                    "too-large",
+                ));
+            }
+            buffer.extend_from_slice(&data);
+        }
+    }
+    let fields = if is_form {
+        url::form_urlencoded::parse(&buffer)
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok((Bytes::from(buffer), fields))
 }

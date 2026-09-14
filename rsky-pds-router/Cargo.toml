@@ -1,6 +1,6 @@
 [package]
 name = "rsky-pds-router"
-version = "0.2.3"
+version = "0.3.0"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "Stateless request router in front of two PDS implementations sharing one data directory"
 license = "Apache-2.0"
@@ -19,6 +19,7 @@ arc-swap = "1.7"
 axum = { version = "0.8", features = ["http1", "http2", "tokio"] }
 base64 = "0.22"
 bytes = "1"
+url = "2"
 clap = { version = "4", features = ["derive", "env"] }
 http = "1"
 http-body-util = "0.1"
