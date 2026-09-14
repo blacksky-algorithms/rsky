@@ -220,11 +220,12 @@ async fn get_access_token(client: &rocket::local::asynchronous::Client) -> Strin
     body["accessJwt"].as_str().unwrap().to_string()
 }
 
-/// `listRecords` must return the record value itself and omit the cursor on a
-/// short final page. Consumers treat a nested `{uri, cid, value}` as a failed
-/// write, and a final-page cursor invites a needless empty request.
+/// `listRecords` must return the record value itself and, like the reference,
+/// a cursor on every non-empty page including the final one. Consumers treat
+/// a nested `{uri, cid, value}` as a failed write, and clients paginate
+/// until a page comes back empty.
 #[tokio::test]
-async fn test_list_records_has_direct_values_and_no_final_cursor() {
+async fn test_list_records_has_direct_values_and_reference_cursors() {
     let (_dir, client) = common::get_client().await;
     let token = get_access_token(&client).await;
     let did = "did:plc:khvyd3oiw46vif5gm7hijslk";
@@ -279,7 +280,21 @@ async fn test_list_records_has_direct_values_and_no_final_cursor() {
     assert_eq!(response.status(), Status::Ok);
     let final_page: serde_json::Value = response.into_json().await.unwrap();
     assert_eq!(final_page["records"].as_array().unwrap().len(), 1);
-    assert!(final_page.get("cursor").is_none(), "{final_page}");
+    let final_cursor = final_page["cursor"]
+        .as_str()
+        .expect("final page has a cursor");
+    assert_eq!(final_cursor, "one");
+
+    let response = client
+        .get(format!(
+            "/xrpc/com.atproto.repo.listRecords?repo={did}&collection=com.example.record&limit=1&cursor={final_cursor}"
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let empty: serde_json::Value = response.into_json().await.unwrap();
+    assert_eq!(empty["records"].as_array().unwrap().len(), 0);
+    assert!(empty.get("cursor").is_none(), "{empty}");
 }
 
 #[tokio::test]

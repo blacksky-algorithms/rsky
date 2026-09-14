@@ -949,7 +949,10 @@ impl<'r> FromRequest<'r> for OptionalAccessOrAdminToken {
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
         if is_bearer_token(req) {
-            match AccessFull::from_request(req).await {
+            // The reference's optional authorization accepts every session
+            // scope here, app passwords included; only the routes that act
+            // on the account narrow it further.
+            match AccessStandard::from_request(req).await {
                 Outcome::Success(output) => Outcome::Success(OptionalAccessOrAdminToken {
                     access: Some(output.access),
                 }),

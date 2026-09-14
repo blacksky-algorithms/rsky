@@ -38,14 +38,11 @@ async fn inner_list_records(
             .read(did.clone(), blobstore_factory.blobstore(did.clone()))
             .await?;
 
-        // Fetch one extra row to determine whether this page can be resumed.
-        // Returning a cursor after a short final page makes compliant clients
-        // issue a pointless empty request, and was observed in Bulleted.
-        let mut rows = actor_store
+        let rows = actor_store
             .record
             .list_records_for_collection(
                 collection,
-                i64::from(limit) + 1,
+                i64::from(limit),
                 reverse,
                 cursor,
                 rkeyStart,
@@ -53,8 +50,6 @@ async fn inner_list_records(
                 None,
             )
             .await?;
-        let has_more = rows.len() > usize::from(limit);
-        rows.truncate(usize::from(limit));
         let records: Vec<Record> = rows
             .into_iter()
             .map(|record| {
@@ -69,14 +64,15 @@ async fn inner_list_records(
             })
             .collect::<Result<Vec<Record>>>()?;
 
-        let cursor = if has_more {
-            let last_record = records
-                .last()
-                .expect("a page with another record has a last record");
-            let last_at_uri: AtUri = last_record.uri.clone().try_into()?;
-            Some(last_at_uri.get_rkey())
-        } else {
-            None
+        // The reference answers every non-empty page with the last rkey as
+        // the cursor, final pages included; clients built against it expect
+        // the same shape from either implementation.
+        let cursor = match records.last() {
+            Some(last_record) => {
+                let last_at_uri: AtUri = last_record.uri.clone().try_into()?;
+                Some(last_at_uri.get_rkey())
+            }
+            None => None,
         };
         Ok(ListRecordsOutput { records, cursor })
     } else {
