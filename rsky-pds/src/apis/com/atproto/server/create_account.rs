@@ -280,12 +280,7 @@ pub async fn validate_inputs_for_local_pds(
         ));
     }
 
-    //Invite Code Validation
-    let invite_code = if cfg.invites.required && input.invite_code.is_none() {
-        return Err(ApiError::InvalidInviteCode);
-    } else {
-        input.invite_code.clone()
-    };
+    let invite_code = resolve_invite_code(cfg.invites.required, input.invite_code.as_deref())?;
 
     //Email Validation
     if input.email.is_none() {
@@ -403,4 +398,44 @@ async fn format_did_and_plc_op(
     };
 
     Ok(response)
+}
+
+// Clients send an empty inviteCode when the server advertises no invite
+// requirement, and an unrequired code must not be validated or consumed.
+fn resolve_invite_code(required: bool, provided: Option<&str>) -> Result<Option<String>, ApiError> {
+    let code = provided.map(str::trim).filter(|code| !code.is_empty());
+    match (required, code) {
+        (true, None) => Err(ApiError::InvalidInviteCode),
+        (true, Some(code)) => Ok(Some(code.to_string())),
+        (false, _) => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_invite_code;
+    use crate::apis::ApiError;
+
+    #[test]
+    fn unrequired_invite_codes_are_dropped() {
+        assert_eq!(resolve_invite_code(false, None).unwrap(), None);
+        assert_eq!(resolve_invite_code(false, Some("")).unwrap(), None);
+        assert_eq!(resolve_invite_code(false, Some("abc-def")).unwrap(), None);
+    }
+
+    #[test]
+    fn required_invite_codes_must_be_present() {
+        assert!(matches!(
+            resolve_invite_code(true, None),
+            Err(ApiError::InvalidInviteCode)
+        ));
+        assert!(matches!(
+            resolve_invite_code(true, Some("  ")),
+            Err(ApiError::InvalidInviteCode)
+        ));
+        assert_eq!(
+            resolve_invite_code(true, Some(" abc-def ")).unwrap(),
+            Some("abc-def".to_string())
+        );
+    }
 }
