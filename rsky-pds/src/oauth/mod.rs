@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod body;
 pub mod fetcher;
 pub mod replay;
 pub mod routes;

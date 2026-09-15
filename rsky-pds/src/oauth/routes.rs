@@ -1,3 +1,4 @@
+use super::body::OAuthBody;
 use super::templates::{
     client_display, scope_items, ConsentPage, ErrorPage, SessionOption, SignInPage,
 };
@@ -129,7 +130,7 @@ fn oauth_error_page(error: OAuthError) -> HtmlPage {
     render_error(Status::new(error.status()), error.error_description())
 }
 
-#[derive(FromForm)]
+#[derive(FromForm, serde::Deserialize)]
 pub struct ParFormData {
     pub client_id: Option<String>,
     pub response_type: Option<String>,
@@ -173,7 +174,7 @@ impl ParFormData {
 #[tracing::instrument(skip_all)]
 #[rocket::post("/oauth/par", data = "<form>")]
 pub async fn oauth_par(
-    form: Form<ParFormData>,
+    form: OAuthBody<ParFormData>,
     info: OAuthRequestInfo,
     shared: &State<SharedOAuthProvider>,
 ) -> OAuthApiResponse {
@@ -210,7 +211,7 @@ fn is_new_oauth_session(grant_type: &str) -> bool {
     grant_type == GRANT_AUTHORIZATION_CODE
 }
 
-#[derive(FromForm)]
+#[derive(FromForm, serde::Deserialize)]
 pub struct TokenFormData {
     pub grant_type: Option<String>,
     pub code: Option<String>,
@@ -225,7 +226,7 @@ pub struct TokenFormData {
 #[tracing::instrument(skip_all)]
 #[rocket::post("/oauth/token", data = "<form>")]
 pub async fn oauth_token(
-    form: Form<TokenFormData>,
+    form: OAuthBody<TokenFormData>,
     info: OAuthRequestInfo,
     shared: &State<SharedOAuthProvider>,
 ) -> OAuthApiResponse {
@@ -269,7 +270,7 @@ pub async fn oauth_token(
     }
 }
 
-#[derive(FromForm)]
+#[derive(FromForm, serde::Deserialize)]
 pub struct RevokeFormData {
     pub token: Option<String>,
     pub client_id: Option<String>,
@@ -280,7 +281,7 @@ pub struct RevokeFormData {
 #[tracing::instrument(skip_all)]
 #[rocket::post("/oauth/revoke", data = "<form>")]
 pub async fn oauth_revoke(
-    form: Form<RevokeFormData>,
+    form: OAuthBody<RevokeFormData>,
     shared: &State<SharedOAuthProvider>,
 ) -> OAuthApiResponse {
     let provider = &shared.provider;
