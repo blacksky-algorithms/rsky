@@ -66,6 +66,8 @@ pub struct StoredRefreshToken {
 pub struct ServiceJwtPayload {
     pub iss: String,
     pub aud: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iat: Option<u64>,
     pub exp: Option<u64>,
     pub lxm: Option<String>,
     pub jti: Option<String>,
@@ -484,6 +486,7 @@ pub async fn create_service_jwt(params: ServiceJwtParams, keypair: &Keypair) -> 
     let payload = ServiceJwtPayload {
         iss,
         aud,
+        iat: Some(now),
         exp: Some(exp),
         lxm,
         jti: Some(jti),
@@ -700,6 +703,31 @@ pub fn get_refresh_token_id() -> String {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[tokio::test]
+    async fn service_jwt_carries_the_standard_time_claims() {
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut rand::thread_rng());
+        let token = create_service_jwt(
+            ServiceJwtParams {
+                iss: "did:plc:issuer".to_string(),
+                aud: "did:web:knot.example".to_string(),
+                exp: None,
+                lxm: Some("sh.tangled.repo.create".to_string()),
+                jti: None,
+            },
+            &keypair,
+        )
+        .await
+        .unwrap();
+        let payload = token.split('.').nth(1).unwrap();
+        let claims: serde_json::Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
+        let iat = claims["iat"].as_u64().expect("iat is set");
+        let exp = claims["exp"].as_u64().expect("exp is set");
+        assert_eq!(exp, iat + 60);
+        assert_eq!(claims["lxm"], "sh.tangled.repo.create");
+    }
 
     const SECRET: &[u8] = b"0f0e0d0c0b0a09080706050403020100ffeeddccbbaa99887766554433221100";
     const K256_HEX: &str = "9d5907143471e8f0e8df0f8b9512a8c5377878ee767f18fcf961055ecfc071cd";
