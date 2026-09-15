@@ -305,7 +305,7 @@ impl<'r> FromRequest<'r> for AccessFullImport {
             check_takedown: Some(true),
             check_deactivated: Some(false),
         };
-        match access_check(req, vec![AuthScope::Access], Some(opts)).await {
+        match access_check(req, full_access_scopes(req, vec![]), Some(opts)).await {
             Outcome::Success(access) => Outcome::Success(AccessFullImport { access }),
             Outcome::Error(error) => Outcome::Error(error),
             Outcome::Forward(_) => panic!("Outcome::Forward returned"),
@@ -370,23 +370,25 @@ pub struct AccessFull {
     access: AccessOutput,
 }
 
-/// Full-access methods manage credentials themselves; the reference PDS
-/// does not let an OAuth session reach them at all. `extra` widens the
-/// accepted scopes beyond `Access`.
+/// The legacy scopes a full-access method admits: `Access` plus `extra`. An
+/// OAuth session is admitted regardless, as the reference does; whether it
+/// may act is the route's scope declaration to decide (`OAuthForbidden`,
+/// `IdentityFull`, `AccountRepo`, ...), never the base guard's.
+fn full_access_scopes(req: &Request<'_>, extra: Vec<AuthScope>) -> Vec<AuthScope> {
+    if dpop_token_from_req(req).is_some() {
+        return vec![];
+    }
+    let mut scopes = vec![AuthScope::Access];
+    scopes.extend(extra);
+    scopes
+}
+
 async fn full_access_check(
     req: &Request<'_>,
     extra: Vec<AuthScope>,
     opts: Option<ValidateAccessTokenOpts>,
 ) -> Outcome<AccessOutput, AuthError> {
-    if dpop_token_from_req(req).is_some() {
-        let error = AuthError::Forbidden(
-            "OAuth credentials are not supported for this endpoint".to_string(),
-        );
-        req.local_cache(|| Some(ApiError::from(&error)));
-        return Outcome::Error((Status::Forbidden, error));
-    }
-    let mut scopes = vec![AuthScope::Access];
-    scopes.extend(extra);
+    let scopes = full_access_scopes(req, extra);
     match access_check(req, scopes, opts).await {
         Outcome::Success(access) => Outcome::Success(access),
         Outcome::Error(error) => {

@@ -363,6 +363,112 @@ async fn dpop_get(client: &Client, key: &Jwk, access_token: &str, path: &str) ->
     (status, body)
 }
 
+async fn dpop_post(
+    client: &Client,
+    key: &Jwk,
+    access_token: &str,
+    path: &str,
+    body: Value,
+) -> (Status, Value) {
+    let htu = format!("{}{}", public_url(client), path);
+    let response = client
+        .post(path)
+        .header(ContentType::JSON)
+        .header(Header::new("Authorization", format!("DPoP {access_token}")))
+        .header(Header::new(
+            "DPoP",
+            dpop_proof(key, "POST", &htu, None, Some(access_token)),
+        ))
+        .body(body.to_string())
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Unauthorized);
+    let nonce = response
+        .headers()
+        .get_one("DPoP-Nonce")
+        .expect("nonce challenge on resource request")
+        .to_string();
+    let response = client
+        .post(path)
+        .header(ContentType::JSON)
+        .header(Header::new("Authorization", format!("DPoP {access_token}")))
+        .header(Header::new(
+            "DPoP",
+            dpop_proof(key, "POST", &htu, Some(&nonce), Some(access_token)),
+        ))
+        .body(body.to_string())
+        .dispatch()
+        .await;
+    let status = response.status();
+    let body: Value = serde_json::from_str(&response.into_string().await.unwrap()).unwrap();
+    (status, body)
+}
+
+async fn generic_oauth_access_token(client: &Client, key: &Jwk) -> String {
+    let (request_uri, nonce) = run_par(client, key).await;
+    let session = open_authorize_page(client, &request_uri).await;
+    let code = sign_in_and_accept(client, &request_uri, &session).await;
+    let tokens = exchange_code(client, key, &code, &nonce).await;
+    tokens["access_token"].as_str().unwrap().to_string()
+}
+
+/// The reference admits OAuth sessions to the full-access methods and lets
+/// each route's permission check decide: `checkAccountStatus` always allows,
+/// credential management always refuses, and the PLC signing surface needs
+/// the identity grant a `transition:generic` session does not carry.
+#[tokio::test]
+async fn oauth_session_reaches_full_access_routes_per_their_permission_checks() {
+    let (_dir, client) = get_oauth_client().await;
+    common::create_account(&client).await;
+    activate_test_account(&client).await;
+    let key = dpop_key();
+    let access_token = generic_oauth_access_token(&client, &key).await;
+
+    let (status, body) = dpop_get(
+        &client,
+        &key,
+        &access_token,
+        "/xrpc/com.atproto.server.checkAccountStatus",
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{body}");
+    assert_eq!(body["activated"], true);
+
+    let (status, body) = dpop_get(
+        &client,
+        &key,
+        &access_token,
+        "/xrpc/com.atproto.server.listAppPasswords",
+    )
+    .await;
+    assert_eq!(status, Status::Forbidden, "{body}");
+    assert_eq!(
+        body["message"],
+        "OAuth credentials are not supported for this endpoint"
+    );
+
+    let (status, body) = dpop_post(
+        &client,
+        &key,
+        &access_token,
+        "/xrpc/com.atproto.server.deactivateAccount",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, Status::Forbidden, "{body}");
+
+    let (status, body) = dpop_post(
+        &client,
+        &key,
+        &access_token,
+        "/xrpc/com.atproto.identity.requestPlcOperationSignature",
+        json!({}),
+    )
+    .await;
+    assert_ne!(status, Status::Ok, "{body}");
+    assert_eq!(body["error"], "InsufficientScope", "{body}");
+}
+
 /// An OAuth session with `transition:generic` can mint a service token for
 /// a non-privileged method, the way an app password can, but not for the
 /// chat surface it was never granted.

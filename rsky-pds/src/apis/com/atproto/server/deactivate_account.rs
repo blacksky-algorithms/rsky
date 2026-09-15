@@ -1,7 +1,7 @@
 use crate::account_manager::helpers::account::{AccountStatus, AvailabilityFlags};
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
-use crate::auth_verifier::scope::{AccountStatus as AccountStatusScope, Scoped};
+use crate::auth_verifier::scope::{OAuthForbidden, Scoped};
 use crate::auth_verifier::AccessFullAllowTakendown;
 use crate::SharedSequencer;
 use rocket::serde::json::Json;
@@ -19,7 +19,7 @@ use rsky_lexicon::com::atproto::server::DeactivateAccountInput;
 )]
 pub async fn deactivate_account(
     body: Json<DeactivateAccountInput>,
-    auth: Scoped<AccountStatusScope, AccessFullAllowTakendown>,
+    auth: Scoped<OAuthForbidden, AccessFullAllowTakendown>,
     sequencer: &State<SharedSequencer>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
