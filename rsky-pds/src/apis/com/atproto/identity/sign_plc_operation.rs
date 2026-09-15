@@ -9,7 +9,7 @@ use crate::plc::operations::create_update_op;
 use crate::plc::types::{CompatibleOp, CompatibleOpOrTombstone, Operation, Service};
 use rocket::serde::json::Json;
 use rsky_common::env::env_str;
-use rsky_lexicon::com::atproto::identity::SignPlcOperationRequest;
+use rsky_lexicon::com::atproto::identity::{SignPlcOperationRequest, SignPlcOperationResponse};
 use std::collections::BTreeMap;
 
 #[rocket::post(
@@ -23,7 +23,7 @@ pub async fn sign_plc_operation(
     // `AccessFull` (its pre-existing tier) via the guard's default `Base`.
     auth: Scoped<IdentityFull, AccessFull>,
     account_manager: AccountManager,
-) -> Result<Json<Operation>, ApiError> {
+) -> Result<Json<SignPlcOperationResponse>, ApiError> {
     let did = auth.did().await?;
     let request = body.into_inner();
     let token = request.token.clone();
@@ -118,5 +118,43 @@ pub async fn sign_plc_operation(
         }
     };
 
-    Ok(Json(operation))
+    Ok(Json(wrap_operation(operation)?))
+}
+
+fn wrap_operation(operation: Operation) -> Result<SignPlcOperationResponse, ApiError> {
+    match serde_json::to_value(operation) {
+        Ok(operation) => Ok(SignPlcOperationResponse { operation }),
+        Err(error) => {
+            tracing::error!("Error serializing signed operation\n{error}");
+            Err(ApiError::RuntimeError)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_operation;
+    use crate::plc::types::Operation;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn response_nests_the_operation_under_the_lexicon_field() {
+        let operation = Operation {
+            r#type: "plc_operation".to_string(),
+            rotation_keys: vec!["did:key:zRotation".to_string()],
+            verification_methods: BTreeMap::from([(
+                "atproto".to_string(),
+                "did:key:zSigning".to_string(),
+            )]),
+            also_known_as: vec!["at://alice.test".to_string()],
+            services: BTreeMap::new(),
+            prev: Some("bafyprev".to_string()),
+            sig: Some("c2ln".to_string()),
+        };
+        let body = serde_json::to_value(wrap_operation(operation).unwrap()).unwrap();
+        assert_eq!(body["operation"]["type"], "plc_operation");
+        assert_eq!(body["operation"]["prev"], "bafyprev");
+        assert_eq!(body["operation"]["alsoKnownAs"][0], "at://alice.test");
+        assert!(body.get("type").is_none());
+    }
 }
