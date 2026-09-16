@@ -18,6 +18,7 @@ pub const XRPC_TIMEOUT_SECS: u64 = 30;
 pub(crate) fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(XRPC_TIMEOUT_SECS))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("static reqwest client configuration")
 }

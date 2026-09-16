@@ -5,6 +5,8 @@
 use async_trait::async_trait;
 use rsky_lexicon::com::atproto::space::GetDelegationTokenOutput;
 use rsky_space::credential::{decode, CREDENTIAL_TTL_SECS};
+use rsky_space::space_id::SpaceId;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -32,6 +34,82 @@ pub struct PdsDelegationSource {
     pds_url: String,
     access_token: String,
     http: reqwest::Client,
+}
+
+pub struct AuthDelegationSource {
+    auth_url: String,
+    space_uri: String,
+    community_did: String,
+    generation: i64,
+    auth_key: String,
+    http: reqwest::Client,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthDelegationResponse {
+    #[serde(rename = "delegationToken")]
+    delegation_token: String,
+}
+
+impl AuthDelegationSource {
+    pub fn new(
+        auth_url: impl Into<String>,
+        space: impl AsRef<str>,
+        generation: i64,
+        auth_key: impl Into<String>,
+    ) -> Result<Self> {
+        if generation <= 0 {
+            return Err(crate::error::DaemonError::Xrpc(
+                "space generation must be positive".to_string(),
+            ));
+        }
+        Ok(Self {
+            auth_url: auth_url.into().trim_end_matches('/').to_string(),
+            space_uri: space.as_ref().to_string(),
+            community_did: SpaceId::parse(space.as_ref())?.authority,
+            generation,
+            auth_key: auth_key.into(),
+            http: http_client(),
+        })
+    }
+}
+
+#[async_trait]
+impl DelegationSource for AuthDelegationSource {
+    async fn delegation_token(&self, space: &str) -> Result<String> {
+        if space != self.space_uri {
+            return Err(crate::error::DaemonError::Xrpc(
+                "delegation space does not match Auth binding".to_string(),
+            ));
+        }
+        let authority = SpaceId::parse(space)?.authority;
+        if authority != self.community_did {
+            return Err(crate::error::DaemonError::Xrpc(
+                "delegation space authority does not match Auth binding".to_string(),
+            ));
+        }
+        let url = format!(
+            "{}/internal/native-spaces/{}/delegation",
+            self.auth_url,
+            urlencoding::encode(&self.community_did)
+        );
+        let response = self
+            .http
+            .post(url)
+            .header("X-Acorn-Auth-Key", &self.auth_key)
+            .json(&serde_json::json!({ "spaceUri": space, "generation": self.generation }))
+            .send()
+            .await
+            .map_err(net_err)?;
+        let output: AuthDelegationResponse =
+            check(response).await?.json().await.map_err(net_err)?;
+        if output.delegation_token.is_empty() {
+            return Err(crate::error::DaemonError::Xrpc(
+                "Auth returned an empty delegation token".to_string(),
+            ));
+        }
+        Ok(output.delegation_token)
+    }
 }
 
 impl PdsDelegationSource {
@@ -98,6 +176,73 @@ impl SpaceCredentialSource {
             provider,
             space: space.into(),
         }
+    }
+}
+
+pub struct AuthCredentialProvider {
+    auth_url: String,
+    auth_key: String,
+    host: Arc<dyn SpaceHostClient>,
+    cached: Mutex<HashMap<String, (String, u64, i64)>>,
+}
+
+pub struct AuthSpaceCredentialSource {
+    provider: Arc<AuthCredentialProvider>,
+    space: String,
+    generation: i64,
+}
+
+impl AuthSpaceCredentialSource {
+    pub fn new(
+        provider: Arc<AuthCredentialProvider>,
+        space: impl Into<String>,
+        generation: i64,
+    ) -> Self {
+        Self {
+            provider,
+            space: space.into(),
+            generation,
+        }
+    }
+}
+
+#[async_trait]
+impl CredentialSource for AuthSpaceCredentialSource {
+    async fn credential(&self, now: u64) -> Result<String> {
+        self.provider
+            .credential_for(&self.space, self.generation, now)
+            .await
+    }
+}
+
+impl AuthCredentialProvider {
+    pub fn new(
+        auth_url: impl Into<String>,
+        auth_key: impl Into<String>,
+        host: Arc<dyn SpaceHostClient>,
+    ) -> Self {
+        Self {
+            auth_url: auth_url.into().trim_end_matches('/').to_string(),
+            auth_key: auth_key.into(),
+            host,
+            cached: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub async fn credential_for(&self, space: &str, generation: i64, now: u64) -> Result<String> {
+        let mut cached = self.cached.lock().await;
+        if let Some((jwt, exp, cached_generation)) = cached.get(space) {
+            if *cached_generation == generation && now < exp.saturating_sub(CREDENTIAL_TTL_SECS / 5)
+            {
+                return Ok(jwt.clone());
+            }
+        }
+        let source = AuthDelegationSource::new(&self.auth_url, space, generation, &self.auth_key)?;
+        let token = source.delegation_token(space).await?;
+        let jwt = self.host.get_space_credential(space, &token, None).await?;
+        let exp = decode(&jwt)?.claims.exp;
+        cached.insert(space.to_string(), (jwt.clone(), exp, generation));
+        Ok(jwt)
     }
 }
 #[async_trait]
@@ -410,6 +555,71 @@ mod tests {
 
         let source = PdsDelegationSource::new(server.uri(), "expired.jwt");
         assert!(source.delegation_token(SPACE).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn auth_delegation_source_scopes_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/internal/native-spaces/did%3Aplc%3Aauthority/delegation",
+            ))
+            .and(header("x-acorn-auth-key", "auth-key"))
+            .and(wiremock::matchers::body_json(serde_json::json!({
+                "spaceUri": SPACE,
+                "generation": 7,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "delegationToken": "dt.jwt",
+                "expiresAt": "2030-01-01T00:00:00Z",
+            })))
+            .mount(&server)
+            .await;
+        let source = AuthDelegationSource::new(server.uri(), SPACE, 7, "auth-key").unwrap();
+        assert_eq!(source.delegation_token(SPACE).await.unwrap(), "dt.jwt");
+    }
+
+    #[tokio::test]
+    async fn auth_delegation_source_rejects_wrong_space_and_generation() {
+        assert!(AuthDelegationSource::new("https://auth.example", SPACE, 0, "key").is_err());
+        let source = AuthDelegationSource::new("https://auth.example", SPACE, 1, "key").unwrap();
+        let error = source
+            .delegation_token("at://did:plc:authority/space/other/main")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, crate::error::DaemonError::Xrpc(message) if message.contains("does not match"))
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_provider_refreshes_and_isolates_generations() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/internal/native-spaces/did%3Aplc%3Aauthority/delegation",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "delegationToken": "dt.jwt",
+                "expiresAt": "2030-01-01T00:00:00Z",
+            })))
+            .mount(&server)
+            .await;
+        let host = Arc::new(MintingHost {
+            mints: AtomicUsize::new(0),
+            iats: vec![1000, 7000],
+        });
+        let provider = AuthCredentialProvider::new(server.uri(), "auth-key", host.clone());
+        let first = provider.credential_for(SPACE, 1, 1000).await.unwrap();
+        assert_eq!(
+            provider.credential_for(SPACE, 1, 6759).await.unwrap(),
+            first
+        );
+        assert_eq!(
+            provider.credential_for(SPACE, 2, 1000).await.unwrap(),
+            credential_jwt(7000)
+        );
+        assert_eq!(host.mints.load(Ordering::SeqCst), 2);
     }
 
     #[test]

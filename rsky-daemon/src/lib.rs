@@ -40,7 +40,8 @@ pub mod xrpc;
 
 pub use appview::AppviewProjector;
 pub use credentials::{
-    unix_now, CredentialProvider, CredentialSource, DelegationSource, InternalCredentialProvider,
+    unix_now, AuthCredentialProvider, AuthDelegationSource, AuthSpaceCredentialSource,
+    CredentialProvider, CredentialSource, DelegationSource, InternalCredentialProvider,
     PdsDelegationSource, SpaceCredentialSource, StaticCredential,
 };
 pub use engine::{sync_repo, CommitKeyResolver, SyncOutcome};
