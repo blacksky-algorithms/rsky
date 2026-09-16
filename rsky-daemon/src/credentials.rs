@@ -5,6 +5,8 @@
 use async_trait::async_trait;
 use rsky_lexicon::com::atproto::space::GetDelegationTokenOutput;
 use rsky_space::credential::{decode, CREDENTIAL_TTL_SECS};
+use rsky_space::space_id::SpaceId;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -12,6 +14,8 @@ use tokio::sync::Mutex;
 use crate::error::Result;
 use crate::xrpc::{check, http_client, net_err, SpaceHostClient};
 use crate::{service_jwt::ServiceJwtIssuer, HttpSpaceHost};
+
+type AuthCacheEntry = Arc<Mutex<Option<(String, u64, i64)>>>;
 
 /// Seconds since the Unix epoch; the injectable-`now` boundary for tests.
 pub fn unix_now() -> u64 {
@@ -32,6 +36,82 @@ pub struct PdsDelegationSource {
     pds_url: String,
     access_token: String,
     http: reqwest::Client,
+}
+
+pub struct AuthDelegationSource {
+    auth_url: String,
+    space_uri: String,
+    community_did: String,
+    generation: i64,
+    auth_key: String,
+    http: reqwest::Client,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthDelegationResponse {
+    #[serde(rename = "delegationToken")]
+    delegation_token: String,
+}
+
+impl AuthDelegationSource {
+    pub fn new(
+        auth_url: impl Into<String>,
+        space: impl AsRef<str>,
+        generation: i64,
+        auth_key: impl Into<String>,
+    ) -> Result<Self> {
+        if generation <= 0 {
+            return Err(crate::error::DaemonError::Xrpc(
+                "space generation must be positive".to_string(),
+            ));
+        }
+        Ok(Self {
+            auth_url: auth_url.into().trim_end_matches('/').to_string(),
+            space_uri: space.as_ref().to_string(),
+            community_did: SpaceId::parse(space.as_ref())?.authority,
+            generation,
+            auth_key: auth_key.into(),
+            http: http_client(),
+        })
+    }
+}
+
+#[async_trait]
+impl DelegationSource for AuthDelegationSource {
+    async fn delegation_token(&self, space: &str) -> Result<String> {
+        if space != self.space_uri {
+            return Err(crate::error::DaemonError::Xrpc(
+                "delegation space does not match Auth binding".to_string(),
+            ));
+        }
+        let authority = SpaceId::parse(space)?.authority;
+        if authority != self.community_did {
+            return Err(crate::error::DaemonError::Xrpc(
+                "delegation space authority does not match Auth binding".to_string(),
+            ));
+        }
+        let url = format!(
+            "{}/internal/native-spaces/{}/delegation",
+            self.auth_url,
+            urlencoding::encode(&self.community_did)
+        );
+        let response = self
+            .http
+            .post(url)
+            .header("X-Acorn-Auth-Key", &self.auth_key)
+            .json(&serde_json::json!({ "spaceUri": space, "generation": self.generation }))
+            .send()
+            .await
+            .map_err(net_err)?;
+        let output: AuthDelegationResponse =
+            check(response).await?.json().await.map_err(net_err)?;
+        if output.delegation_token.is_empty() {
+            return Err(crate::error::DaemonError::Xrpc(
+                "Auth returned an empty delegation token".to_string(),
+            ));
+        }
+        Ok(output.delegation_token)
+    }
 }
 
 impl PdsDelegationSource {
@@ -98,6 +178,82 @@ impl SpaceCredentialSource {
             provider,
             space: space.into(),
         }
+    }
+}
+
+pub struct AuthCredentialProvider {
+    auth_url: String,
+    auth_key: String,
+    host: Arc<dyn SpaceHostClient>,
+    cached: Mutex<HashMap<String, AuthCacheEntry>>,
+}
+
+pub struct AuthSpaceCredentialSource {
+    provider: Arc<AuthCredentialProvider>,
+    space: String,
+    generation: i64,
+}
+
+impl AuthSpaceCredentialSource {
+    pub fn new(
+        provider: Arc<AuthCredentialProvider>,
+        space: impl Into<String>,
+        generation: i64,
+    ) -> Self {
+        Self {
+            provider,
+            space: space.into(),
+            generation,
+        }
+    }
+}
+
+#[async_trait]
+impl CredentialSource for AuthSpaceCredentialSource {
+    async fn credential(&self, now: u64) -> Result<String> {
+        self.provider
+            .credential_for(&self.space, self.generation, now)
+            .await
+    }
+}
+
+impl AuthCredentialProvider {
+    pub fn new(
+        auth_url: impl Into<String>,
+        auth_key: impl Into<String>,
+        host: Arc<dyn SpaceHostClient>,
+    ) -> Self {
+        Self {
+            auth_url: auth_url.into().trim_end_matches('/').to_string(),
+            auth_key: auth_key.into(),
+            host,
+            cached: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn cache_for(&self, space: &str) -> AuthCacheEntry {
+        let mut entries = self.cached.lock().await;
+        entries
+            .entry(space.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(None)))
+            .clone()
+    }
+
+    pub async fn credential_for(&self, space: &str, generation: i64, now: u64) -> Result<String> {
+        let cache = self.cache_for(space).await;
+        let mut cached = cache.lock().await;
+        if let Some((jwt, exp, cached_generation)) = cached.as_ref() {
+            if *cached_generation == generation && now < exp.saturating_sub(CREDENTIAL_TTL_SECS / 5)
+            {
+                return Ok(jwt.clone());
+            }
+        }
+        let source = AuthDelegationSource::new(&self.auth_url, space, generation, &self.auth_key)?;
+        let token = source.delegation_token(space).await?;
+        let jwt = self.host.get_space_credential(space, &token, None).await?;
+        let exp = decode(&jwt)?.claims.exp;
+        *cached = Some((jwt.clone(), exp, generation));
+        Ok(jwt)
     }
 }
 #[async_trait]
@@ -204,10 +360,12 @@ mod tests {
     use rsky_lexicon::com::atproto::space::ListReposOutput;
     use rsky_space::credential::{encode, JwtHeader, SpaceClaims, CREDENTIAL_TYP};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const SPACE: &str = "at://did:plc:authority/space/community.blacksky.feed/main";
+    const OTHER_SPACE: &str = "at://did:plc:other/space/community.blacksky.feed/main";
 
     fn credential_jwt(iat: u64) -> String {
         let header = JwtHeader {
@@ -240,6 +398,7 @@ mod tests {
     struct MintingHost {
         mints: AtomicUsize,
         iats: Vec<u64>,
+        block: Option<(Arc<Notify>, Arc<Notify>)>,
     }
     #[async_trait]
     impl SpaceHostClient for MintingHost {
@@ -252,6 +411,10 @@ mod tests {
             assert_eq!(space, SPACE);
             assert_eq!(delegation_token, "dt.jwt");
             assert_eq!(client_attestation, None);
+            if let Some((started, release)) = &self.block {
+                started.notify_one();
+                release.notified().await;
+            }
             let i = self.mints.fetch_add(1, Ordering::SeqCst);
             Ok(credential_jwt(self.iats[i]))
         }
@@ -283,6 +446,7 @@ mod tests {
         let host = Arc::new(MintingHost {
             mints: AtomicUsize::new(0),
             iats: vec![1000, 7000],
+            block: None,
         });
         let provider = CredentialProvider::new(SPACE, Box::new(FixedDelegation), host.clone());
 
@@ -412,6 +576,120 @@ mod tests {
         assert!(source.delegation_token(SPACE).await.is_err());
     }
 
+    #[tokio::test]
+    async fn auth_delegation_source_scopes_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/internal/native-spaces/did%3Aplc%3Aauthority/delegation",
+            ))
+            .and(header("x-acorn-auth-key", "auth-key"))
+            .and(wiremock::matchers::body_json(serde_json::json!({
+                "spaceUri": SPACE,
+                "generation": 7,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "delegationToken": "dt.jwt",
+                "expiresAt": 1893456000,
+            })))
+            .mount(&server)
+            .await;
+        let source = AuthDelegationSource::new(server.uri(), SPACE, 7, "auth-key").unwrap();
+        assert_eq!(source.delegation_token(SPACE).await.unwrap(), "dt.jwt");
+    }
+
+    #[tokio::test]
+    async fn auth_delegation_source_rejects_wrong_space_and_generation() {
+        assert!(AuthDelegationSource::new("https://auth.example", SPACE, 0, "key").is_err());
+        let source = AuthDelegationSource::new("https://auth.example", SPACE, 1, "key").unwrap();
+        let error = source
+            .delegation_token("at://did:plc:authority/space/other/main")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, crate::error::DaemonError::Xrpc(message) if message.contains("does not match"))
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_provider_refreshes_and_isolates_generations() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/internal/native-spaces/did%3Aplc%3Aauthority/delegation",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "delegationToken": "dt.jwt",
+                "expiresAt": 1893456000,
+            })))
+            .mount(&server)
+            .await;
+        let host = Arc::new(MintingHost {
+            mints: AtomicUsize::new(0),
+            iats: vec![1000, 7000],
+            block: None,
+        });
+        let provider = AuthCredentialProvider::new(server.uri(), "auth-key", host.clone());
+        let first = provider.credential_for(SPACE, 1, 1000).await.unwrap();
+        assert_eq!(
+            provider.credential_for(SPACE, 1, 6759).await.unwrap(),
+            first
+        );
+        assert_eq!(
+            provider.credential_for(SPACE, 2, 1000).await.unwrap(),
+            credential_jwt(7000)
+        );
+        assert_eq!(host.mints.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn auth_provider_refreshes_per_space_without_cross_space_blocking() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "delegationToken": "dt.jwt",
+                "expiresAt": 1893456000,
+            })))
+            .mount(&server)
+            .await;
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let host = Arc::new(MintingHost {
+            mints: AtomicUsize::new(0),
+            iats: vec![1000],
+            block: Some((started.clone(), release.clone())),
+        });
+        let provider = Arc::new(AuthCredentialProvider::new(
+            server.uri(),
+            "auth-key",
+            host.clone(),
+        ));
+        *provider.cache_for(OTHER_SPACE).await.lock().await = Some((credential_jwt(1000), 8200, 1));
+
+        let first_provider = provider.clone();
+        let first =
+            tokio::spawn(async move { first_provider.credential_for(SPACE, 1, 1000).await });
+        started.notified().await;
+
+        let unrelated = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            provider.credential_for(OTHER_SPACE, 1, 1000),
+        )
+        .await
+        .expect("a cached unrelated space must not wait for a refresh")
+        .unwrap();
+        assert_eq!(unrelated, credential_jwt(1000));
+
+        let second_provider = provider.clone();
+        let second =
+            tokio::spawn(async move { second_provider.credential_for(SPACE, 1, 1000).await });
+        tokio::task::yield_now().await;
+        release.notify_one();
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        assert_eq!(host.mints.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn unix_now_is_after_2020() {
         assert!(unix_now() > 1_577_836_800);
@@ -423,6 +701,7 @@ mod tests {
         let host = MintingHost {
             mints: AtomicUsize::new(0),
             iats: vec![],
+            block: None,
         };
         assert!(host.list_repos(SPACE, "c", None, None).await.is_ok());
         assert!(host.register_notify(SPACE, "c", "e", None).await.is_ok());

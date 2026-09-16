@@ -6,11 +6,12 @@ use rsky_daemon::config::Config;
 use rsky_daemon::engine::CommitKeyResolver;
 use rsky_daemon::runner::SpaceWorkerParts;
 use rsky_daemon::{
-    notify_router, run_multi, AppviewProjector, CombinedSource, CredentialSource, DaemonError,
-    FeedsProjector, HttpProjectionIngress, HttpRepoHost, HttpSpaceHost, HttpSpaceSource,
-    InMemoryIndex, InternalCredentialProvider, JournalConsumer, MultiRunnerOptions, NotifyState,
-    Result, Router, SharedJournalConsumer, SpaceCredentialSource, SpaceIndex, SpaceLifecycleAcker,
-    SpaceRegistry, SqliteIndex, StaticCredential, StaticSpaces,
+    notify_router, run_multi, AppviewProjector, AuthCredentialProvider, AuthSpaceCredentialSource,
+    CombinedSource, CredentialSource, DaemonError, FeedsProjector, HttpProjectionIngress,
+    HttpRepoHost, HttpSpaceHost, HttpSpaceSource, InMemoryIndex, InternalCredentialProvider,
+    JournalConsumer, MultiRunnerOptions, NotifyState, Result, Router, SharedJournalConsumer,
+    SpaceCredentialSource, SpaceIndex, SpaceLifecycleAcker, SpaceRegistry, SqliteIndex,
+    StaticCredential, StaticSpaces,
 };
 use rsky_identity::did::atproto_data::{get_did_key_from_multibase, VerificationMaterial};
 use rsky_identity::types::{IdentityResolverOpts, MemoryCache};
@@ -153,7 +154,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Some(Arc::new(SqliteIndex::open(&cfg.index_db_path)?))
     };
 
-    let shared_creds = if cfg.static_credential.is_empty() {
+    let shared_creds = if cfg.static_credential.is_empty() && cfg.auth_url.is_empty() {
         if cfg.space_host_mint_token.is_empty() || cfg.service_signing_key_hex.is_empty() {
             return Err(
                 "DAEMON_SPACE_HOST_MINT_TOKEN and DAEMON_SERVICE_SIGNING_KEY_HEX are required"
@@ -167,6 +168,15 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 &cfg.service_identity,
                 &cfg.service_signing_key_hex,
             )?,
+            host.clone(),
+        )))
+    } else {
+        None
+    };
+    let auth_creds = if cfg.static_credential.is_empty() && !cfg.auth_url.is_empty() {
+        Some(Arc::new(AuthCredentialProvider::new(
+            &cfg.auth_url,
+            &cfg.auth_key,
             host.clone(),
         )))
     } else {
@@ -229,6 +239,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let db_for_factory = db.clone();
     let dpop_for_factory = dpop.clone();
     let shared_for_factory = shared_creds.clone();
+    let auth_for_factory = auth_creds.clone();
     let projection = ProjectionConfig {
         service_identity: cfg.service_identity.clone(),
         signing_key_hex: cfg.service_signing_key_hex.clone(),
@@ -240,28 +251,37 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             .appview_projection()
             .map(|(url, aud)| (url.to_string(), aud.to_string())),
     };
-    let factory = Arc::new(move |space: &str| -> Result<SpaceWorkerParts> {
-        let creds: Arc<dyn CredentialSource> = match &shared_for_factory {
-            Some(provider) => Arc::new(SpaceCredentialSource::new(provider.clone(), space)),
-            None => Arc::new(StaticCredential(static_credential.clone())),
-        };
-        let index: Arc<dyn SpaceIndex> = match &db_for_factory {
-            Some(db) => Arc::new(db.for_space(space)),
-            None => Arc::new(InMemoryIndex::new()),
-        };
-        let base = repo_host_base.clone();
-        let proof = dpop_for_factory.clone();
-        let (projectors, acker) = projection.consumers(space)?;
-        Ok((
-            creds,
-            Box::new(move |credential| {
-                Arc::new(HttpRepoHost::new(base.clone(), credential, proof.clone()))
-            }),
-            index,
-            projectors,
-            acker,
-        ))
-    });
+    let factory = Arc::new(
+        move |space: &str, generation: i64| -> Result<SpaceWorkerParts> {
+            let creds: Arc<dyn CredentialSource> = match (&shared_for_factory, &auth_for_factory) {
+                (Some(provider), _) => {
+                    Arc::new(SpaceCredentialSource::new(provider.clone(), space))
+                }
+                (_, Some(provider)) => Arc::new(AuthSpaceCredentialSource::new(
+                    provider.clone(),
+                    space,
+                    generation,
+                )),
+                (None, None) => Arc::new(StaticCredential(static_credential.clone())),
+            };
+            let index: Arc<dyn SpaceIndex> = match &db_for_factory {
+                Some(db) => Arc::new(db.for_space(space)),
+                None => Arc::new(InMemoryIndex::new()),
+            };
+            let base = repo_host_base.clone();
+            let proof = dpop_for_factory.clone();
+            let (projectors, acker) = projection.consumers(space)?;
+            Ok((
+                creds,
+                Box::new(move |credential| {
+                    Arc::new(HttpRepoHost::new(base.clone(), credential, proof.clone()))
+                }),
+                index,
+                projectors,
+                acker,
+            ))
+        },
+    );
     let opts = MultiRunnerOptions {
         refresh_interval_secs: cfg.sweep_interval_secs,
         sweep_interval_secs: cfg.sweep_interval_secs,

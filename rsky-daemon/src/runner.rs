@@ -36,7 +36,7 @@ pub type SpaceWorkerParts = (
     Vec<SharedJournalConsumer>,
     Option<Arc<dyn SpaceLifecycleAcker>>,
 );
-pub type MultiSpaceFactory = Arc<dyn Fn(&str) -> Result<SpaceWorkerParts> + Send + Sync>;
+pub type MultiSpaceFactory = Arc<dyn Fn(&str, i64) -> Result<SpaceWorkerParts> + Send + Sync>;
 
 pub struct MultiRunnerOptions {
     pub refresh_interval_secs: u64,
@@ -77,7 +77,7 @@ pub async fn run_multi(
                 let stale: Vec<_> = workers.iter().filter(|(space, worker)| desired.get(*space).is_none_or(|target| target.generation != worker.generation)).map(|(space, _)| space.clone()).collect();
                 for space in stale { if let Some(worker) = workers.remove(&space) { let _ = worker.stop.send(true); let _ = worker.handle.await; } }
                 for (space, target) in &desired { if workers.contains_key(space) { continue; }
-                    let (creds, repo, index, projectors, acker) = match factory(space) { Ok(parts) => parts, Err(error) => { tracing::warn!(%space, error = %error, "cannot prepare space worker"); continue; } };
+                    let (creds, repo, index, projectors, acker) = match factory(space, target.generation) { Ok(parts) => parts, Err(error) => { tracing::warn!(%space, error = %error, "cannot prepare space worker"); continue; } };
                     let (tx, rx) = mpsc::channel(256); let (stop, stop_rx) = watch::channel(false);
                     let worker_opts = RunnerOptions { space_uri: space.clone(), sweep_interval_secs: opts.sweep_interval_secs, notify_endpoint: opts.notify_endpoint.clone(), service_identity: opts.service_identity.clone(), generation: target.generation, now_fn: opts.now_fn };
                     let handle = tokio::spawn(run(worker_opts, host.clone(), creds, repo, index, keys.clone(), projectors, acker, rx, stop_rx));

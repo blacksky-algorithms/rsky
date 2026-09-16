@@ -62,6 +62,16 @@ pub struct Config {
     )]
     pub pds_access_token: String,
 
+    #[arg(long, env = "DAEMON_AUTH_URL", default_value = "")]
+    pub auth_url: String,
+    #[arg(
+        long,
+        env = "DAEMON_AUTH_KEY",
+        default_value = "",
+        hide_env_values = true
+    )]
+    pub auth_key: String,
+
     /// Dev mode: a pre-issued space credential, bypassing minting entirely.
     #[arg(
         long,
@@ -154,6 +164,29 @@ impl Config {
         }
         if !self.appview_url.is_empty() && self.appview_service_did.is_empty() {
             return Err("DAEMON_APPVIEW_SERVICE_DID is required with DAEMON_APPVIEW_URL".into());
+        }
+        let auth_mode = !self.auth_url.is_empty() || !self.auth_key.is_empty();
+        let legacy_mode = !self.space_host_mint_token.is_empty();
+        if !self.static_credential.is_empty() && (auth_mode || legacy_mode) {
+            return Err(
+                "DAEMON_STATIC_CREDENTIAL cannot be combined with delegation settings".into(),
+            );
+        }
+        if auth_mode && (self.auth_url.is_empty() || self.auth_key.is_empty()) {
+            return Err("DAEMON_AUTH_URL and DAEMON_AUTH_KEY must be provided together".into());
+        }
+        if auth_mode {
+            let url = reqwest::Url::parse(&self.auth_url)
+                .map_err(|_| "DAEMON_AUTH_URL must be an absolute HTTP(S) URL")?;
+            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+                return Err("DAEMON_AUTH_URL must be an absolute HTTP(S) URL".into());
+            }
+            if self.auth_key.trim().is_empty() {
+                return Err("DAEMON_AUTH_KEY cannot be empty".into());
+            }
+        }
+        if auth_mode && legacy_mode {
+            return Err("Auth delegation and legacy minting are mutually exclusive".into());
         }
         Ok(())
     }
@@ -336,6 +369,25 @@ mod tests {
         .unwrap();
         assert!(all_authorities.validate().is_ok());
         assert!(all_authorities.authority_filter().is_none());
+        let native_discovery = Config::try_parse_from([
+            "rsky-daemon",
+            "--space-host-url",
+            "https://host.example",
+            "--service-identity",
+            "did:web:syncer.example",
+            "--spaces-url",
+            "https://feeds.example",
+            "--spaces-api-key",
+            "key",
+            "--auth-url",
+            "https://auth.example",
+            "--auth-key",
+            "secret",
+            "--service-signing-key-hex",
+            "00",
+        ])
+        .unwrap();
+        assert!(native_discovery.validate().is_ok());
         let keyless_discovery = Config::try_parse_from([
             "rsky-daemon",
             "--space-host-url",
