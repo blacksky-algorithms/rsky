@@ -1290,9 +1290,9 @@ mod indexer_tests {
             .await
             .expect("failed to enqueue event");
 
-        // Verify queue has 2 jobs
+        // Verify queue has one job per operation plus the commit-progress job
         let queue_len = storage.firehose_live_len().unwrap();
-        assert_eq!(queue_len, 2, "expected 2 jobs in firehose_live queue");
+        assert_eq!(queue_len, 3, "expected 3 jobs in firehose_live queue");
         tracing::info!("firehose_live queue has {queue_len} jobs");
 
         // Step 3: Simulate indexer dequeuing and processing jobs
@@ -1347,7 +1347,7 @@ mod indexer_tests {
             processed_count += 1;
         }
 
-        assert_eq!(processed_count, 2, "expected to process 2 jobs");
+        assert_eq!(processed_count, 3, "expected to process 3 jobs");
         tracing::info!("processed {processed_count} jobs from firehose_live queue");
 
         // Step 4: Verify queue is empty
