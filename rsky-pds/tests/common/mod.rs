@@ -145,6 +145,15 @@ fn init_env() {
                 std::env::set_var(key, value);
             }
         }
+        // tests never send mail, whatever the caller's environment (CI carries
+        // real Mailgun secrets): messages are logged, never sent
+        for key in [
+            "PDS_MAILGUN_API_KEY",
+            "PDS_MAILGUN_DOMAIN",
+            "PDS_EMAIL_SMTP_URL",
+        ] {
+            std::env::set_var(key, "");
+        }
         if std::env::var("PDS_BLOBSTORE_DISK_LOCATION").is_err()
             && std::env::var("PDS_BLOBSTORE_S3_BUCKET").is_err()
         {
