@@ -6,8 +6,13 @@ async fn main() {
     let _ = &*rsky_pds::account_manager::helpers::auth::PDS_JWT_SIGNER;
     let _ = &*rsky_pds::apis::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 
-    rsky_pds::logging::init(rsky_pds::logging::LogFormat::from_env());
-    match cli::parse_args(std::env::args().skip(1)) {
+    let command = cli::parse_args(std::env::args().skip(1));
+    let target = match command {
+        Ok(None) => rsky_pds::logging::LogTarget::Stdout,
+        _ => rsky_pds::logging::LogTarget::Stderr,
+    };
+    rsky_pds::logging::init_to(rsky_pds::logging::LogFormat::from_env(), target);
+    match command {
         Ok(None) => {
             let _ = build_rocket(None).await.launch().await;
             rsky_pds::telemetry::shutdown();

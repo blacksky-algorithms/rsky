@@ -24,8 +24,8 @@ async fn drain_mode_reports_and_exits_by_outcome() {
         "{}",
         String::from_utf8_lossy(&drained.stderr)
     );
-    let status: serde_json::Value =
-        serde_json::from_slice(&drained.stdout).expect("the drain prints its status");
+    let status: serde_json::Value = serde_json::from_slice(&drained.stdout)
+        .expect("the drain prints only its status on stdout; logs go to stderr");
     assert_eq!(status["did"], DID);
     assert_eq!(status["fullyDrained"], true);
 
