@@ -2065,13 +2065,24 @@ mod tests {
             assert!(result.is_err(), "Key '{}' should be invalid", key);
         }
 
-        // Rejects keys over 256 chars
-        let long_key: String = "a".repeat(253);
+        // Allows the tilde the record key syntax permits
+        let key = "app.skytube.video.save/at~~~did~plc~abc~app.bsky.feed.post~3may7a7bamk2t";
+        let result = mst.add(&key.to_string(), cid1, None).await;
+        assert!(result.is_ok(), "Key '{}' should be valid", key);
+
+        // Rejects keys over 1024 chars
+        let long_key: String = "a".repeat(1020);
         let key = format!("coll/{}", long_key);
         let result = mst.add(&key, cid1, None).await;
         assert!(result.is_err());
 
-        // Allows long key under 256 chars
+        // Allows a full-length 512-char rkey
+        let long_key: String = "a".repeat(512);
+        let key = format!("coll/{}", long_key);
+        let result = mst.add(&key, cid1, None).await;
+        assert!(result.is_ok());
+
+        // Allows long key under the limit
         let long_key: String = "a".repeat(250);
         let key = format!("coll/{}", long_key);
         let result = mst.add(&key, cid1, None).await;

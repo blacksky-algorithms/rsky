@@ -17,19 +17,18 @@ use tokio::sync::RwLock;
 
 fn is_valid_chars(input: &str) -> bool {
     lazy_static! {
-        static ref RE: Regex = Regex::new(r"^[a-zA-Z0-9_\-:.]*$").unwrap();
+        static ref RE: Regex = Regex::new(r"^[a-zA-Z0-9_~\-:.]*$").unwrap();
     }
     RE.is_match(input)
 }
 
-// * Restricted to a subset of ASCII characters — the allowed characters are
-// alphanumeric (A-Za-z0-9), period, dash, underscore, colon, or tilde (.-_:~)
-// * Must have at least 1 and at most 512 characters
-// * The specific record key values . and .. are not allowed
+// A repo MST path is `collection/rkey`: each segment is non-empty ASCII from
+// alphanumerics, period, dash, underscore, colon, or tilde, and the whole
+// path is at most 1024 bytes (an rkey alone may be 512).
 pub fn is_valid_repo_mst_path(key: &str) -> Result<bool> {
     let split: Vec<&str> = key.split("/").collect();
 
-    if key.len() <= 256
+    if key.len() <= 1024
         && split.len() == 2
         && !split[0].is_empty()
         && !split[1].is_empty()
