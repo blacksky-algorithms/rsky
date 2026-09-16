@@ -1,6 +1,6 @@
 [package]
 name = "rsky-pds"
-version = "1.8.14"
+version = "1.8.15"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "Rust reference implementation of an atproto PDS."
 license = "Apache-2.0"
@@ -93,5 +93,4 @@ subtle = "2.6.1"
 [dev-dependencies]
 tempfile = "3.10"
 http-auth-basic = { version = "0.3.5" }
-
 

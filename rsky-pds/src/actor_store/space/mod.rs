@@ -581,6 +581,21 @@ impl SpaceStore {
             .await
     }
 
+    /// Whether a blob is referenced by any record in any space in this store.
+    pub async fn any_space_references_blob(&self, blob_cid: &str) -> Result<bool> {
+        let blob_cid = blob_cid.to_string();
+        self.db
+            .run(move |conn| {
+                let referenced: bool = conn.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM space_blob_ref WHERE blob_cid = ?1)",
+                    params![blob_cid],
+                    |row| row.get(0),
+                )?;
+                Ok(referenced)
+            })
+            .await
+    }
+
     /// Flag a repo as belonging to a deleted space. Never erases records: the
     /// data is the user's own (spec §Space deletion).
     pub async fn flag_repo_deleted(&self, space_uri: &str) -> Result<bool> {
