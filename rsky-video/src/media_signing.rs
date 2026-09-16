@@ -41,6 +41,19 @@ mod tests {
     }
 
     #[test]
+    fn matches_the_minter_test_vector_exactly() {
+        assert!(verify(
+            "at://did:plc:spacehost123/space/feed/3kspace",
+            "did:plc:author456",
+            "bafkreicrossrepovector",
+            1758067200,
+            "n81rog6m1xwSPJxE_7rDqQOtsc5y5kRqgjs99W78US8",
+            1758067199,
+            Some("cross-repo-test-key"),
+        ));
+    }
+
+    #[test]
     fn accepts_valid_signature() {
         assert!(verify(
             "at://did:example:space/space/type/key",
