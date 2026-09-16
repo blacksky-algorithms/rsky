@@ -15,6 +15,8 @@ use crate::error::Result;
 use crate::xrpc::{check, http_client, net_err, SpaceHostClient};
 use crate::{service_jwt::ServiceJwtIssuer, HttpSpaceHost};
 
+type AuthCacheEntry = Arc<Mutex<Option<(String, u64, i64)>>>;
+
 /// Seconds since the Unix epoch; the injectable-`now` boundary for tests.
 pub fn unix_now() -> u64 {
     std::time::SystemTime::now()
@@ -183,7 +185,7 @@ pub struct AuthCredentialProvider {
     auth_url: String,
     auth_key: String,
     host: Arc<dyn SpaceHostClient>,
-    cached: Mutex<HashMap<String, (String, u64, i64)>>,
+    cached: Mutex<HashMap<String, AuthCacheEntry>>,
 }
 
 pub struct AuthSpaceCredentialSource {
@@ -229,9 +231,18 @@ impl AuthCredentialProvider {
         }
     }
 
+    async fn cache_for(&self, space: &str) -> AuthCacheEntry {
+        let mut entries = self.cached.lock().await;
+        entries
+            .entry(space.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(None)))
+            .clone()
+    }
+
     pub async fn credential_for(&self, space: &str, generation: i64, now: u64) -> Result<String> {
-        let mut cached = self.cached.lock().await;
-        if let Some((jwt, exp, cached_generation)) = cached.get(space) {
+        let cache = self.cache_for(space).await;
+        let mut cached = cache.lock().await;
+        if let Some((jwt, exp, cached_generation)) = cached.as_ref() {
             if *cached_generation == generation && now < exp.saturating_sub(CREDENTIAL_TTL_SECS / 5)
             {
                 return Ok(jwt.clone());
@@ -241,7 +252,7 @@ impl AuthCredentialProvider {
         let token = source.delegation_token(space).await?;
         let jwt = self.host.get_space_credential(space, &token, None).await?;
         let exp = decode(&jwt)?.claims.exp;
-        cached.insert(space.to_string(), (jwt.clone(), exp, generation));
+        *cached = Some((jwt.clone(), exp, generation));
         Ok(jwt)
     }
 }
@@ -349,10 +360,12 @@ mod tests {
     use rsky_lexicon::com::atproto::space::ListReposOutput;
     use rsky_space::credential::{encode, JwtHeader, SpaceClaims, CREDENTIAL_TYP};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const SPACE: &str = "at://did:plc:authority/space/community.blacksky.feed/main";
+    const OTHER_SPACE: &str = "at://did:plc:other/space/community.blacksky.feed/main";
 
     fn credential_jwt(iat: u64) -> String {
         let header = JwtHeader {
@@ -385,6 +398,7 @@ mod tests {
     struct MintingHost {
         mints: AtomicUsize,
         iats: Vec<u64>,
+        block: Option<(Arc<Notify>, Arc<Notify>)>,
     }
     #[async_trait]
     impl SpaceHostClient for MintingHost {
@@ -397,6 +411,10 @@ mod tests {
             assert_eq!(space, SPACE);
             assert_eq!(delegation_token, "dt.jwt");
             assert_eq!(client_attestation, None);
+            if let Some((started, release)) = &self.block {
+                started.notify_one();
+                release.notified().await;
+            }
             let i = self.mints.fetch_add(1, Ordering::SeqCst);
             Ok(credential_jwt(self.iats[i]))
         }
@@ -428,6 +446,7 @@ mod tests {
         let host = Arc::new(MintingHost {
             mints: AtomicUsize::new(0),
             iats: vec![1000, 7000],
+            block: None,
         });
         let provider = CredentialProvider::new(SPACE, Box::new(FixedDelegation), host.clone());
 
@@ -571,7 +590,7 @@ mod tests {
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "delegationToken": "dt.jwt",
-                "expiresAt": "2030-01-01T00:00:00Z",
+                "expiresAt": 1893456000,
             })))
             .mount(&server)
             .await;
@@ -601,13 +620,14 @@ mod tests {
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "delegationToken": "dt.jwt",
-                "expiresAt": "2030-01-01T00:00:00Z",
+                "expiresAt": 1893456000,
             })))
             .mount(&server)
             .await;
         let host = Arc::new(MintingHost {
             mints: AtomicUsize::new(0),
             iats: vec![1000, 7000],
+            block: None,
         });
         let provider = AuthCredentialProvider::new(server.uri(), "auth-key", host.clone());
         let first = provider.credential_for(SPACE, 1, 1000).await.unwrap();
@@ -622,6 +642,54 @@ mod tests {
         assert_eq!(host.mints.load(Ordering::SeqCst), 2);
     }
 
+    #[tokio::test]
+    async fn auth_provider_refreshes_per_space_without_cross_space_blocking() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "delegationToken": "dt.jwt",
+                "expiresAt": 1893456000,
+            })))
+            .mount(&server)
+            .await;
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let host = Arc::new(MintingHost {
+            mints: AtomicUsize::new(0),
+            iats: vec![1000],
+            block: Some((started.clone(), release.clone())),
+        });
+        let provider = Arc::new(AuthCredentialProvider::new(
+            server.uri(),
+            "auth-key",
+            host.clone(),
+        ));
+        *provider.cache_for(OTHER_SPACE).await.lock().await = Some((credential_jwt(1000), 8200, 1));
+
+        let first_provider = provider.clone();
+        let first =
+            tokio::spawn(async move { first_provider.credential_for(SPACE, 1, 1000).await });
+        started.notified().await;
+
+        let unrelated = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            provider.credential_for(OTHER_SPACE, 1, 1000),
+        )
+        .await
+        .expect("a cached unrelated space must not wait for a refresh")
+        .unwrap();
+        assert_eq!(unrelated, credential_jwt(1000));
+
+        let second_provider = provider.clone();
+        let second =
+            tokio::spawn(async move { second_provider.credential_for(SPACE, 1, 1000).await });
+        tokio::task::yield_now().await;
+        release.notify_one();
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        assert_eq!(host.mints.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn unix_now_is_after_2020() {
         assert!(unix_now() > 1_577_836_800);
@@ -633,6 +701,7 @@ mod tests {
         let host = MintingHost {
             mints: AtomicUsize::new(0),
             iats: vec![],
+            block: None,
         };
         assert!(host.list_repos(SPACE, "c", None, None).await.is_ok());
         assert!(host.register_notify(SPACE, "c", "e", None).await.is_ok());
