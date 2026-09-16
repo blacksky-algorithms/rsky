@@ -1433,7 +1433,7 @@ async fn blob_upload_and_space_get_blob() {
     let blob = body["blob"].clone();
     let blob_cid = blob["ref"]["$link"].as_str().unwrap().to_string();
 
-    // An uploaded but unreferenced blob remains public.
+    // An uploaded but not-yet-referenced blob is refused, as before this change.
     let response = s
         .client
         .get(format!(
