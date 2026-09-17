@@ -98,6 +98,7 @@ pub async fn get_upload_limits(
 pub struct UploadVideoParams {
     pub did: String,
     pub name: String,
+    pub private: Option<String>,
 }
 
 /// Response for uploadVideo
@@ -150,6 +151,7 @@ pub async fn upload_video(
     }
 
     let user_did = &params.did;
+    let private = is_private_upload(params.private.as_deref());
     let file_size = body.len() as i64;
 
     info!(
@@ -187,6 +189,7 @@ pub async fn upload_video(
         user_did,
         Some(&params.name),
         Some(file_size),
+        private,
     )
     .await?;
 
@@ -474,6 +477,17 @@ pub struct VideoProxyQuery {
     pub sig: Option<String>,
 }
 
+fn is_private_upload(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+fn reject_unsigned_private(private: bool, signed: Option<(i64, i64)>) -> Result<()> {
+    if private && signed.is_none() {
+        return Err(Error::NotFound("Not found".to_string()));
+    }
+    Ok(())
+}
+
 fn verify_video_proxy_query(
     query: &VideoProxyQuery,
     did: &str,
@@ -518,7 +532,8 @@ pub async fn proxy_playlist(
 
     // Look up the bunny video ID in our database
     let redirect_url = match db::get_bunny_video_id(&state.db_pool, &did, &cid).await? {
-        Some(bunny_video_id) => {
+        Some((bunny_video_id, private)) => {
+            reject_unsigned_private(private, signed)?;
             // Video is in our system - redirect to Bunny CDN
             match signed {
                 Some((exp, _)) => state
@@ -577,7 +592,8 @@ pub async fn proxy_thumbnail(
 
     // Look up the bunny video ID in our database
     let redirect_url = match db::get_bunny_video_id(&state.db_pool, &did, &cid).await? {
-        Some(bunny_video_id) => {
+        Some((bunny_video_id, private)) => {
+            reject_unsigned_private(private, signed)?;
             // Video is in our system - redirect to Bunny CDN
             match signed {
                 Some((exp, _)) => state
@@ -613,4 +629,30 @@ pub async fn proxy_thumbnail(
         )
         .body(Body::empty())
         .unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_private_upload, reject_unsigned_private};
+
+    #[test]
+    fn private_upload_requires_exact_true_value() {
+        assert!(is_private_upload(Some("true")));
+        assert!(!is_private_upload(None));
+        assert!(!is_private_upload(Some("false")));
+        assert!(!is_private_upload(Some("TRUE")));
+        assert!(!is_private_upload(Some("1")));
+    }
+
+    #[test]
+    fn unsigned_private_video_is_not_found() {
+        let error = reject_unsigned_private(true, None).unwrap_err();
+        assert!(matches!(error, crate::error::Error::NotFound(message) if message == "Not found"));
+    }
+
+    #[test]
+    fn signed_private_and_unsigned_public_videos_are_allowed() {
+        assert!(reject_unsigned_private(true, Some((123, 100))).is_ok());
+        assert!(reject_unsigned_private(false, None).is_ok());
+    }
 }

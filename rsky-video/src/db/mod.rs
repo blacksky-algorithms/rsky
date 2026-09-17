@@ -18,6 +18,7 @@ pub struct VideoJob {
     pub bunny_video_id: Option<String>,
     pub video_cid: Option<String>,
     pub pds_blob_ref: Option<JsonValue>,
+    pub private: bool,
     pub state: String,
     pub progress: i32,
     pub blob_ref: Option<JsonValue>,
@@ -97,6 +98,13 @@ pub async fn run_migrations(pool: &Pool) -> Result<()> {
 
     client
         .execute(
+            "ALTER TABLE videos.video_jobs ADD COLUMN IF NOT EXISTS private BOOLEAN NOT NULL DEFAULT FALSE",
+            &[],
+        )
+        .await?;
+
+    client
+        .execute(
             "CREATE INDEX IF NOT EXISTS idx_video_jobs_job_id ON videos.video_jobs (job_id)",
             &[],
         )
@@ -164,6 +172,7 @@ pub async fn create_job(
     did: &str,
     filename: Option<&str>,
     file_size: Option<i64>,
+    private: bool,
 ) -> Result<VideoJob> {
     let client = pool.get().await?;
     let job_id = Uuid::new_v4();
@@ -171,11 +180,11 @@ pub async fn create_job(
     let row = client
         .query_one(
             r#"
-            INSERT INTO videos.video_jobs (job_id, did, original_filename, file_size)
-            VALUES ($1, $2, $3, $4)
-            RETURNING id, job_id, did, bunny_video_id, video_cid, pds_blob_ref, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
+            INSERT INTO videos.video_jobs (job_id, did, original_filename, file_size, private)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id, job_id, did, bunny_video_id, video_cid, pds_blob_ref, private, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
             "#,
-            &[&job_id, &did, &filename, &file_size],
+            &[&job_id, &did, &filename, &file_size, &private],
         )
         .await?;
 
@@ -189,7 +198,7 @@ pub async fn get_job(pool: &Pool, job_id: Uuid) -> Result<Option<VideoJob>> {
     let row = client
         .query_opt(
             r#"
-            SELECT id, job_id, did, bunny_video_id, video_cid, pds_blob_ref, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
+            SELECT id, job_id, did, bunny_video_id, video_cid, pds_blob_ref, private, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
             FROM videos.video_jobs
             WHERE job_id = $1
             "#,
@@ -207,7 +216,7 @@ pub async fn get_job_by_bunny_id(pool: &Pool, bunny_video_id: &str) -> Result<Op
     let row = client
         .query_opt(
             r#"
-            SELECT id, job_id, did, bunny_video_id, video_cid, pds_blob_ref, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
+            SELECT id, job_id, did, bunny_video_id, video_cid, pds_blob_ref, private, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
             FROM videos.video_jobs
             WHERE bunny_video_id = $1
             "#,
@@ -410,17 +419,21 @@ pub async fn save_video_mapping(
 }
 
 /// Get bunny video ID from did/cid mapping
-pub async fn get_bunny_video_id(pool: &Pool, did: &str, cid: &str) -> Result<Option<String>> {
+pub async fn get_bunny_video_id(
+    pool: &Pool,
+    did: &str,
+    cid: &str,
+) -> Result<Option<(String, bool)>> {
     let client = pool.get().await?;
 
     let row = client
         .query_opt(
-            "SELECT bunny_video_id FROM videos.video_mappings WHERE did = $1 AND cid = $2",
+            "SELECT m.bunny_video_id, COALESCE(j.private, FALSE) FROM videos.video_mappings m LEFT JOIN videos.video_jobs j ON j.did = m.did AND j.video_cid = m.cid WHERE m.did = $1 AND m.cid = $2",
             &[&did, &cid],
         )
         .await?;
 
-    Ok(row.map(|r| r.get(0)))
+    Ok(row.map(|r| (r.get(0), r.get(1))))
 }
 
 fn row_to_job(row: &tokio_postgres::Row) -> VideoJob {
@@ -431,14 +444,15 @@ fn row_to_job(row: &tokio_postgres::Row) -> VideoJob {
         bunny_video_id: row.get(3),
         video_cid: row.get(4),
         pds_blob_ref: row.get(5),
-        state: row.get(6),
-        progress: row.get(7),
-        blob_ref: row.get(8),
-        error: row.get(9),
-        message: row.get(10),
-        original_filename: row.get(11),
-        file_size: row.get(12),
-        created_at: row.get(13),
-        updated_at: row.get(14),
+        private: row.get(6),
+        state: row.get(7),
+        progress: row.get(8),
+        blob_ref: row.get(9),
+        error: row.get(10),
+        message: row.get(11),
+        original_filename: row.get(12),
+        file_size: row.get(13),
+        created_at: row.get(14),
+        updated_at: row.get(15),
     }
 }
