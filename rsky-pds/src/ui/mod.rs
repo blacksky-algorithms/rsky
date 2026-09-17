@@ -5,6 +5,7 @@
 pub mod assets;
 pub mod branding;
 pub mod client;
+pub mod format;
 pub mod pages;
 pub mod respond;
 pub mod scopes;

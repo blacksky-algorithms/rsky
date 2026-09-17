@@ -7,11 +7,13 @@
 <div class="action-column">
   <a class="btn btn-default" href="{{ signup_href }}">Create a new account</a>
   <a class="btn btn-secondary" href="{{ sign_in_href }}">Sign in</a>
+  {% if let Some(action) = cancel_action %}
   <div class="separator"></div>
-  <form method="post" action="{{ cancel_action }}">
+  <form method="post" action="{{ action }}">
     {% call ui::csrf_fields(csrf) %}
     {% call ui::request_fields(client_id, request_uri) %}
     <button type="submit" class="btn btn-secondary btn-block">Cancel</button>
   </form>
+  {% endif %}
 </div>
 {% endblock %}

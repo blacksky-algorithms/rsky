@@ -224,6 +224,8 @@ pub struct CoreConfig {
     /// Device authentications (unix seconds) older than this must sign in
     /// again before they count for the account pages or silent consent.
     pub account_ui_sessions_since: Option<u64>,
+    /// Whether the browser account pages under `/account` are served.
+    pub account_ui_enabled: bool,
 }
 
 /// `PDS_ACCOUNT_UI_SESSIONS_SINCE` as unix seconds; the value is RFC 3339.
@@ -263,6 +265,7 @@ pub fn env_to_cfg() -> ServerConfig {
         read_only: env_bool("PDS_READ_ONLY").unwrap_or(false),
         shutdown_grace_secs: env_int("PDS_SHUTDOWN_GRACE_SECS").unwrap_or(100) as u32,
         account_ui_sessions_since: sessions_since_from(env_str("PDS_ACCOUNT_UI_SESSIONS_SINCE")),
+        account_ui_enabled: env_bool("PDS_ACCOUNT_UI_ENABLED").unwrap_or(true),
         upload_spool_dir: env_str("PDS_UPLOAD_SPOOL_DIR").unwrap_or_else(|| {
             std::env::temp_dir()
                 .join("rsky-pds-spool")

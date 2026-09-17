@@ -25,7 +25,6 @@ pub struct SignInPage {
     pub shell: PageShell,
     pub view: SignInView,
     pub subtitle: String,
-    pub client: ClientView,
     pub client_id: String,
     pub request_uri: String,
     pub csrf: String,
@@ -68,7 +67,8 @@ pub struct WelcomePage {
     pub request_uri: String,
     pub signup_href: String,
     pub sign_in_href: String,
-    pub cancel_action: String,
+    /// The reject form; absent outside an authorization request
+    pub cancel_action: Option<String>,
 }
 
 #[derive(Template)]
@@ -206,7 +206,6 @@ mod tests {
             shell: shell(),
             view,
             subtitle: SignInPage::subtitle_for(view).to_string(),
-            client: client(true),
             client_id: "https://app.example/oauth-client-metadata.json".into(),
             request_uri: "urn:ietf:params:oauth:request_uri:req-1".into(),
             csrf: "csrf-token".into(),
@@ -420,7 +419,7 @@ mod tests {
             request_uri: "req".into(),
             signup_href: "/oauth/authorize?view=sign-up".into(),
             sign_in_href: "/oauth/authorize?view=sign-in".into(),
-            cancel_action: "/oauth/authorize/reject".into(),
+            cancel_action: Some("/oauth/authorize/reject".into()),
         }
         .render()
         .unwrap();
@@ -494,7 +493,7 @@ mod tests {
             request_uri: "req".into(),
             signup_href: "/s".into(),
             sign_in_href: "/i".into(),
-            cancel_action: "/r".into(),
+            cancel_action: None,
         };
         assert_eq!(page.to_string(), page.render().unwrap());
         let page = ReactivatePage {

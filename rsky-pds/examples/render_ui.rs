@@ -6,6 +6,10 @@
 use askama::Template;
 use rsky_pds::ui::branding::{Branding, RgbColor};
 use rsky_pds::ui::client::{display_for, ClientView};
+use rsky_pds::ui::pages::account::{
+    AboutPage, AccountNav, AppDetailsPage, AppRow, AppsPage, DeviceRow, DevicesPage, HomePage,
+    Section,
+};
 use rsky_pds::ui::pages::oauth::{
     ConsentPage, CookieErrorPage, ErrorPage, ReactivatePage, SignInPage, SignInView, WelcomePage,
 };
@@ -54,12 +58,11 @@ fn alice() -> AccountCardView {
     }
 }
 
-fn sign_in(view: SignInView, client: ClientView) -> SignInPage {
+fn sign_in(view: SignInView) -> SignInPage {
     SignInPage {
         shell: shell(),
         view,
         subtitle: SignInPage::subtitle_for(view).to_string(),
-        client,
         client_id: CLIENT_ID.to_string(),
         request_uri: REQUEST_URI.to_string(),
         csrf: "csrf-demo-token".to_string(),
@@ -133,24 +136,18 @@ fn main() {
         .expect("write page");
     };
 
-    write(
-        "sign_in_form",
-        sign_in(SignInView::Form, client(true)).render(),
-    );
-    let mut page = sign_in(SignInView::Form, client(false));
+    write("sign_in_form", sign_in(SignInView::Form).render());
+    let mut page = sign_in(SignInView::Form);
     page.error = Some("Invalid identifier or password".to_string());
     write("sign_in_form_error", page.render());
-    let mut page = sign_in(SignInView::ForcedIdentifier, client(true));
+    let mut page = sign_in(SignInView::ForcedIdentifier);
     page.identifier = "alice.blacksky.app".to_string();
     page.identifier_readonly = true;
     page.otp_hint = Some("a***@example.test".to_string());
     page.submit_label = "Confirm".to_string();
     write("sign_in_otp", page.render());
-    write(
-        "sign_in_picker",
-        sign_in(SignInView::Picker, client(true)).render(),
-    );
-    let mut page = sign_in(SignInView::ConfirmSelected, client(true));
+    write("sign_in_picker", sign_in(SignInView::Picker).render());
+    let mut page = sign_in(SignInView::ConfirmSelected);
     page.identifier = "alice.blacksky.app".to_string();
     page.identifier_readonly = true;
     page.submit_label = "Confirm".to_string();
@@ -189,7 +186,7 @@ fn main() {
             request_uri: REQUEST_URI.to_string(),
             signup_href: "https://blacksky.app/gate/signup".to_string(),
             sign_in_href: "/oauth/authorize?view=sign-in".to_string(),
-            cancel_action: "/oauth/authorize/reject".to_string(),
+            cancel_action: Some("/oauth/authorize/reject".to_string()),
         }
         .render(),
     );
@@ -227,4 +224,112 @@ fn main() {
         ErrorPage::new(shell(), "This authorization request has expired.").render(),
     );
     write("not_found", ErrorPage::not_found(shell()).render());
+
+    let nav = |section: Section| AccountNav {
+        base_href: "/account/u/alice.blacksky.app".to_string(),
+        items: AccountNav::items_for("alice.blacksky.app", section),
+        page_title: section.title().to_string(),
+        at_base: section == Section::Home,
+        account: alice(),
+        can_switch: true,
+        switch_href: "/account/sign-in".to_string(),
+        sign_out_action: "/account/u/alice.blacksky.app/sign-out".to_string(),
+        csrf: "csrf-demo-token".to_string(),
+    };
+    write(
+        "account_home",
+        HomePage {
+            shell: shell(),
+            nav: nav(Section::Home),
+            about_href: "/account/u/alice.blacksky.app/about".to_string(),
+        }
+        .render(),
+    );
+    write(
+        "account_devices",
+        DevicesPage {
+            shell: shell(),
+            nav: nav(Section::Devices),
+            apps_href: "/account/u/alice.blacksky.app/apps".to_string(),
+            filter: String::new(),
+            total: 2,
+            devices: vec![
+                DeviceRow {
+                    device_id: "dev-1".to_string(),
+                    name: "macOS \u{2022} Safari".to_string(),
+                    ip_address: "203.0.113.7".to_string(),
+                    last_seen: "just now".to_string(),
+                    current: true,
+                },
+                DeviceRow {
+                    device_id: "dev-2".to_string(),
+                    name: "iOS".to_string(),
+                    ip_address: "198.51.100.23".to_string(),
+                    last_seen: "3 days ago".to_string(),
+                    current: false,
+                },
+            ],
+            sign_out_action: "/account/u/alice.blacksky.app/devices/sign-out".to_string(),
+        }
+        .render(),
+    );
+    write(
+        "account_apps",
+        AppsPage {
+            shell: shell(),
+            nav: nav(Section::Apps),
+            filter: String::new(),
+            total: 2,
+            apps: vec![
+                AppRow {
+                    token_id: "tok-1".to_string(),
+                    name: "Blacksky".to_string(),
+                    identifier: "blacksky.community".to_string(),
+                    authorized: "Sep 9, 2026".to_string(),
+                    last_accessed: "2 hours ago".to_string(),
+                    details_href: "/account/u/alice.blacksky.app/apps/tok-1".to_string(),
+                },
+                AppRow {
+                    token_id: "tok-2".to_string(),
+                    name: "A local app".to_string(),
+                    identifier: "loopback".to_string(),
+                    authorized: "Sep 1, 2026".to_string(),
+                    last_accessed: "yesterday".to_string(),
+                    details_href: "/account/u/alice.blacksky.app/apps/tok-2".to_string(),
+                },
+            ],
+        }
+        .render(),
+    );
+    let grouping = permission_groups(
+        &["atproto".to_string(), "transition:generic".to_string()],
+        &BTreeMap::new(),
+        true,
+        Some("Blacksky"),
+    );
+    write(
+        "account_app_details",
+        AppDetailsPage {
+            shell: shell(),
+            nav: nav(Section::Apps),
+            token_id: "tok-1".to_string(),
+            name: "Blacksky".to_string(),
+            identifier: "blacksky.community".to_string(),
+            only_atproto: false,
+            groups: grouping.groups,
+            revoke_action: "/account/u/alice.blacksky.app/apps/revoke".to_string(),
+            back_href: "/account/u/alice.blacksky.app/apps".to_string(),
+        }
+        .render(),
+    );
+    write(
+        "account_about",
+        AboutPage {
+            shell: shell(),
+            nav: nav(Section::About),
+            handle: "@alice.blacksky.app".to_string(),
+            profile_href: Some("https://blacksky.community/profile/alice.blacksky.app".to_string()),
+        }
+        .render(),
+    );
 }

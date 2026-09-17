@@ -1,5 +1,6 @@
 //! Template structs, one file per screen family.
 
+pub mod account;
 pub mod oauth;
 
 /// An account as the picker, consent, and account pages show it.

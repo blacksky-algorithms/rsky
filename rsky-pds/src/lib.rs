@@ -8,6 +8,7 @@ use crate::sequencer::Sequencer;
 use atrium_xrpc_client::reqwest::ReqwestClient;
 use rsky_common::env::{env_bool, env_int};
 
+pub mod account;
 pub mod account_manager;
 pub mod actor_store;
 pub mod admission;
@@ -717,9 +718,15 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
     .collect();
 
     let shield = Shield::default().enable(NoSniff::Enable);
+    let account_pages: Vec<rocket::Route> = if cfg.service.account_ui_enabled {
+        account::routes::routes()
+    } else {
+        Vec::new()
+    };
 
     rocket::custom(figment)
         .mount("/", read_only_gate)
+        .mount("/", account_pages)
         .mount(
             "/",
             routes![

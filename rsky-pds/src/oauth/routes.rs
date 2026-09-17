@@ -165,11 +165,15 @@ impl<'r> Responder<'r, 'static> for OAuthApiResponse {
 
 type HtmlPage = UiHtml;
 
-fn render_error(shell: &PageShell, status: Status, message: impl Into<String>) -> HtmlPage {
+pub(crate) fn render_error(
+    shell: &PageShell,
+    status: Status,
+    message: impl Into<String>,
+) -> HtmlPage {
     render_page(status, shell, &ErrorPage::new(shell.clone(), message))
 }
 
-fn oauth_error_page(shell: &PageShell, error: OAuthError) -> HtmlPage {
+pub(crate) fn oauth_error_page(shell: &PageShell, error: OAuthError) -> HtmlPage {
     render_error(
         shell,
         Status::new(error.status()),
@@ -377,11 +381,12 @@ const ACCEPT_ACTION: &str = "/oauth/authorize/accept";
 const REJECT_ACTION: &str = "/oauth/authorize/reject";
 const REACTIVATE_ACTION: &str = "/oauth/authorize/reactivate";
 const AUTHORIZE_PATH: &str = "/oauth/authorize";
-const CREDENTIALS_REJECTED: &str = "Invalid identifier or password";
-const CODE_REJECTED: &str = "The sign-in code was not accepted";
+pub(crate) const CREDENTIALS_REJECTED: &str = "Invalid identifier or password";
+pub(crate) const CODE_REJECTED: &str = "The sign-in code was not accepted";
 const PERMISSION_SETS_UNAVAILABLE: &str = "Unable to retrieve permission sets";
-const SESSION_CHANGED: &str = "Your session changed in another tab. Please try again.";
-const CROSS_SITE_POST: &str = "This request came from another site and was not accepted.";
+pub(crate) const SESSION_CHANGED: &str = "Your session changed in another tab. Please try again.";
+pub(crate) const CROSS_SITE_POST: &str =
+    "This request came from another site and was not accepted.";
 const COOKIES_UNSUPPORTED: &str =
     "Your browser does not accept cookies, so sign-in cannot continue.";
 
@@ -447,7 +452,6 @@ fn sign_in_page(
         shell: (**shell).clone(),
         view,
         subtitle: SignInPage::subtitle_for(view).to_string(),
-        client: client_view(page),
         client_id: page.client_id.clone(),
         request_uri: page.request_uri.clone(),
         csrf: session.csrf.clone(),
@@ -483,7 +487,7 @@ fn welcome_page(ui: &UiState, page: &AuthorizePageData, session: &DeviceSession)
         request_uri: page.request_uri.clone(),
         signup_href: ui.signup_url.clone().unwrap_or_default(),
         sign_in_href: authorize_href(&page.client_id, &page.request_uri, Some("sign-in")),
-        cancel_action: REJECT_ACTION.to_string(),
+        cancel_action: Some(REJECT_ACTION.to_string()),
     }
 }
 
@@ -580,7 +584,7 @@ async fn consent_page(
 }
 
 /// A page whether the handler succeeded or not.
-fn either(result: Result<HtmlPage, HtmlPage>) -> HtmlPage {
+pub(crate) fn either(result: Result<HtmlPage, HtmlPage>) -> HtmlPage {
     match result {
         Ok(page) | Err(page) => page,
     }
@@ -607,7 +611,7 @@ async fn account_page(
     Ok(render_page(Status::Ok, &ui.shell, &consent))
 }
 
-async fn device_session(
+pub(crate) async fn device_session(
     shell: &PageShell,
     shared: &SharedOAuthProvider,
     jar: &CookieJar<'_>,
@@ -690,7 +694,7 @@ fn account_proof<'a>(
 
 /// Refuses a form posted from another site or with a csrf token from
 /// before the session changed, with the page a destructive form gets.
-fn check_form_origin(
+pub(crate) fn check_form_origin(
     shell: &PageShell,
     info: &OAuthRequestInfo,
     session: &DeviceSession,
@@ -717,7 +721,7 @@ fn check_form_origin(
 /// Rotates the device secret after a privilege transition and hands the
 /// browser the new cookie. A device whose secret changed underneath the
 /// request keeps whatever secret it has now.
-async fn rotate_session(
+pub(crate) async fn rotate_session(
     shared: &SharedOAuthProvider,
     jar: &CookieJar<'_>,
     session: &mut DeviceSession,
@@ -739,7 +743,7 @@ async fn rotate_session(
 }
 
 /// The browser and the forms rendered from here on carry the new secret.
-fn adopt_session(
+pub(crate) fn adopt_session(
     shared: &SharedOAuthProvider,
     jar: &CookieJar<'_>,
     session: &mut DeviceSession,

@@ -102,6 +102,19 @@ strong, b { font-weight: 600; }
 .row.between { justify-content: space-between; }
 .row.top { align-items: flex-start; }
 .underline { text-decoration: underline; }
+.center { text-align: center; }
+.nowrap { white-space: nowrap; }
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.right { text-align: right; }
+.table td.right form { display: inline-block; }
+.account-summary.column { flex-direction: column; gap: 0.5rem; }
+.popover summary { list-style: none; display: inline-flex; align-items: center; gap: 0.25rem; cursor: pointer; }
+.popover summary::-webkit-details-marker { display: none; }
+.popover summary svg { width: 0.875rem; height: 0.875rem; }
+.popover .popover-body { position: absolute; z-index: 10; max-width: 20rem; margin-top: 0.25rem; padding: 0.75rem; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover); color: var(--popover-foreground); font-weight: 400; white-space: normal; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 10%); }
+.popover { position: relative; }
+.account-menu summary .item-content { flex: 1; text-align: left; font-size: 0.875rem; }
+.account-menu summary > svg { width: 1rem; height: 1rem; margin-left: auto; }
 .separator { height: 1px; width: 100%; background: var(--border); }
 .icon { width: 1rem; height: 1rem; }
 .icon-lg { width: 1.5rem; height: 1.5rem; }
@@ -310,6 +323,7 @@ a.item:hover, button.item:hover { background: var(--muted); }
 .avatar > svg { width: 55%; height: 55%; }
 .avatar-sm { width: 2rem; height: 2rem; }
 .avatar-lg { width: 6rem; height: 6rem; }
+.avatar-3xl { width: 6rem; height: 6rem; }
 .avatar-brand { background: var(--primary); color: var(--primary-foreground); }
 .client-logo { border-radius: var(--radius-md); background: transparent; }
 .url-viewer { word-break: break-all; }
@@ -405,6 +419,7 @@ a.item:hover, button.item:hover { background: var(--muted); }
   .nav-backdrop { display: none; position: fixed; inset: 0; z-index: 45; background: rgb(0 0 0 / 40%); }
   .nav-toggle:checked ~ .nav-backdrop { display: block; }
   .app-header .nav-trigger { display: inline-flex; }
+  .app-header .nav-trigger.subpage { display: none; }
   .app-header .header-brand { display: flex; }
   .app-header .back-link.show { display: inline-flex; }
   .table-mobile .table, .table-mobile .table thead, .table-mobile .table tbody, .table-mobile .table tr, .table-mobile .table td { display: block; width: 100%; }

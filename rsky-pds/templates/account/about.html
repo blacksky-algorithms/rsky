@@ -1,0 +1,48 @@
+{% extends "layouts/account_shell.html" %}
+{% block content %}
+<div class="prose-app">
+  <section>
+    <h2>What is an Atmosphere account?</h2>
+    <p>An <strong>Atmosphere account</strong> is your personal identity on the Atmosphere. Think of it as a digital passport that you truly own, not locked to any single app or company.</p>
+  </section>
+  <section>
+    <h3>Use it across multiple apps</h3>
+    {% if let Some(app_url) = shell.app_url %}
+    <p>Your Atmosphere account works with <a href="{{ app_url }}">{% if let Some(app_name) = shell.app_name %}{{ app_name }}{% else %}{{ app_url }}{% endif %}</a> and any other social apps built on the same network.</p>
+    {% else %}
+    <p>Your Atmosphere account works with any social app built on the same network.</p>
+    {% endif %}
+    <p>Just like you can use the same email address to sign into different websites, your Atmosphere account lets you sign into different social apps while keeping the same identity, connections, and content.</p>
+    <p>When you see options to log in with an Atmosphere account or "internet handle" on other apps, you can use your existing account <strong class="nowrap">{{ handle }}</strong> instead of creating a new one.</p>
+  </section>
+  <section>
+    <h3>What makes it special</h3>
+    <p>The key difference: your data isn't trapped in any one app. Unlike traditional social media accounts, where your data belongs to the platform, with an Atmosphere account you genuinely own your identity and data:</p>
+    <ul>
+      <li><strong>You own your identity</strong>: Your username (handle) and permanent ID belong to you</li>
+      <li><strong>Your data is portable</strong>: Posts, follows, and content live in your personal data storage, not locked in an app's database</li>
+      <li><strong>You can move freely</strong>: Switch hosting providers without losing your followers, posts, or connections. This also lets you choose a provider in your country if it matters where your data is stored.</li>
+      <li><strong>Multiple apps, one identity</strong>: Use the same account across different apps built on the same network</li>
+    </ul>
+  </section>
+  <section>
+    <h3>This website: your account control center</h3>
+    <p>The website you're on right now is your <strong>account management hub</strong>. Here you can:</p>
+    <ul>
+      <li>Update your email address and password</li>
+      <li>Manage your personal data and security settings</li>
+      <li>View and manage active sessions across devices (browsers where you're signed in)</li>
+    </ul>
+    <p>This place is where you control the fundamental aspects of your Atmosphere identity, independently of any app-specific details{% if let Some(profile) = profile_href %} like the profile you have on the <a href="{{ profile }}">{% if let Some(app_name) = shell.app_name %}{{ app_name }}{% else %}social{% endif %} app</a>{% endif %}.</p>
+    <p>Your Atmosphere account is currently hosted by <b>{{ shell.service_name }}</b>, one of many hosting providers in the Atmosphere network. You can switch to a different one at any time without losing your account, identity, or data.</p>
+  </section>
+  <section>
+    <h3>Learn more</h3>
+    <p>Want to learn more about the technology and network behind your Atmosphere account?</p>
+    <ul>
+      {% if let Some(home) = shell.home_url %}{% if let Some(org) = shell.org_name %}<li><a href="{{ home }}">{{ org }}</a> — General information about the network</li>{% endif %}{% endif %}
+      <li><a href="https://atproto.com">AT Protocol</a> — Technical documentation for developers</li>
+    </ul>
+  </section>
+</div>
+{% endblock %}
