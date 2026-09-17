@@ -227,17 +227,19 @@ async fn open_authorize_page_scoped(
 async fn sign_in_and_accept(
     client: &Client,
     request_uri: &str,
-    session: &AuthorizeSession,
+    session: &mut AuthorizeSession,
 ) -> String {
     sign_in_and_accept_scoped(client, LOOPBACK_CLIENT_ID, request_uri, session).await
 }
 
-/// [`sign_in_and_accept`] for a non-default client_id.
+/// [`sign_in_and_accept`] for a non-default client_id. A sign-in rotates the
+/// device secret, so the session is updated with the cookie and csrf the
+/// consent page carries.
 async fn sign_in_and_accept_scoped(
     client: &Client,
     client_id: &str,
     request_uri: &str,
-    session: &AuthorizeSession,
+    session: &mut AuthorizeSession,
 ) -> String {
     let response = client
         .post("/oauth/authorize/sign-in")
@@ -253,10 +255,21 @@ async fn sign_in_and_accept_scoped(
         .dispatch()
         .await;
     assert_eq!(response.status(), Status::Ok);
+    let rotated = response
+        .cookies()
+        .get("device-id")
+        .expect("sign-in rotates the device cookie")
+        .value()
+        .to_string();
+    let device_id = session.cookie.split_once('.').unwrap().0.to_string();
+    assert!(rotated.starts_with(&format!("{device_id}.")));
+    assert_ne!(rotated, session.cookie);
     let html = response.into_string().await.unwrap();
     assert!(html.contains("Authorize"));
     assert!(html.contains("Confirm your identity"));
     assert!(html.contains("did:plc:khvyd3oiw46vif5gm7hijslk"));
+    session.cookie = rotated;
+    session.csrf = extract_csrf(&html);
 
     let response = client
         .post("/oauth/authorize/accept")
@@ -406,8 +419,8 @@ async fn dpop_post(
 
 async fn generic_oauth_access_token(client: &Client, key: &Jwk) -> String {
     let (request_uri, nonce) = run_par(client, key).await;
-    let session = open_authorize_page(client, &request_uri).await;
-    let code = sign_in_and_accept(client, &request_uri, &session).await;
+    let mut session = open_authorize_page(client, &request_uri).await;
+    let code = sign_in_and_accept(client, &request_uri, &mut session).await;
     let tokens = exchange_code(client, key, &code, &nonce).await;
     tokens["access_token"].as_str().unwrap().to_string()
 }
@@ -480,8 +493,8 @@ async fn oauth_session_can_mint_service_auth_tokens() {
     let key = dpop_key();
 
     let (request_uri, nonce) = run_par(&client, &key).await;
-    let session = open_authorize_page(&client, &request_uri).await;
-    let code = sign_in_and_accept(&client, &request_uri, &session).await;
+    let mut session = open_authorize_page(&client, &request_uri).await;
+    let code = sign_in_and_accept(&client, &request_uri, &mut session).await;
     let tokens = exchange_code(&client, &key, &code, &nonce).await;
     let access_token = tokens["access_token"].as_str().unwrap().to_string();
 
@@ -552,8 +565,8 @@ async fn oauth_full_flow_with_dpop_bound_resource_access() {
     let key = dpop_key();
 
     let (request_uri, nonce) = run_par(&client, &key).await;
-    let session = open_authorize_page(&client, &request_uri).await;
-    let code = sign_in_and_accept(&client, &request_uri, &session).await;
+    let mut session = open_authorize_page(&client, &request_uri).await;
+    let code = sign_in_and_accept(&client, &request_uri, &mut session).await;
     let tokens = exchange_code(&client, &key, &code, &nonce).await;
     assert_eq!(tokens["token_type"], "DPoP");
     assert_eq!(tokens["sub"], "did:plc:khvyd3oiw46vif5gm7hijslk");
@@ -580,7 +593,7 @@ async fn oauth_full_flow_with_dpop_bound_resource_access() {
         "{metrics_body}"
     );
     assert!(
-        metrics_body.contains(r#"pds_session_created_total{source="oauth","#),
+        metrics_body.contains(r#"source="oauth"}"#),
         "{metrics_body}"
     );
 
@@ -702,8 +715,8 @@ async fn oauth_revocation() {
     let key = dpop_key();
 
     let (request_uri, nonce) = run_par(&client, &key).await;
-    let session = open_authorize_page(&client, &request_uri).await;
-    let code = sign_in_and_accept(&client, &request_uri, &session).await;
+    let mut session = open_authorize_page(&client, &request_uri).await;
+    let code = sign_in_and_accept(&client, &request_uri, &mut session).await;
     let tokens = exchange_code(&client, &key, &code, &nonce).await;
     let access_token = tokens["access_token"].as_str().unwrap().to_string();
     let refresh_token = tokens["refresh_token"].as_str().unwrap().to_string();
@@ -858,8 +871,8 @@ async fn oauth_account_picker_select_flow() {
 
     // first round signs the device in
     let (request_uri, nonce) = run_par(&client, &key).await;
-    let session = open_authorize_page(&client, &request_uri).await;
-    let code = sign_in_and_accept(&client, &request_uri, &session).await;
+    let mut session = open_authorize_page(&client, &request_uri).await;
+    let code = sign_in_and_accept(&client, &request_uri, &mut session).await;
     exchange_code(&client, &key, &code, &nonce).await;
 
     // second round shows the signed-in account and supports select
@@ -905,6 +918,61 @@ async fn oauth_account_picker_select_flow() {
     assert_eq!(response.status(), Status::BadRequest);
     let html = response.into_string().await.unwrap();
     assert!(html.contains("not signed in on this device"));
+}
+
+/// A trusted client keeps the prompt it asked for, so once the account has
+/// consented, `prompt=none` answers with a code instead of a page.
+#[tokio::test]
+async fn oauth_trusted_client_gets_silent_consent_after_a_grant() {
+    let scope = "atproto transition:email";
+    let client_id = loopback_client_id(scope);
+    std::env::set_var("PDS_OAUTH_TRUSTED_CLIENTS", &client_id);
+    let (_dir, client) = get_oauth_client().await;
+    common::create_account(&client).await;
+    // a deactivated account never qualifies for single sign-on
+    activate_test_account(&client).await;
+    let key = dpop_key();
+
+    // first round: the consent screen, and the grant is recorded
+    let (request_uri, nonce) = run_par_scoped(&client, &key, &client_id, scope).await;
+    let mut session = open_authorize_page_scoped(&client, &client_id, &request_uri).await;
+    let code = sign_in_and_accept_scoped(&client, &client_id, &request_uri, &mut session).await;
+    exchange_code_scoped(&client, &client_id, &key, &code, &nonce).await;
+
+    // second round: prompt=none goes straight back to the client
+    let htu = format!("{}/oauth/par", public_url(&client));
+    let response = client
+        .post("/oauth/par")
+        .header(ContentType::Form)
+        .header(Header::new(
+            "DPoP",
+            dpop_proof(&key, "POST", &htu, Some(&nonce), None),
+        ))
+        .body(form_encode(&[
+            ("client_id", &client_id),
+            ("response_type", "code"),
+            ("redirect_uri", REDIRECT_URI),
+            ("scope", scope),
+            ("state", "state-456"),
+            ("code_challenge", PKCE_CHALLENGE),
+            ("code_challenge_method", "S256"),
+            ("prompt", "none"),
+        ]))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Created);
+    let body: Value = serde_json::from_str(&response.into_string().await.unwrap()).unwrap();
+    let request_uri = body["request_uri"].as_str().unwrap().to_string();
+    let response = client
+        .get(authorize_path(&client_id, &request_uri))
+        .cookie(("device-id", session.cookie.clone()))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::SeeOther);
+    let location = response.headers().get_one("Location").unwrap().to_string();
+    assert!(location.starts_with(REDIRECT_URI), "{location}");
+    assert!(location.contains("code=cod-"), "{location}");
+    assert!(location.contains("state=state-456"), "{location}");
 }
 
 #[tokio::test]
@@ -1027,8 +1095,8 @@ async fn granular_access_token(client: &Client, scope: &str) -> (String, Jwk) {
     let key = dpop_key();
     let client_id = loopback_client_id(scope);
     let (request_uri, nonce) = run_par_scoped(client, &key, &client_id, scope).await;
-    let session = open_authorize_page_scoped(client, &client_id, &request_uri).await;
-    let code = sign_in_and_accept_scoped(client, &client_id, &request_uri, &session).await;
+    let mut session = open_authorize_page_scoped(client, &client_id, &request_uri).await;
+    let code = sign_in_and_accept_scoped(client, &client_id, &request_uri, &mut session).await;
     let tokens = exchange_code_scoped(client, &client_id, &key, &code, &nonce).await;
     (tokens["access_token"].as_str().unwrap().to_string(), key)
 }

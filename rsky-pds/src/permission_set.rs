@@ -247,7 +247,28 @@ fn resource_scopes_from_record(record: &SchemaRecord) -> Vec<String> {
 struct CacheEntry {
     scopes: Vec<String>,
     expires: Instant,
+    /// Set when the entry records a failed fetch rather than a resolved set.
+    failed: bool,
 }
+
+/// A permission set could not be fetched or read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionSetError {
+    pub nsid: String,
+    pub reason: String,
+}
+
+impl std::fmt::Display for PermissionSetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "permission set {} unresolved: {}",
+            self.nsid, self.reason
+        )
+    }
+}
+
+impl std::error::Error for PermissionSetError {}
 
 /// Resolves and caches permission sets.
 #[derive(Default)]
@@ -266,26 +287,59 @@ impl PermissionSetResolver {
     /// grants, and also when it could not be resolved -- the two are the same
     /// denial from a caller's point of view.
     pub async fn resolved_scopes(&self, nsid: &str) -> Vec<String> {
+        self.try_resolved_scopes(nsid).await.unwrap_or_default()
+    }
+
+    /// Like [`Self::resolved_scopes`], but tells a set that confers nothing
+    /// apart from one that could not be resolved. A remembered failure is
+    /// reported as such until it expires.
+    pub async fn try_resolved_scopes(&self, nsid: &str) -> Result<Vec<String>, PermissionSetError> {
         if let Some(entry) = self.cache.read().await.get(nsid) {
             if entry.expires > Instant::now() {
-                return entry.scopes.clone();
+                return if entry.failed {
+                    Err(PermissionSetError {
+                        nsid: nsid.to_string(),
+                        reason: "recent fetch failed".to_string(),
+                    })
+                } else {
+                    Ok(entry.scopes.clone())
+                };
             }
         }
-        let (scopes, ttl) = match self.fetch(nsid).await {
-            Ok(scopes) => (scopes, SUCCESS_TTL),
+        let (result, ttl) = match self.fetch(nsid).await {
+            Ok(scopes) => (Ok(scopes), SUCCESS_TTL),
             Err(error) => {
                 tracing::debug!(%nsid, %error, "permission set unresolved; it confers nothing");
-                (Vec::new(), FAILURE_TTL)
+                (
+                    Err(PermissionSetError {
+                        nsid: nsid.to_string(),
+                        reason: error.to_string(),
+                    }),
+                    FAILURE_TTL,
+                )
             }
         };
         self.cache.write().await.insert(
             nsid.to_string(),
             CacheEntry {
-                scopes: scopes.clone(),
+                scopes: result.clone().unwrap_or_default(),
                 expires: Instant::now() + ttl,
+                failed: result.is_err(),
             },
         );
-        scopes
+        result
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn prime(&self, nsid: &str, scopes: Vec<String>) {
+        self.cache.write().await.insert(
+            nsid.to_string(),
+            CacheEntry {
+                scopes,
+                expires: Instant::now() + SUCCESS_TTL,
+                failed: false,
+            },
+        );
     }
 
     async fn fetch(&self, nsid: &str) -> anyhow::Result<Vec<String>> {
@@ -602,9 +656,49 @@ mod tests {
         let first = resolver.resolved_scopes("invalid.example.nothing").await;
         assert!(first.is_empty());
         // The failure is remembered, so the next call is a cache hit rather
-        // than another DNS lookup.
-        let cached = resolver.cache.read().await;
-        assert!(cached.contains_key("invalid.example.nothing"));
+        // than another DNS lookup, and it still reports as a failure.
+        {
+            let cached = resolver.cache.read().await;
+            assert!(cached["invalid.example.nothing"].failed);
+        }
+        let err = resolver
+            .try_resolved_scopes("invalid.example.nothing")
+            .await
+            .unwrap_err();
+        assert_eq!(err.nsid, "invalid.example.nothing");
+        assert_eq!(err.reason, "recent fetch failed");
+        assert!(err.to_string().contains("invalid.example.nothing"));
+    }
+
+    #[tokio::test]
+    async fn a_cached_set_is_served_as_resolved() {
+        let resolver = PermissionSetResolver::new();
+        resolver
+            .prime(
+                "app.example.cached",
+                vec!["repo:app.example.record".to_string()],
+            )
+            .await;
+        assert_eq!(
+            resolver
+                .try_resolved_scopes("app.example.cached")
+                .await
+                .unwrap(),
+            vec!["repo:app.example.record".to_string()]
+        );
+        // an expired entry is fetched again
+        resolver.cache.write().await.insert(
+            "invalid.example.expired".to_string(),
+            CacheEntry {
+                scopes: vec!["repo:app.example.record".to_string()],
+                expires: Instant::now() - Duration::from_secs(1),
+                failed: false,
+            },
+        );
+        assert!(resolver
+            .try_resolved_scopes("invalid.example.expired")
+            .await
+            .is_err());
     }
 
     /// The whole chain against the live network: `_lexicon.bulleted.app` TXT,

@@ -2,7 +2,9 @@ use super::body::OAuthBody;
 use super::templates::{
     client_display, scope_items, ConsentPage, ErrorPage, SessionOption, SignInPage,
 };
-use super::{ensure_device_session, now_secs, DeviceSession, SharedOAuthProvider};
+use super::{
+    csrf_token, device_cookie, ensure_device_session, now_secs, DeviceSession, SharedOAuthProvider,
+};
 use crate::metrics::{record_login_success, record_oauth_authorization_granted};
 use askama::Template;
 use rocket::form::Form;
@@ -18,7 +20,9 @@ use rsky_oauth::client::ParRequest;
 use rsky_oauth::dpop::DpopRequest;
 use rsky_oauth::store::AccountInfo;
 use rsky_oauth::types::GRANT_AUTHORIZATION_CODE;
-use rsky_oauth::{AuthorizePageData, ClientCredentials, OAuthError, TokenRequest};
+use rsky_oauth::{
+    AccountProof, AuthorizeOutcome, AuthorizePageData, ClientCredentials, OAuthError, TokenRequest,
+};
 use serde_json::Value;
 use std::io::Cursor;
 
@@ -349,9 +353,9 @@ fn sign_in_page(
         sessions: page
             .sessions
             .iter()
-            .map(|account| SessionOption {
-                did: account.did.clone(),
-                label: account_label(account),
+            .map(|session| SessionOption {
+                did: session.account.did.clone(),
+                label: account_label(&session.account),
             })
             .collect(),
     }
@@ -398,6 +402,27 @@ async fn device_session(
     .map_err(oauth_error_page)
 }
 
+/// Runs the provider's authorize decision, yielding the page data to render
+/// or the redirect to answer with.
+async fn authorize_or_redirect(
+    shared: &SharedOAuthProvider,
+    client_id: &str,
+    request_uri: &str,
+    session: &DeviceSession,
+    now: u64,
+) -> Result<AuthorizePageData, Result<Redirect, HtmlPage>> {
+    match shared
+        .provider
+        .authorize(client_id, request_uri, &session.device_id, now)
+        .await
+    {
+        Ok(AuthorizeOutcome::Page(page)) => Ok(*page),
+        Ok(AuthorizeOutcome::Redirect(url)) => Err(Ok(Redirect::to(url))),
+        Err(error) => Err(Err(oauth_error_page(error))),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 #[rocket::get("/oauth/authorize?<client_id>&<request_uri>&<otp_hint>&<otp_error>&<auth_error>")]
 pub async fn oauth_authorize(
@@ -409,37 +434,35 @@ pub async fn oauth_authorize(
     jar: &CookieJar<'_>,
     info: OAuthRequestInfo,
     shared: &State<SharedOAuthProvider>,
-) -> HtmlPage {
+) -> Result<Redirect, HtmlPage> {
     let (Some(client_id), Some(request_uri)) = (client_id, request_uri) else {
-        return render_error(Status::BadRequest, "client_id and request_uri are required");
+        return Err(render_error(
+            Status::BadRequest,
+            "client_id and request_uri are required",
+        ));
     };
     let now = now_secs();
-    let session = match device_session(shared, jar, &info, now).await {
-        Ok(session) => session,
-        Err(page) => return page,
+    let session = device_session(shared, jar, &info, now).await?;
+    let page = match authorize_or_redirect(shared, &client_id, &request_uri, &session, now).await {
+        Ok(page) => page,
+        Err(answer) => return answer,
     };
-    match shared
-        .provider
-        .authorize(&client_id, &request_uri, &session.device_id, now)
-        .await
-    {
-        Ok(page) => {
-            // a second-factor gate in front of this route sends the browser
-            // back here with the address hint, after a bad code with an
-            // error, and after rejecting the credentials of an account it
-            // will not forward without a code
-            let error = if otp_error.unwrap_or(false) {
-                Some("The sign-in code was not accepted".to_string())
-            } else if auth_error.unwrap_or(false) {
-                Some("Invalid identifier or password".to_string())
-            } else {
-                None
-            };
-            let otp_hint = otp_hint.filter(|hint| !hint.is_empty());
-            render(Status::Ok, &sign_in_page(&page, &session, error, otp_hint))
-        }
-        Err(error) => oauth_error_page(error),
-    }
+    // a second-factor gate in front of this route sends the browser
+    // back here with the address hint, after a bad code with an
+    // error, and after rejecting the credentials of an account it
+    // will not forward without a code
+    let error = if otp_error.unwrap_or(false) {
+        Some("The sign-in code was not accepted".to_string())
+    } else if auth_error.unwrap_or(false) {
+        Some("Invalid identifier or password".to_string())
+    } else {
+        None
+    };
+    let otp_hint = otp_hint.filter(|hint| !hint.is_empty());
+    Err(render(
+        Status::Ok,
+        &sign_in_page(&page, &session, error, otp_hint),
+    ))
 }
 
 #[derive(FromForm)]
@@ -460,14 +483,11 @@ pub async fn oauth_authorize_sign_in(
     jar: &CookieJar<'_>,
     info: OAuthRequestInfo,
     shared: &State<SharedOAuthProvider>,
-) -> HtmlPage {
+) -> Result<Redirect, HtmlPage> {
     let now = now_secs();
-    let session = match device_session(shared, jar, &info, now).await {
-        Ok(session) => session,
-        Err(page) => return page,
-    };
+    let mut session = device_session(shared, jar, &info, now).await?;
     if form.csrf != session.csrf {
-        return render_error(Status::BadRequest, "invalid CSRF token");
+        return Err(render_error(Status::BadRequest, "invalid CSRF token"));
     }
     let signed_in = shared
         .provider
@@ -477,19 +497,35 @@ pub async fn oauth_authorize_sign_in(
             &session.device_id,
             &form.identifier,
             &form.password,
+            true,
+            &session.session_id,
             now,
         )
         .await;
-    let page = match shared
-        .provider
-        .authorize(&form.client_id, &form.request_uri, &session.device_id, now)
-        .await
+    if let Ok(result) = &signed_in {
+        if let Some(new_session_id) = &result.new_session_id {
+            // the sign-in rotated the device secret: the browser and the
+            // forms rendered from here on must carry the new one
+            let cookie = device_cookie(&session.device_id, new_session_id);
+            session.csrf = csrf_token(cookie.value());
+            session.session_id = new_session_id.clone();
+            jar.add(cookie);
+        }
+    }
+    let page = match authorize_or_redirect(
+        shared,
+        &form.client_id,
+        &form.request_uri,
+        &session,
+        now,
+    )
+    .await
     {
         Ok(page) => page,
-        Err(error) => return oauth_error_page(error),
+        Err(answer) => return answer,
     };
-    match signed_in {
-        Ok(account) => render(Status::Ok, &consent_page(&page, &session, &account)),
+    Err(match signed_in {
+        Ok(result) => render(Status::Ok, &consent_page(&page, &session, &result.account)),
         Err(error) => render(
             Status::Ok,
             &sign_in_page(
@@ -499,7 +535,7 @@ pub async fn oauth_authorize_sign_in(
                 None,
             ),
         ),
-    }
+    })
 }
 
 #[derive(FromForm)]
@@ -517,38 +553,40 @@ pub async fn oauth_authorize_select(
     jar: &CookieJar<'_>,
     info: OAuthRequestInfo,
     shared: &State<SharedOAuthProvider>,
-) -> HtmlPage {
+) -> Result<Redirect, HtmlPage> {
     let now = now_secs();
-    let session = match device_session(shared, jar, &info, now).await {
-        Ok(session) => session,
-        Err(page) => return page,
-    };
+    let session = device_session(shared, jar, &info, now).await?;
     if form.csrf != session.csrf {
-        return render_error(Status::BadRequest, "invalid CSRF token");
+        return Err(render_error(Status::BadRequest, "invalid CSRF token"));
     }
     let account = match shared
         .provider
         .store()
-        .get_device_account(&session.device_id, &form.did)
+        .get_device_account_for_session(&session.device_id, &session.session_id, &form.did)
         .await
     {
-        Ok(Some(account)) => account,
+        Ok(Some(linked)) => linked.account,
         Ok(None) => {
-            return render_error(
+            return Err(render_error(
                 Status::BadRequest,
                 "account is not signed in on this device",
-            )
+            ))
         }
-        Err(error) => return oauth_error_page(error),
+        Err(error) => return Err(oauth_error_page(error)),
     };
-    match shared
-        .provider
-        .authorize(&form.client_id, &form.request_uri, &session.device_id, now)
-        .await
+    let page = match authorize_or_redirect(
+        shared,
+        &form.client_id,
+        &form.request_uri,
+        &session,
+        now,
+    )
+    .await
     {
-        Ok(page) => render(Status::Ok, &consent_page(&page, &session, &account)),
-        Err(error) => oauth_error_page(error),
-    }
+        Ok(page) => page,
+        Err(answer) => return answer,
+    };
+    Err(render(Status::Ok, &consent_page(&page, &session, &account)))
 }
 
 #[derive(FromForm)]
@@ -582,6 +620,10 @@ pub async fn oauth_authorize_accept(
             &form.request_uri,
             &session.device_id,
             &did,
+            AccountProof::Device {
+                session_id: &session.session_id,
+            },
+            None,
             now,
         )
         .await

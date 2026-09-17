@@ -532,6 +532,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         account_db.clone(),
         cfg.service.public_url.clone(),
         cfg.service.did.clone(),
+        cfg.service.account_ui_sessions_since,
     )
     .await;
     let account_manager = AccountManager::new(account_db);

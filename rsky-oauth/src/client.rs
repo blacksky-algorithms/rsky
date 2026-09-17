@@ -101,10 +101,13 @@ impl Client {
     }
 
     /// Validates authorization request parameters against the client's
-    /// registered metadata, filling in a defaulted `redirect_uri`.
+    /// registered metadata, filling in a defaulted `redirect_uri`. `trusted`
+    /// marks a client the server configured as first-party, which is allowed
+    /// the same prompt handling as a confidential client.
     pub fn validate_request(
         &self,
         parameters: &ParRequest,
+        trusted: bool,
     ) -> Result<AuthorizationRequestParameters, OAuthError> {
         if parameters.client_id != self.id {
             return Err(OAuthError::InvalidRequest(
@@ -175,15 +178,18 @@ impl Client {
                 }
             },
         };
-        // Public clients may not silently sign on; force consent otherwise.
+        // Untrusted public clients may not silently sign on and always get
+        // an explicit consent screen; everyone else keeps the prompt asked.
+        let restricted = !self.metadata.is_confidential() && !trusted;
         let prompt = match parameters.prompt.as_deref() {
-            Some("none") if !self.metadata.is_confidential() => {
+            Some("none") if restricted => {
                 return Err(OAuthError::InvalidRequest(
                     "public clients are not allowed to use silent sign-on".to_string(),
                 ))
             }
             Some("create") => Some("create".to_string()),
-            _ => Some("consent".to_string()),
+            _ if restricted => Some("consent".to_string()),
+            other => other.map(String::from),
         };
         Ok(AuthorizationRequestParameters {
             client_id: self.id.clone(),
@@ -1132,7 +1138,7 @@ mod tests {
     #[test]
     fn validate_request_success() {
         let client = public_client();
-        let parameters = client.validate_request(&par_request()).unwrap();
+        let parameters = client.validate_request(&par_request(), false).unwrap();
         assert_eq!(parameters.scope, "atproto transition:generic");
         assert_eq!(parameters.redirect_uri, "https://app.example.com/callback");
         assert_eq!(parameters.login_hint.as_deref(), Some("alice.example.com"));
@@ -1145,7 +1151,7 @@ mod tests {
         let client = public_client();
         let mut request = par_request();
         request.redirect_uri = None;
-        let parameters = client.validate_request(&request).unwrap();
+        let parameters = client.validate_request(&request, false).unwrap();
         assert_eq!(parameters.redirect_uri, "https://app.example.com/callback");
 
         let mut multi = public_client();
@@ -1153,7 +1159,7 @@ mod tests {
             .metadata
             .redirect_uris
             .push("https://app.example.com/callback2".to_string());
-        let err = multi.validate_request(&request).unwrap_err();
+        let err = multi.validate_request(&request, false).unwrap_err();
         assert!(err.error_description().contains("redirect_uri is required"));
     }
 
@@ -1163,7 +1169,7 @@ mod tests {
         let check = |mutate: Box<dyn FnOnce(&mut ParRequest)>, fragment: &str| {
             let mut request = par_request();
             mutate(&mut request);
-            let err = client.validate_request(&request).unwrap_err();
+            let err = client.validate_request(&request, false).unwrap_err();
             assert_desc(&err, fragment);
         };
         check(
@@ -1208,28 +1214,69 @@ mod tests {
             Box::new(|request| request.prompt = Some("none".to_string())),
             "silent sign-on",
         );
+        check(
+            Box::new(|request| request.response_mode = Some("form_post".to_string())),
+            "unsupported response_mode",
+        );
     }
 
+    /// Every combination of confidential/trusted and prompt: only an
+    /// untrusted public client is restricted (silent sign-on refused, every
+    /// other prompt but `create` forced to `consent`).
     #[test]
-    fn validate_request_prompt_handling() {
-        let client = confidential_client();
+    fn validate_request_prompt_matrix() {
+        let prompts: [Option<&str>; 6] = [
+            None,
+            Some("none"),
+            Some("login"),
+            Some("consent"),
+            Some("select_account"),
+            Some("create"),
+        ];
+        for (confidential, trusted) in [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let client = if confidential {
+                confidential_client()
+            } else {
+                public_client()
+            };
+            let restricted = !confidential && !trusted;
+            for prompt in prompts {
+                let mut request = par_request();
+                request.prompt = prompt.map(String::from);
+                let result = client.validate_request(&request, trusted);
+                let expected: Result<Option<&str>, ()> = match prompt {
+                    Some("none") if restricted => Err(()),
+                    Some("create") => Ok(Some("create")),
+                    _ if restricted => Ok(Some("consent")),
+                    other => Ok(other),
+                };
+                match expected {
+                    Err(()) => assert_desc(&result.unwrap_err(), "silent sign-on"),
+                    Ok(expected) => assert_eq!(result.unwrap().prompt.as_deref(), expected),
+                }
+            }
+        }
+        // the untouched `None` case stays `None` for the unrestricted clients
         let mut request = par_request();
-        request.prompt = Some("none".to_string());
-        // confidential clients may request silent sign-on; we still record
-        // consent as the effective prompt
-        let parameters = client.validate_request(&request).unwrap();
-        assert_eq!(parameters.prompt.as_deref(), Some("consent"));
-
-        request.prompt = Some("create".to_string());
-        let parameters = client.validate_request(&request).unwrap();
-        assert_eq!(parameters.prompt.as_deref(), Some("create"));
+        request.prompt = None;
+        assert!(confidential_client()
+            .validate_request(&request, false)
+            .unwrap()
+            .prompt
+            .is_none());
+        assert!(public_client()
+            .validate_request(&request, true)
+            .unwrap()
+            .prompt
+            .is_none());
     }
 
     #[test]
     fn validate_request_requires_code_response_type_in_metadata() {
         let mut client = public_client();
         client.metadata.response_types = vec!["token".to_string()];
-        let err = client.validate_request(&par_request()).unwrap_err();
+        let err = client.validate_request(&par_request(), false).unwrap_err();
         assert!(err
             .error_description()
             .contains("does not declare the \"code\" response type"));

@@ -566,13 +566,7 @@ mod tests {
             request_uri: "urn:x".to_string(),
             client_id: "https://app.example.com/client".to_string(),
             client_name: Some("Example App".to_string()),
-            client_uri: None,
-            logo_uri: None,
-            client_trusted: false,
-            scopes: vec![],
-            login_hint: None,
-            prompt: None,
-            sessions: vec![],
+            ..AuthorizePageData::default()
         };
         assert_eq!(client_display(&data), "https://app.example.com/client");
         data.client_trusted = true;

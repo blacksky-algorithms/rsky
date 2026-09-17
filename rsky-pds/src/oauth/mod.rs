@@ -11,7 +11,7 @@ use rsky_oauth::dpop::{
 };
 use rsky_oauth::jwk::{EcCurve, Jwk, SigningKey};
 use rsky_oauth::store::DeviceData;
-use rsky_oauth::{OAuthError, OAuthProvider, OAuthProviderConfig, ScopeExpander};
+use rsky_oauth::{OAuthError, OAuthProvider, OAuthProviderConfig, ScopeExpandError, ScopeExpander};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -35,14 +35,22 @@ pub struct IncludeExpander {
 
 #[rocket::async_trait]
 impl ScopeExpander for IncludeExpander {
-    async fn expand(&self, granted_scope: &str) -> String {
-        let granted: Vec<String> = granted_scope
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect();
-        crate::permission_set::expand_includes(&self.resolver, &granted)
-            .await
-            .join(" ")
+    /// Every `include:` is replaced by the grants its set confers; a set that
+    /// cannot be resolved fails the whole expansion.
+    async fn expand(&self, granted_scope: &str) -> Result<String, ScopeExpandError> {
+        let mut compiled = Vec::new();
+        for scope in granted_scope.split_whitespace() {
+            match scope.strip_prefix(crate::oauth_scope::INCLUDE_PREFIX) {
+                Some(nsid) => compiled.extend(
+                    self.resolver
+                        .try_resolved_scopes(nsid)
+                        .await
+                        .map_err(|error| ScopeExpandError(error.to_string()))?,
+                ),
+                None => compiled.push(scope.to_owned()),
+            }
+        }
+        Ok(compiled.join(" "))
     }
 }
 
@@ -99,7 +107,14 @@ async fn replay_store_for(
 }
 
 impl SharedOAuthProvider {
-    pub async fn new(account_db: Db, issuer: String, audience: String) -> Self {
+    /// `sessions_since` is the instant (unix seconds) before which device
+    /// authentications no longer count.
+    pub async fn new(
+        account_db: Db,
+        issuer: String,
+        audience: String,
+        sessions_since: Option<u64>,
+    ) -> Self {
         let signing_key = signing_key_from_env();
         let replay_store = replay_store_from_env().await;
         let nonce = match env_str("PDS_DPOP_SECRET") {
@@ -122,6 +137,7 @@ impl SharedOAuthProvider {
             dpop: DpopManager::new(Some(nonce), replay_store),
             trusted_clients: env_list("PDS_OAUTH_TRUSTED_CLIENTS"),
             scope_expander: Some(Arc::new(IncludeExpander::default())),
+            sessions_since,
         });
         Self {
             provider: Arc::new(provider),
@@ -152,7 +168,18 @@ pub fn csrf_token(cookie_value: &str) -> String {
 /// The authenticated device session for the authorization UI.
 pub struct DeviceSession {
     pub device_id: String,
+    /// The session secret the request presented.
+    pub session_id: String,
     pub csrf: String,
+}
+
+/// Builds the device cookie carrying `device_id` and `session_id`.
+pub fn device_cookie(device_id: &str, session_id: &str) -> Cookie<'static> {
+    Cookie::build((DEVICE_COOKIE, format!("{device_id}.{session_id}")))
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .path("/oauth")
+        .build()
 }
 
 /// Loads the device session from the cookie, creating a fresh device row
@@ -171,6 +198,7 @@ pub async fn ensure_device_session(
                 if device.session_id == session_id {
                     return Ok(DeviceSession {
                         device_id: device_id.to_string(),
+                        session_id: session_id.to_string(),
                         csrf: csrf_token(&value),
                     });
                 }
@@ -191,15 +219,14 @@ pub async fn ensure_device_session(
             },
         )
         .await?;
-    let value = format!("{device_id}.{session_id}");
-    let csrf = csrf_token(&value);
-    let cookie = Cookie::build((DEVICE_COOKIE, value))
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        .path("/oauth")
-        .build();
+    let cookie = device_cookie(&device_id, &session_id);
+    let csrf = csrf_token(cookie.value());
     jar.add(cookie);
-    Ok(DeviceSession { device_id, csrf })
+    Ok(DeviceSession {
+        device_id,
+        session_id,
+        csrf,
+    })
 }
 
 /// Response headers produced while handling a DPoP-authenticated request,
@@ -245,6 +272,45 @@ mod configuration_tests {
     use super::*;
 
     const K256_HEX: &str = "9d5907143471e8f0e8df0f8b9512a8c5377878ee767f18fcf961055ecfc071cd";
+
+    #[tokio::test]
+    async fn include_expander_replaces_sets_and_fails_closed() {
+        let expander = IncludeExpander::default();
+        assert_eq!(
+            expander.expand("atproto blob:image/*").await.unwrap(),
+            "atproto blob:image/*"
+        );
+        expander
+            .resolver
+            .prime(
+                "app.example.set",
+                vec!["repo:app.example.record".to_string()],
+            )
+            .await;
+        assert_eq!(
+            expander
+                .expand("atproto include:app.example.set transition:generic")
+                .await
+                .unwrap(),
+            "atproto repo:app.example.record transition:generic"
+        );
+        // `.invalid` never resolves, so the set cannot be established
+        let err = expander
+            .expand("atproto include:invalid.example.nothing")
+            .await
+            .unwrap_err();
+        assert!(err.0.contains("invalid.example.nothing"));
+    }
+
+    #[test]
+    fn device_cookie_carries_both_ids_under_the_oauth_path() {
+        let cookie = device_cookie("dev-1", "ses-1");
+        assert_eq!(cookie.name(), DEVICE_COOKIE);
+        assert_eq!(cookie.value(), "dev-1.ses-1");
+        assert_eq!(cookie.path(), Some("/oauth"));
+        assert_eq!(cookie.http_only(), Some(true));
+        assert_eq!(cookie.same_site(), Some(SameSite::Lax));
+    }
 
     #[test]
     fn signing_key_prefers_the_shared_secret() {
