@@ -763,16 +763,33 @@ impl OAuthProvider {
         device_id: &str,
         now: u64,
     ) -> Result<String, OAuthError> {
+        self.abandon_request(
+            client_id,
+            request_uri,
+            device_id,
+            "access_denied",
+            "Access denied",
+            now,
+        )
+        .await
+    }
+
+    /// Ends the request with `error` sent to the client, for a failure the
+    /// user cannot fix on this page (a browser refusing cookies, say).
+    pub async fn abandon_request(
+        &self,
+        client_id: &str,
+        request_uri: &str,
+        device_id: &str,
+        error: &str,
+        description: &str,
+        now: u64,
+    ) -> Result<String, OAuthError> {
         let (request_id, data) = self
             .active_request(client_id, request_uri, device_id, now)
             .await?;
-        self.authorization_error_redirect(
-            &request_id,
-            &data.parameters,
-            "access_denied",
-            "Access denied",
-        )
-        .await
+        self.authorization_error_redirect(&request_id, &data.parameters, error, description)
+            .await
     }
 
     fn build_redirect(
@@ -2454,6 +2471,35 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.error_description().contains("unknown request_uri"));
+
+        // any other terminal error reaches the client the same way
+        let par = run_par(&setup, CLIENT_ID, &key, NOW).await;
+        let redirect = setup
+            .provider
+            .abandon_request(
+                CLIENT_ID,
+                &par.request_uri,
+                DEVICE,
+                "invalid_request",
+                "ERR_COOKIES_UNSUPPORTED",
+                NOW,
+            )
+            .await
+            .unwrap();
+        let url = Url::parse(&redirect).unwrap();
+        assert_eq!(
+            query_value(&url, "error").as_deref(),
+            Some("invalid_request")
+        );
+        assert_eq!(
+            query_value(&url, "error_description").as_deref(),
+            Some("ERR_COOKIES_UNSUPPORTED")
+        );
+        assert!(setup
+            .provider
+            .authorize(CLIENT_ID, &par.request_uri, DEVICE, NOW)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
