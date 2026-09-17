@@ -1,0 +1,21 @@
+{% extends "layouts/account_shell.html" %}
+{% import "components/macros.html" as ui %}
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <h1 class="card-title">Reactivate account</h1>
+    <p class="card-description">Your profile, posts, feeds, and lists will become visible again across the Atmosphere network{% if let Some(app) = shell.app_name %} — that includes the {{ app }} app and any other Atmosphere app you use with this account{% endif %}.</p>
+  </div>
+  <div class="card-content">
+    <form method="post" action="{{ submit_action }}" class="form">
+      {% call ui::csrf_fields(nav.csrf) %}
+      {% if let Some(message) = error %}{% call ui::error_notice(message) %}{% endif %}
+      {% call ui::notice("note", "info", "", "You can deactivate your account again at any time from this page.") %}
+      <div class="action-row">
+        <button type="submit" class="btn btn-default">Reactivate</button>
+        <a class="btn btn-secondary" href="{{ cancel_href }}">Cancel</a>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}

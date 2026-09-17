@@ -540,7 +540,12 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
     let account_manager = AccountManager::new(account_db);
     let branding = ui::branding::Branding::from_env(&cfg.service.hostname)
         .expect("the branding environment must parse");
-    let ui_state = ui::UiState::new(&branding, &cfg.service.public_url, &cfg.service.hostname);
+    let ui_state = ui::UiState::new(
+        &branding,
+        &cfg.service.public_url,
+        &cfg.service.hostname,
+        &cfg.identity.service_handle_domains,
+    );
 
     let sequencer = SharedSequencer {
         sequencer: RwLock::new(Sequencer::with_broadcast_capacity(
@@ -867,6 +872,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 oauth::routes::oauth_authorize_accept,
                 oauth::routes::oauth_authorize_reject,
                 oauth::routes::oauth_authorize_reactivate,
+                oauth::routes::oauth_authorize_sign_up,
                 ui::assets::ui_asset,
                 all_options
             ],

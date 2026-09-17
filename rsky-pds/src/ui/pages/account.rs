@@ -292,6 +292,54 @@ pub struct PasswordPage {
     pub cancel_href: String,
 }
 
+#[derive(Template)]
+#[template(path = "account/deactivate.html")]
+pub struct DeactivatePage {
+    pub shell: PageShell,
+    pub nav: AccountNav,
+    pub error: Option<String>,
+    pub submit_action: String,
+    pub cancel_href: String,
+}
+
+#[derive(Template)]
+#[template(path = "account/reactivate.html")]
+pub struct ReactivateAccountPage {
+    pub shell: PageShell,
+    pub nav: AccountNav,
+    pub error: Option<String>,
+    pub submit_action: String,
+    pub cancel_href: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeleteStep {
+    /// Offer to mail the confirmation code
+    Request,
+    /// The code and the password
+    Confirm,
+    /// The last word
+    FinalConfirm,
+}
+
+#[derive(Template)]
+#[template(path = "account/delete.html")]
+pub struct DeletePage {
+    pub shell: PageShell,
+    pub nav: AccountNav,
+    pub step: DeleteStep,
+    pub email: Option<String>,
+    pub error: Option<String>,
+    /// The mailed code, carried by the final form
+    pub code: String,
+    /// The signed attestation that the code and password were checked
+    pub intent: String,
+    pub request_action: String,
+    pub verify_action: String,
+    pub confirm_action: String,
+    pub cancel_href: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -653,6 +701,110 @@ mod tests {
         assert!(html.contains("name=\"password\""));
         assert!(html.contains("minlength=\"8\""));
         assert!(html.contains("class=\"error\">Token is expired"));
+    }
+
+    #[test]
+    fn deactivate_reactivate_and_delete_pages() {
+        let mut page = DeactivatePage {
+            shell: shell(),
+            nav: nav(Section::Manage),
+            error: None,
+            submit_action: "/m/deactivate".into(),
+            cancel_href: "/m".into(),
+        };
+        let html = page.render().unwrap();
+        assert!(html.contains("hidden from the Blacksky app and across the Atmosphere network."));
+        assert!(
+            html.contains("There is no time limit for account deactivation, come back any time.")
+        );
+        assert!(html.contains("app passwords"));
+        assert!(html.contains(
+            "If you're trying to change your handle or email, do so before you deactivate."
+        ));
+        assert!(html.contains("name=\"password\""));
+        assert!(html.contains(">Yes, Deactivate</button>"));
+        page.error = Some("Invalid password".into());
+        page.shell = PageShell::new(&Branding::default(), "https://pds.test", "pds.test");
+        let html = page.render().unwrap();
+        assert!(html.contains("hidden across the Atmosphere network."));
+        assert!(html.contains("class=\"error\">Invalid password"));
+
+        let mut page = ReactivateAccountPage {
+            shell: shell(),
+            nav: nav(Section::Manage),
+            error: Some("Something went wrong".into()),
+            submit_action: "/m/reactivate".into(),
+            cancel_href: "/m".into(),
+        };
+        let html = page.render().unwrap();
+        assert!(html.contains("that includes the Blacksky app and any other Atmosphere app"));
+        assert!(html.contains("You can deactivate your account again at any time from this page."));
+        assert!(html.contains(">Reactivate</button>"));
+        assert!(html.contains("class=\"error\">Something went wrong"));
+        page.shell = PageShell::new(&Branding::default(), "https://pds.test", "pds.test");
+        assert!(page
+            .render()
+            .unwrap()
+            .contains("visible again across the Atmosphere network."));
+
+        let mut page = DeletePage {
+            shell: shell(),
+            nav: nav(Section::Manage),
+            step: DeleteStep::Request,
+            email: Some("alice@example.com".into()),
+            error: None,
+            code: String::new(),
+            intent: String::new(),
+            request_action: "/m/delete/request".into(),
+            verify_action: "/m/delete/verify".into(),
+            confirm_action: "/m/delete/confirm".into(),
+            cancel_href: "/m".into(),
+        };
+        let html = page.render().unwrap();
+        assert!(html.contains("Delete account <b>@alice.test</b>"));
+        assert!(html
+            .contains("send a confirmation code to your email address <b>alice@example.com</b>."));
+        assert!(html.contains("no longer be visible to other Blacksky users."));
+        assert!(html.contains(">Send email</button>"));
+        page.email = None;
+        page.shell = PageShell::new(&Branding::default(), "https://pds.test", "pds.test");
+        let html = page.render().unwrap();
+        assert!(html.contains("send a confirmation code to your email address."));
+        assert!(html.contains("no longer be visible to other users."));
+        page.shell = shell();
+        page.email = Some("alice@example.com".into());
+
+        page.step = DeleteStep::Confirm;
+        page.error = Some("Invalid did or password".into());
+        let html = page.render().unwrap();
+        assert!(html.contains("Check <b>alice@example.com</b> for an email with the confirmation code to enter below:"));
+        assert!(html.contains("name=\"code\""));
+        assert!(html.contains("name=\"password\""));
+        assert!(html.contains(">Delete my account</button>"));
+        assert!(html.contains("class=\"error\">Invalid did or password"));
+        page.email = None;
+        assert!(page
+            .render()
+            .unwrap()
+            .contains("Check your email for the confirmation code to enter below:"));
+
+        page.step = DeleteStep::FinalConfirm;
+        page.code = "CODE-1".into();
+        page.intent = "intent.exp".into();
+        let html = page.render().unwrap();
+        assert!(html.contains("Are you really, really sure?"));
+        assert!(html.contains(
+            "irreversibly delete your Blacksky account <b>@alice.test</b> and all associated data."
+        ));
+        assert!(html.contains("name=\"code\" value=\"CODE-1\""));
+        assert!(html.contains("name=\"delete_intent\" value=\"intent.exp\""));
+        assert!(html.contains(">Yes, delete my account</button>"));
+        assert!(html.contains("autocomplete=\"off\""));
+        page.shell = PageShell::new(&Branding::default(), "https://pds.test", "pds.test");
+        assert!(page
+            .render()
+            .unwrap()
+            .contains("irreversibly delete your account <b>@alice.test</b>"));
     }
 
     #[test]

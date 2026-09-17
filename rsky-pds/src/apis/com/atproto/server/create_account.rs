@@ -66,12 +66,44 @@ pub async fn server_create_account(
             caller.bypass,
         )
         .await?;
-    tracing::info!("Creating new user account");
     let requester = match auth.access {
         Some(access) if access.credentials.is_some() => access.credentials.unwrap().iss,
         _ => None,
     };
     let is_admin = admin.is_some();
+    create_account_for(
+        body.into_inner(),
+        requester,
+        is_admin,
+        sequencer,
+        blobstore_factory,
+        cfg,
+        id_resolver,
+        &account_manager,
+        actor_store,
+        lifecycle_store,
+    )
+    .await
+    .map(Json)
+}
+
+/// Creates the account `input` describes, for the XRPC method and the
+/// sign-up page alike: the actor store and repository, the PLC identity
+/// when this server makes one, the account rows, and the firehose events.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_account_for(
+    input: CreateAccountInput,
+    requester: Option<String>,
+    is_admin: bool,
+    sequencer: &State<SharedSequencer>,
+    blobstore_factory: &State<BlobstoreFactory>,
+    cfg: &State<ServerConfig>,
+    id_resolver: &State<SharedIdResolver>,
+    account_manager: &AccountManager,
+    actor_store: &State<ActorStore>,
+    lifecycle_store: &State<crate::lifecycle::LifecycleStore>,
+) -> Result<CreateAccountOutput, ApiError> {
+    tracing::info!("Creating new user account");
     // @TODO: Evaluate if we need to validate for entryway PDS
     let TransformedCreateAccountInput {
         email,
@@ -85,10 +117,10 @@ pub async fn server_create_account(
     } = validate_inputs_for_local_pds(
         cfg,
         id_resolver,
-        body.into_inner(),
+        input,
         requester,
         is_admin,
-        &account_manager,
+        account_manager,
     )
     .await?;
 
@@ -208,14 +240,9 @@ pub async fn server_create_account(
         drop(lock);
         // the repository's first commit and its sync event were committed
         // as intents with the store; deliver them after the account events
-        if let Err(error) = crate::publication::publish_pending(
-            actor_store,
-            sequencer,
-            &account_manager,
-            &did,
-            None,
-        )
-        .await
+        if let Err(error) =
+            crate::publication::publish_pending(actor_store, sequencer, account_manager, &did, None)
+                .await
         {
             tracing::error!("Sequence commit failed\n{error}");
             return Err(ApiError::RuntimeError);
@@ -249,13 +276,13 @@ pub async fn server_create_account(
     // a DID deleted here earlier may be created again; its purge
     // obligation, if any, stays until the objects are gone
     lifecycle_store.clear_tombstone(&did).await?;
-    Ok(Json(CreateAccountOutput {
+    Ok(CreateAccountOutput {
         access_jwt,
         refresh_jwt,
         handle,
         did,
         did_doc: converted_did_doc,
-    }))
+    })
 }
 
 /// Validates Create Account Parameters and builds PLC Operation if needed

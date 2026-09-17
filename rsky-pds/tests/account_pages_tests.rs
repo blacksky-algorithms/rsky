@@ -91,10 +91,14 @@ async fn entry_sign_in_and_home() {
     let (_dir, client) = get_oauth_client().await;
     create_active_account(&client).await;
 
-    // a device without sessions is sent to the sign-in form
+    // a device without sessions gets the welcome view, since this server
+    // creates accounts itself
     let response = get(&client, "/account", None).await;
-    assert_eq!(response.status(), Status::SeeOther);
-    assert_eq!(location(&response), "/account/sign-in");
+    assert_eq!(response.status(), Status::Ok);
+    let html = response.into_string().await.unwrap();
+    assert!(html.contains(">Welcome</h1>"), "{html}");
+    assert!(html.contains("href=\"/account/sign-up\">Create a new account</a>"));
+    assert!(!html.contains(">Cancel</button>"));
     let response = get(&client, "/account/sign-in", None).await;
     let cookie = cookie_of(&response);
     let html = response.into_string().await.unwrap();
@@ -354,7 +358,11 @@ async fn devices_page_and_device_sign_out() {
     assert_ne!(rotated, laptop.cookie);
     assert!(rotated.starts_with(&format!("{laptop_device}.")));
     let response = get(&client, "/account", Some(&rotated)).await;
-    assert_eq!(location(&response), "/account/sign-in");
+    assert!(response
+        .into_string()
+        .await
+        .unwrap()
+        .contains(">Welcome</h1>"));
     let response = get(&client, "/account/u/foo.rsky.com/devices", Some(&rotated)).await;
     assert_eq!(response.status(), Status::SeeOther);
     assert!(location(&response).starts_with("/account/sign-in?login_hint="));
@@ -534,6 +542,7 @@ async fn about_page_stale_sessions_and_sign_out_all() {
         location(&response),
         "/account/sign-in?login_hint=foo.rsky.com"
     );
+    // a stale session still exists, so the picker is offered, not the welcome
     let response = get(&client, "/account", Some(&manager.cookie)).await;
     assert_eq!(location(&response), "/account/sign-in");
     let response = get(&client, "/account/sign-in", Some(&manager.cookie)).await;

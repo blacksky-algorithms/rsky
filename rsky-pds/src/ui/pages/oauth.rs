@@ -125,6 +125,35 @@ impl CookieErrorPage {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignUpStep {
+    Handle,
+    Credentials,
+}
+
+/// The two-step sign-up, in the authorization flow (with a request) or on
+/// the account manager (without one).
+#[derive(Template)]
+#[template(path = "oauth/sign_up.html")]
+pub struct SignUpPage {
+    pub shell: PageShell,
+    pub step: SignUpStep,
+    pub csrf: String,
+    pub client_id: String,
+    pub request_uri: String,
+    pub domains: Vec<String>,
+    pub segment: String,
+    pub selected_domain: String,
+    pub invite_required: bool,
+    pub invite_code: String,
+    pub email: String,
+    pub error: Option<String>,
+    pub submit_action: String,
+    pub back_href: String,
+    pub tos_href: Option<String>,
+    pub privacy_href: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResetView {
     Request,
     Confirm,
@@ -540,6 +569,66 @@ mod tests {
         assert_eq!(page.to_string(), page.render().unwrap());
         let page = ErrorPage::not_found(shell());
         assert_eq!(page.to_string(), page.render().unwrap());
+    }
+
+    #[test]
+    fn sign_up_steps() {
+        let mut page = SignUpPage {
+            shell: shell(),
+            step: SignUpStep::Handle,
+            csrf: "c".into(),
+            client_id: "cid".into(),
+            request_uri: "req".into(),
+            domains: vec![".pds.test".into(), ".other.test".into()],
+            segment: "alice".into(),
+            selected_domain: ".pds.test".into(),
+            invite_required: true,
+            invite_code: String::new(),
+            email: String::new(),
+            error: None,
+            submit_action: "/oauth/authorize/sign-up".into(),
+            back_href: "/oauth/authorize?x&view=welcome".into(),
+            tos_href: Some("https://tos.test".into()),
+            privacy_href: None,
+        };
+        let html = page.render().unwrap();
+        assert!(html.contains("<title>Sign up</title>"));
+        assert!(html.contains("We're so excited to have you join us!"));
+        assert!(html.contains("Step 1 of 2"));
+        assert!(html.contains("Choose a username"));
+        assert!(html.contains("name=\"handle\" value=\"alice\""));
+        assert!(html.contains("name=\"domain\" value=\".pds.test\" checked"));
+        assert!(html.contains("You can change this username to any domain name you control after your account is set up."));
+        assert!(html.contains("name=\"client_id\""));
+        assert!(html.contains(">Next</button>"));
+        assert!(html.contains("href=\"/oauth/authorize?x&amp;view=welcome\">Back</a>"));
+        page.domains = vec![".pds.test".into()];
+        assert!(page
+            .render()
+            .unwrap()
+            .contains("type=\"hidden\" name=\"domain\" value=\".pds.test\""));
+
+        page.step = SignUpStep::Credentials;
+        page.email = "alice@example.com".into();
+        page.error = Some("Handle already taken".into());
+        let html = page.render().unwrap();
+        assert!(html.contains("Step 2 of 2"));
+        assert!(html.contains("Your account"));
+        assert!(html.contains("name=\"invite_code\""));
+        assert!(html.contains("placeholder=\"example-com-xxxxx-xxxxx\""));
+        assert!(html.contains("name=\"email\" value=\"alice@example.com\""));
+        assert!(html.contains("name=\"password\""));
+        assert!(html.contains("type=\"hidden\" name=\"handle\" value=\"alice\""));
+        assert!(html.contains("href=\"https://tos.test\">Terms of Service</a>"));
+        assert!(html.contains("and the Privacy Policy of this service."));
+        assert!(html.contains(">Sign up</button>"));
+        assert!(html.contains("class=\"error\">Handle already taken"));
+        page.invite_required = false;
+        page.client_id = String::new();
+        page.request_uri = String::new();
+        let html = page.render().unwrap();
+        assert!(!html.contains("name=\"invite_code\""));
+        assert!(!html.contains("name=\"client_id\""));
     }
 
     #[test]

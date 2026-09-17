@@ -49,6 +49,8 @@ pub fn routes() -> Vec<Route> {
     ];
     routes.extend(super::manage::routes());
     routes.extend(super::reset::routes());
+    routes.extend(super::lifecycle::routes());
+    routes.extend(super::signup::routes());
     routes
 }
 
@@ -140,14 +142,12 @@ fn sign_in_page(
     );
     let back_href = match view {
         SignInView::Picker => ui
-            .signup_url
-            .is_some()
+            .offers_signup()
             .then(|| ACCOUNT_PATH.to_string())
             .unwrap_or_default(),
         _ if !sessions.is_empty() => SIGN_IN_PATH.to_string(),
         _ => ui
-            .signup_url
-            .is_some()
+            .offers_signup()
             .then(|| ACCOUNT_PATH.to_string())
             .unwrap_or_default(),
     };
@@ -171,7 +171,7 @@ fn sign_in_page(
         sign_in_action: SIGN_IN_PATH.to_string(),
         select_action: SELECT_PATH.to_string(),
         another_account_href: format!("{SIGN_IN_PATH}?view=sign-in"),
-        signup_href: ui.signup_url.clone(),
+        signup_href: ui.account_signup_href(),
         forgot_href: Some(super::reset::RESET_PATH.to_string()),
         back_href,
         back_label: "Back".to_string(),
@@ -295,13 +295,13 @@ pub async fn account_index(
         return redirect(account_href(&account_id(&only.linked.account)));
     }
     if sessions.is_empty() {
-        if let Some(signup) = &ui.signup_url {
+        if let Some(signup) = ui.account_signup_href() {
             let page = WelcomePage {
                 shell: (**shell).clone(),
                 csrf: session.csrf.clone(),
                 client_id: String::new(),
                 request_uri: String::new(),
-                signup_href: signup.clone(),
+                signup_href: signup,
                 sign_in_href: format!("{SIGN_IN_PATH}?view=sign-in"),
                 cancel_action: None,
             };

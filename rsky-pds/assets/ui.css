@@ -103,6 +103,11 @@ strong, b { font-weight: 600; }
 .row.top { align-items: flex-start; }
 .underline { text-decoration: underline; }
 .resend { margin-top: 0.75rem; }
+.progress { height: 0.25rem; width: 100%; border-radius: 9999px; background: color-mix(in srgb, var(--primary) 20%, transparent); overflow: hidden; }
+.progress-bar { height: 100%; background: var(--primary); }
+.progress-bar.half { width: 50%; }
+.progress-bar.full { width: 100%; }
+.step-title { font-size: 1.25rem; font-weight: 500; }
 .radio-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.25rem 0; font-size: 0.875rem; }
 .item.destructive, .item.destructive .item-title, .item.destructive svg { color: var(--destructive); }
 .item.destructive:hover { background: color-mix(in srgb, var(--destructive) 10%, transparent); }

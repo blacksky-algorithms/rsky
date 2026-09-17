@@ -3,14 +3,19 @@ use super::{
     cookie_test_cookie, csrf_token, device_cookie, ensure_device_session, now_secs, DeviceSession,
     SharedOAuthProvider, COOKIE_TEST,
 };
+use crate::account::signup::{
+    create_and_sign_in, sign_up_page, SignUpContext, SignUpFormData, SignUpServices, SignUpValues,
+};
 use crate::account_manager::AccountManager;
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::server::activate_account::activate_account_for;
+use crate::config::ServerConfig;
 use crate::metrics::{record_login_success, record_oauth_authorization_granted};
 use crate::oauth_scope::INCLUDE_PREFIX;
 use crate::permission_set::SharedPermissionSets;
 use crate::ui::client::client_view;
+use crate::ui::pages::oauth::SignUpStep;
 use crate::ui::pages::oauth::{
     ConsentPage, CookieErrorPage, ErrorPage, ReactivatePage, SignInPage, SignInView, WelcomePage,
 };
@@ -19,7 +24,7 @@ use crate::ui::respond::{render_page, UiHtml};
 use crate::ui::scopes::{permission_groups, IncludeSetView};
 use crate::ui::shell::PageShell;
 use crate::ui::technical::technical_items;
-use crate::ui::UiState;
+use crate::ui::{SignUp, UiState};
 use crate::SharedSequencer;
 use rocket::form::Form;
 use rocket::http::{ContentType, CookieJar, Header, Status};
@@ -380,6 +385,7 @@ const SELECT_ACTION: &str = "/oauth/authorize/select";
 const ACCEPT_ACTION: &str = "/oauth/authorize/accept";
 const REJECT_ACTION: &str = "/oauth/authorize/reject";
 const REACTIVATE_ACTION: &str = "/oauth/authorize/reactivate";
+const SIGN_UP_ACTION: &str = "/oauth/authorize/sign-up";
 const AUTHORIZE_PATH: &str = "/oauth/authorize";
 pub(crate) const CREDENTIALS_REJECTED: &str = "Invalid identifier or password";
 pub(crate) const CODE_REJECTED: &str = "The sign-in code was not accepted";
@@ -390,7 +396,7 @@ pub(crate) const CROSS_SITE_POST: &str =
 const COOKIES_UNSUPPORTED: &str =
     "Your browser does not accept cookies, so sign-in cannot continue.";
 
-fn authorize_href(client_id: &str, request_uri: &str, view: Option<&str>) -> String {
+pub(crate) fn authorize_href(client_id: &str, request_uri: &str, view: Option<&str>) -> String {
     let mut pairs = vec![("client_id", client_id), ("request_uri", request_uri)];
     if let Some(view) = view {
         pairs.push(("view", view));
@@ -436,15 +442,13 @@ fn sign_in_page(
     // the form goes back to the picker, or to the welcome view
     let back_href = match view {
         SignInView::Picker => ui
-            .signup_url
-            .is_some()
+            .offers_signup()
             .then(|| authorize_href(&page.client_id, &page.request_uri, Some("welcome"))),
         _ if !page.sessions.is_empty() => {
             Some(authorize_href(&page.client_id, &page.request_uri, None))
         }
         _ => ui
-            .signup_url
-            .is_some()
+            .offers_signup()
             .then(|| authorize_href(&page.client_id, &page.request_uri, Some("welcome"))),
     }
     .unwrap_or_default();
@@ -472,7 +476,7 @@ fn sign_in_page(
         sign_in_action: SIGN_IN_ACTION.to_string(),
         select_action: SELECT_ACTION.to_string(),
         another_account_href: authorize_href(&page.client_id, &page.request_uri, Some("sign-in")),
-        signup_href: ui.signup_url.clone(),
+        signup_href: ui.flow_signup_href(&authorize_href(&page.client_id, &page.request_uri, None)),
         forgot_href: Some(crate::account::reset::RESET_PATH.to_string()),
         back_href,
         back_label: "Back".to_string(),
@@ -485,7 +489,9 @@ fn welcome_page(ui: &UiState, page: &AuthorizePageData, session: &DeviceSession)
         csrf: session.csrf.clone(),
         client_id: page.client_id.clone(),
         request_uri: page.request_uri.clone(),
-        signup_href: ui.signup_url.clone().unwrap_or_default(),
+        signup_href: ui
+            .flow_signup_href(&authorize_href(&page.client_id, &page.request_uri, None))
+            .unwrap_or_default(),
         sign_in_href: authorize_href(&page.client_id, &page.request_uri, Some("sign-in")),
         cancel_action: Some(REJECT_ACTION.to_string()),
     }
@@ -768,9 +774,20 @@ pub struct AuthorizeQuery {
     pub auth_error: Option<bool>,
     pub remember: Option<String>,
     pub view: Option<String>,
+    /// The username typed on the first sign-up step, when coming back to it
+    pub handle: Option<String>,
     /// Set on the cookie probe's return trip
     #[field(name = "redirect-test")]
     pub redirect_test: Option<String>,
+}
+
+fn flow_signup_context(client_id: &str, request_uri: &str) -> SignUpContext {
+    SignUpContext {
+        client_id: client_id.to_string(),
+        request_uri: request_uri.to_string(),
+        submit_action: SIGN_UP_ACTION.to_string(),
+        back_href: authorize_href(client_id, request_uri, Some("welcome")),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -783,6 +800,7 @@ pub async fn oauth_authorize(
     shared: &State<SharedOAuthProvider>,
     sets: &State<SharedPermissionSets>,
     ui: &State<UiState>,
+    cfg: &State<ServerConfig>,
 ) -> Result<Redirect, HtmlPage> {
     let shell = &ui.shell;
     let (Some(client_id), Some(request_uri)) = (query.client_id, query.request_uri) else {
@@ -851,7 +869,7 @@ pub async fn oauth_authorize(
                 ));
             }
         }
-        let welcome = ui.signup_url.is_some()
+        let welcome = ui.offers_signup()
             && page.login_hint.is_none()
             && (view == Some("welcome") || (view.is_none() && page.sessions.is_empty()));
         if welcome {
@@ -859,6 +877,21 @@ pub async fn oauth_authorize(
                 Status::Ok,
                 shell,
                 &welcome_page(ui, &page, &session),
+            ));
+        }
+        if view == Some("sign-up") && ui.signup == SignUp::Internal {
+            let values = SignUpValues {
+                segment: query.handle.unwrap_or_default(),
+                ..SignUpValues::default()
+            };
+            return Err(sign_up_page(
+                ui,
+                cfg,
+                &session.csrf,
+                &flow_signup_context(&page.client_id, &page.request_uri),
+                SignUpStep::Handle,
+                &values,
+                None,
             ));
         }
     }
@@ -1233,6 +1266,112 @@ pub async fn oauth_authorize_reject(
         .await
         .map_err(|error| oauth_error_page(shell, error))?;
     Ok(Redirect::to(redirect))
+}
+
+/// Creates the account and signs the device in, then returns to the
+/// request, which now finds a session to consent with.
+#[tracing::instrument(skip_all)]
+#[rocket::post("/oauth/authorize/sign-up", data = "<form>")]
+#[allow(clippy::too_many_arguments)]
+pub async fn oauth_authorize_sign_up(
+    form: Form<SignUpFormData>,
+    jar: &CookieJar<'_>,
+    info: OAuthRequestInfo,
+    shared: &State<SharedOAuthProvider>,
+    ui: &State<UiState>,
+    cfg: &State<ServerConfig>,
+    account_manager: &State<AccountManager>,
+    sequencer: &State<SharedSequencer>,
+    blobstore_factory: &State<BlobstoreFactory>,
+    actor_store: &State<ActorStore>,
+    id_resolver: &State<crate::SharedIdResolver>,
+    lifecycle_store: &State<crate::lifecycle::LifecycleStore>,
+    limits: &State<crate::rate_limits::RateLimits>,
+    caller: crate::rate_limits::Caller,
+) -> Result<Redirect, HtmlPage> {
+    let shell = &ui.shell;
+    let now = now_secs();
+    let mut session = device_session(shell, shared, jar, &info, now).await?;
+    let client_id = form.client_id.clone().unwrap_or_default();
+    let request_uri = form.request_uri.clone().unwrap_or_default();
+    let back = authorize_href(&client_id, &request_uri, None);
+    if ui.signup != SignUp::Internal {
+        return Err(render_error(
+            shell,
+            Status::NotFound,
+            "Sign-up is not offered here",
+        ));
+    }
+    if info.cross_site {
+        return Err(render_page(
+            Status::Forbidden,
+            shell,
+            &ErrorPage::with_back((**shell).clone(), CROSS_SITE_POST, back),
+        ));
+    }
+    // the request must still be live and bound to this device
+    if let Err(answer) =
+        authorize_or_redirect(shell, shared, &client_id, &request_uri, &session, now).await
+    {
+        return answer;
+    }
+    let ctx = flow_signup_context(&client_id, &request_uri);
+    let values = form.values();
+    if form.csrf != session.csrf {
+        return Err(sign_up_page(
+            ui,
+            cfg,
+            &session.csrf,
+            &ctx,
+            SignUpStep::Handle,
+            &values,
+            Some(SESSION_CHANGED.to_string()),
+        ));
+    }
+    if form.step != "credentials" {
+        return Err(sign_up_page(
+            ui,
+            cfg,
+            &session.csrf,
+            &ctx,
+            SignUpStep::Credentials,
+            &values,
+            None,
+        ));
+    }
+    let services = SignUpServices {
+        cfg,
+        account_manager,
+        sequencer,
+        blobstore_factory,
+        actor_store,
+        id_resolver,
+        lifecycle_store,
+        limits,
+        caller: &caller,
+    };
+    match create_and_sign_in(
+        &services,
+        shared,
+        jar,
+        &mut session,
+        &values,
+        form.password.as_deref().unwrap_or_default(),
+        now,
+    )
+    .await
+    {
+        Ok(_) => Ok(Redirect::to(back)),
+        Err(message) => Err(sign_up_page(
+            ui,
+            cfg,
+            &session.csrf,
+            &ctx,
+            SignUpStep::Credentials,
+            &values,
+            Some(message),
+        )),
+    }
 }
 
 #[derive(FromForm)]

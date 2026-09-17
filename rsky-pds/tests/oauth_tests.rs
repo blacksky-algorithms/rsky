@@ -1600,7 +1600,7 @@ async fn oauth_sign_in_without_remember_uses_an_ephemeral_proof() {
         &session,
     )
     .await;
-    assert!(html.contains("Enter your username and password"), "{html}");
+    assert!(html.contains(">Welcome</h1>"), "{html}");
     assert!(!html.contains("Sign in as..."));
 
     // the device alone cannot accept
@@ -1882,7 +1882,7 @@ async fn oauth_cookie_probe_on_ios() {
         .await;
     assert_eq!(response.status(), Status::Ok);
     let html = response.into_string().await.unwrap();
-    assert!(html.contains("Enter your username and password"), "{html}");
+    assert!(html.contains(">Welcome</h1>"), "{html}");
 
     // it did not: the client learns the flow cannot continue
     let (request_uri, _) = run_par(&client, &key).await;
