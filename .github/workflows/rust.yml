@@ -207,6 +207,16 @@ jobs:
         run: >-
           cargo llvm-cov --fail-under-lines 95
           -p rsky-pds -p rsky-oauth -p rsky-space -p rsky-space-host -p rsky-daemon
+      # Every rsky-pds / rsky-oauth source file the push touched must be fully covered.
+      - name: Gate changed files at 100% coverage
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -n "$BASE_SHA" ] && [ "$BASE_SHA" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            scripts/coverage-gate.sh "$BASE_SHA"
+          else
+            scripts/coverage-gate.sh HEAD^
+          fi
 
   # Run formatting check on the entire workspace
   formatting:

@@ -139,8 +139,12 @@ else
     if [[ "$EVENT_NAME" == "pull_request" && -n "$PR_BASE_SHA" && -n "$PR_HEAD_SHA" ]]; then
         BASE_SHA=$(git merge-base "$PR_BASE_SHA" "$PR_HEAD_SHA" || echo "$PR_BASE_SHA")
         DIFF_FILES=$(git diff --name-only "$BASE_SHA" "$PR_HEAD_SHA" 2>/dev/null || echo '')
+    elif [[ -n "$PR_BASE_SHA" && "$PR_BASE_SHA" != "0000000000000000000000000000000000000000" && -n "$PR_HEAD_SHA" ]] \
+        && git cat-file -e "$PR_BASE_SHA^{commit}" 2>/dev/null; then
+        # For push events, compare the whole push (before..sha), not only the last commit
+        DIFF_FILES=$(git diff --name-only "$PR_BASE_SHA" "$PR_HEAD_SHA" 2>/dev/null || echo '')
     else
-        # For push events, compare with the previous commit
+        # New branch or unknown base: fall back to the last commit
         DIFF_FILES=$(git diff --name-only HEAD^ HEAD 2>/dev/null || echo '')
     fi
 

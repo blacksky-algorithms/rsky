@@ -331,6 +331,19 @@ how the Blacksky client performs them:
 | `revoke-oauth-session` | `POST /oauth/revoke` |
 | `sign-in`, `sign-up` | `com.atproto.server.createSession`, `com.atproto.server.createAccount` (the gatekeeper's 2FA interception moves to `/oauth/authorize/sign-in`) |
 
+## Testing and coverage
+
+`cargo test -p rsky-pds` runs the unit and integration suites. The
+TypeScript-compatibility fixtures under `tests/fixtures/ts-pds-0.5.27/` are
+tracked in git (the `data/` directory is exempt from the workspace's
+`**/data/` ignore rule) so the compat, read-only, and import-policy suites run
+unchanged in CI.
+
+Coverage is enforced by `scripts/coverage-gate.sh <base-ref>` from the
+workspace root: every `rsky-pds` or `rsky-oauth` source file changed since the
+base must report 100% line and function coverage. CI runs the same script
+against the pushed range, next to its crate-wide 95% line floor.
+
 ## Upgrading to 1.0
 
 Every account now signs its repo with its own key. New accounts get one automatically; existing
