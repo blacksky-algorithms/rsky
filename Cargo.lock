@@ -8511,7 +8511,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-pds"
-version = "1.11.0"
+version = "1.11.1"
 dependencies = [
  "anyhow",
  "argon2",

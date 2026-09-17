@@ -1968,3 +1968,223 @@ async fn oauth_reject_rotates_the_device_session() {
     .await;
     assert!(html.contains("Sign in as..."), "{html}");
 }
+
+/// Consent forms posted from another site are refused; a hinted request
+/// whose token went stale re-renders the fixed-identifier form; a device
+/// seen a while ago is touched on its next visit.
+#[tokio::test]
+async fn oauth_form_origin_stale_tokens_and_device_touch() {
+    let (_dir, client) = get_oauth_client().await;
+    create_active_account(&client).await;
+    let key = dpop_key();
+    let (request_uri, _) = run_par(&client, &key).await;
+    let session = open_authorize_page(&client, &request_uri).await;
+
+    let response = client
+        .post("/oauth/authorize/accept")
+        .header(ContentType::Form)
+        .header(Header::new("Sec-Fetch-Site", "cross-site"))
+        .cookie(("device-id", session.cookie.clone()))
+        .body(form_encode(&[
+            ("request_uri", &request_uri),
+            ("client_id", LOOPBACK_CLIENT_ID),
+            ("csrf", &session.csrf),
+            ("did", TEST_DID),
+        ]))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Forbidden);
+    let html = response.into_string().await.unwrap();
+    assert!(html.contains("came from another site"), "{html}");
+    assert!(html.contains(">Back</a>"));
+
+    let (hinted, _) = run_par_with(
+        &client,
+        &key,
+        LOOPBACK_CLIENT_ID,
+        "atproto transition:generic",
+        &[("login_hint", "foo.rsky.com")],
+    )
+    .await;
+    let response = post_form(
+        &client,
+        "/oauth/authorize/sign-in",
+        &session.cookie,
+        &[
+            ("request_uri", &hinted),
+            ("client_id", LOOPBACK_CLIENT_ID),
+            ("csrf", "stale"),
+            ("identifier", "foo.rsky.com"),
+            ("password", "password"),
+        ],
+    )
+    .await;
+    assert_eq!(response.status(), Status::Ok);
+    let html = response.into_string().await.unwrap();
+    assert!(
+        html.contains("Your session changed in another tab"),
+        "{html}"
+    );
+    assert!(html.contains("Enter your password"));
+    assert!(html.contains("readonly"));
+
+    // the device row is refreshed once it is old enough
+    let device_id = session.cookie.split_once('.').unwrap().0.to_string();
+    let shared = client
+        .rocket()
+        .state::<rsky_pds::oauth::SharedOAuthProvider>()
+        .unwrap();
+    let store = shared.provider.store();
+    let stale = now_secs() - rsky_oauth::store::DEVICE_TOUCH_INTERVAL - 5;
+    store
+        .touch_device(&device_id, Some("old agent"), "10.0.0.1", stale)
+        .await
+        .unwrap();
+    let (request_uri, _) = run_par(&client, &key).await;
+    let html = get_authorize_html(
+        &client,
+        authorize_path(LOOPBACK_CLIENT_ID, &request_uri),
+        &session,
+    )
+    .await;
+    assert!(html.contains("Sign in"));
+    let device = store.read_device(&device_id).await.unwrap().unwrap();
+    assert!(device.last_seen_at >= now_secs() - 5, "{device:?}");
+    assert_ne!(device.user_agent.as_deref(), Some("old agent"));
+
+    // activating an account this server does not hold is refused
+    let error = rsky_pds::apis::com::atproto::server::activate_account::activate_account_for(
+        "did:plc:nobodyhere".to_string(),
+        client
+            .rocket()
+            .state::<rsky_pds::SharedSequencer>()
+            .unwrap(),
+        client
+            .rocket()
+            .state::<rsky_pds::actor_store::blobstore::BlobstoreFactory>()
+            .unwrap(),
+        client
+            .rocket()
+            .state::<rsky_pds::actor_store::ActorStore>()
+            .unwrap(),
+        client
+            .rocket()
+            .state::<rsky_pds::account_manager::AccountManager>()
+            .unwrap(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        format!("{error:?}").contains("AccountNotFound"),
+        "{error:?}"
+    );
+}
+
+/// Deactivating from the account pages revokes every credential that
+/// could act without a sign-in: OAuth sessions, their consent, and app
+/// passwords. The XRPC path keeps them.
+#[tokio::test]
+async fn deactivation_from_the_pages_revokes_credentials() {
+    let (_dir, client) = get_oauth_client().await;
+    let (identifier, password) = common::create_account(&client).await;
+    activate_test_account(&client).await;
+    let key = dpop_key();
+    let (request_uri, nonce) = run_par(&client, &key).await;
+    let mut session = open_authorize_page(&client, &request_uri).await;
+    let code = sign_in_and_accept(&client, &request_uri, &mut session).await;
+    let tokens = exchange_code(&client, &key, &code, &nonce).await;
+    let refresh_token = tokens["refresh_token"].as_str().unwrap().to_string();
+
+    let response = client
+        .post("/xrpc/com.atproto.server.createSession")
+        .header(ContentType::JSON)
+        .body(json!({ "identifier": identifier, "password": password }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let body: Value = response.into_json().await.unwrap();
+    let full_token = body["accessJwt"].as_str().unwrap().to_string();
+    let response = client
+        .post("/xrpc/com.atproto.server.createAppPassword")
+        .header(ContentType::JSON)
+        .header(Header::new("Authorization", format!("Bearer {full_token}")))
+        .body(json!({ "name": "revoked with the account" }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let body: Value = response.into_json().await.unwrap();
+    let app_password = body["password"].as_str().unwrap().to_string();
+
+    let rocket = client.rocket();
+    let account_manager = rocket
+        .state::<rsky_pds::account_manager::AccountManager>()
+        .unwrap();
+    let sequencer = rocket.state::<rsky_pds::SharedSequencer>().unwrap();
+    rsky_pds::apis::com::atproto::server::deactivate_account::deactivate_account_for(
+        TEST_DID,
+        None,
+        true,
+        sequencer,
+        account_manager,
+    )
+    .await
+    .unwrap();
+    let status = account_manager.get_account_status(TEST_DID).await.unwrap();
+    assert_eq!(format!("{status:?}"), "Deactivated");
+
+    // the OAuth session is gone
+    let token_htu = format!("{}/oauth/token", public_url(&client));
+    let response = client
+        .post("/oauth/token")
+        .header(ContentType::Form)
+        .header(Header::new(
+            "DPoP",
+            dpop_proof(&key, "POST", &token_htu, Some(&nonce), None),
+        ))
+        .body(form_encode(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", &refresh_token),
+            ("client_id", LOOPBACK_CLIENT_ID),
+        ]))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::BadRequest);
+
+    // so is the consent it rested on
+    let shared = rocket
+        .state::<rsky_pds::oauth::SharedOAuthProvider>()
+        .unwrap();
+    assert_eq!(
+        shared
+            .provider
+            .store()
+            .get_authorized_client_scope(TEST_DID, LOOPBACK_CLIENT_ID)
+            .await
+            .unwrap(),
+        None
+    );
+
+    // and the app password
+    let response = client
+        .post("/xrpc/com.atproto.server.createSession")
+        .header(ContentType::JSON)
+        .body(json!({ "identifier": identifier, "password": app_password }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Unauthorized);
+
+    // an unknown account cannot be deactivated
+    let error = rsky_pds::apis::com::atproto::server::deactivate_account::deactivate_account_for(
+        "did:plc:nobodyhere",
+        None,
+        true,
+        sequencer,
+        account_manager,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        format!("{error:?}").contains("Account not found"),
+        "{error:?}"
+    );
+}

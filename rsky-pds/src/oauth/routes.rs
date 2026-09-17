@@ -579,6 +579,13 @@ async fn consent_page(
     })
 }
 
+/// A page whether the handler succeeded or not.
+fn either(result: Result<HtmlPage, HtmlPage>) -> HtmlPage {
+    match result {
+        Ok(page) | Err(page) => page,
+    }
+}
+
 /// The screen after an account is established for the request: the
 /// reactivation offer for a deactivated account, otherwise consent.
 async fn account_page(
@@ -835,9 +842,9 @@ pub async fn oauth_authorize(
                 .iter()
                 .find(|info| info.account.did == selected && !info.login_required)
             {
-                return Err(account_page(ui, sets, &page, &session, &info.account, None)
-                    .await
-                    .unwrap_or_else(|error| error));
+                return Err(either(
+                    account_page(ui, sets, &page, &session, &info.account, None).await,
+                ));
             }
         }
         let welcome = ui.signup_url.is_some()
@@ -983,16 +990,17 @@ pub async fn oauth_authorize_sign_in(
         Err(answer) => return answer,
     };
     match signed_in {
-        Ok(result) => Err(account_page(
-            ui,
-            sets,
-            &page,
-            &session,
-            &result.account,
-            result.ephemeral_token,
-        )
-        .await
-        .unwrap_or_else(|error| error)),
+        Ok(result) => Err(either(
+            account_page(
+                ui,
+                sets,
+                &page,
+                &session,
+                &result.account,
+                result.ephemeral_token,
+            )
+            .await,
+        )),
         Err(error) => {
             let message = match &error {
                 OAuthError::InvalidRequest(description)
@@ -1101,8 +1109,9 @@ pub async fn oauth_authorize_select(
             identifier: Some(
                 account
                     .handle
-                    .clone()
-                    .unwrap_or_else(|| account.did.clone()),
+                    .as_deref()
+                    .unwrap_or(&account.did)
+                    .to_string(),
             ),
             remember_checked: true,
             ..SignInOptions::default()
@@ -1113,9 +1122,9 @@ pub async fn oauth_authorize_select(
             &sign_in_page(ui, &page, &session, options),
         ));
     }
-    Err(account_page(ui, sets, &page, &session, &account, None)
-        .await
-        .unwrap_or_else(|error| error))
+    Err(either(
+        account_page(ui, sets, &page, &session, &account, None).await,
+    ))
 }
 
 #[derive(FromForm)]
@@ -1349,16 +1358,17 @@ pub async fn oauth_authorize_reactivate(
         Ok(page) => page,
         Err(answer) => return answer,
     };
-    Err(account_page(
-        ui,
-        sets,
-        &page,
-        &session,
-        &account,
-        form.session_token.clone(),
-    )
-    .await
-    .unwrap_or_else(|error| error))
+    Err(either(
+        account_page(
+            ui,
+            sets,
+            &page,
+            &session,
+            &account,
+            form.session_token.clone(),
+        )
+        .await,
+    ))
 }
 
 #[cfg(test)]

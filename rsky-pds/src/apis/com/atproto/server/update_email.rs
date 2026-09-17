@@ -7,13 +7,14 @@ use crate::models::models::EmailTokenPurpose;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::UpdateEmailInput;
 
-async fn inner_update_email(
-    body: Json<UpdateEmailInput>,
-    auth: Scoped<OAuthForbiddenEmail, AccessFull>,
-    account_manager: AccountManager,
+/// Changes the account's address, with the mailed token when the current
+/// address is confirmed.
+pub(crate) async fn update_email_for(
+    did: String,
+    email: String,
+    token: Option<String>,
+    account_manager: &AccountManager,
 ) -> Result<(), ApiError> {
-    let did = auth.did().await?;
-    let UpdateEmailInput { email, token } = body.into_inner();
     if !mailchecker::is_valid(&email) {
         return Err(ApiError::InvalidRequest(
             "This email address is not supported, please use a different email.".to_string(),
@@ -62,5 +63,7 @@ pub async fn update_email(
     auth: Scoped<OAuthForbiddenEmail, AccessFull>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    inner_update_email(body, auth, account_manager).await
+    let did = auth.did().await?;
+    let UpdateEmailInput { email, token } = body.into_inner();
+    update_email_for(did, email, token, &account_manager).await
 }

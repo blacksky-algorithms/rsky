@@ -9,6 +9,33 @@ use crate::models::models::EmailTokenPurpose;
 use crate::rate_limits::{Caller, RateLimits};
 use rocket::State;
 
+/// Mails the account the token deletion requires.
+pub(crate) async fn request_account_delete_for(
+    did: &str,
+    account_manager: &AccountManager,
+) -> Result<(), ApiError> {
+    let account = account_manager
+        .get_account(
+            did,
+            Some(AvailabilityFlags {
+                include_deactivated: Some(true),
+                include_taken_down: Some(true),
+            }),
+        )
+        .await?;
+    let account = account.ok_or(ApiError::InvalidRequest("account not found".to_string()))?;
+    let Some(email) = account.email else {
+        return Err(ApiError::InvalidRequest(
+            "account does not have an email address".to_string(),
+        ));
+    };
+    let token = account_manager
+        .create_email_token(did, EmailTokenPurpose::DeleteAccount)
+        .await?;
+    mailer::send_account_delete(email, TokenParam { token }).await?;
+    Ok(())
+}
+
 /// Mails the caller the token `deleteAccount` requires. Full access only,
 /// from an account that is not taken down, like the reference PDS.
 #[tracing::instrument(skip_all)]
@@ -28,24 +55,5 @@ pub async fn request_account_delete(
             caller.bypass,
         )
         .await?;
-    let account = account_manager
-        .get_account(
-            &did,
-            Some(AvailabilityFlags {
-                include_deactivated: Some(true),
-                include_taken_down: Some(true),
-            }),
-        )
-        .await?;
-    let account = account.ok_or(ApiError::InvalidRequest("account not found".to_string()))?;
-    let Some(email) = account.email else {
-        return Err(ApiError::InvalidRequest(
-            "account does not have an email address".to_string(),
-        ));
-    };
-    let token = account_manager
-        .create_email_token(&did, EmailTokenPurpose::DeleteAccount)
-        .await?;
-    mailer::send_account_delete(email, TokenParam { token }).await?;
-    Ok(())
+    request_account_delete_for(&did, &account_manager).await
 }

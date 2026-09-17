@@ -14,26 +14,25 @@ use rocket::State;
 use rsky_common::env::env_str;
 use rsky_lexicon::com::atproto::identity::UpdateHandleInput;
 
+/// Validates `handle`, records it for `requester` in the directory and the
+/// account, and announces the identity change.
 #[tracing::instrument(skip_all)]
-async fn inner_update_handle(
-    body: Json<UpdateHandleInput>,
-    sequencer: &State<SharedSequencer>,
-    server_config: &State<ServerConfig>,
-    id_resolver: &State<SharedIdResolver>,
-    auth: Scoped<IdentityHandle, AccessStandardCheckTakedown>,
-    account_manager: AccountManager,
+pub(crate) async fn update_handle_for(
+    requester: String,
+    handle: String,
+    sequencer: &SharedSequencer,
+    server_config: &ServerConfig,
+    id_resolver: &SharedIdResolver,
+    account_manager: &AccountManager,
 ) -> Result<()> {
-    let UpdateHandleInput { handle } = body.into_inner();
-    let requester = auth.did().await?;
-
     let opts = HandleValidationOpts {
         handle,
         did: Some(requester.clone()),
         allow_reserved: None,
     };
     let validation_ctx = HandleValidationContext {
-        server_config,
-        id_resolver,
+        server_config: server_config.into(),
+        id_resolver: id_resolver.into(),
     };
     let handle = normalize_and_validate_handle(opts, validation_ctx).await?;
 
@@ -97,13 +96,14 @@ pub async fn update_handle(
     limits
         .consume_all(&crate::rate_limits::UPDATE_HANDLE, &did, 1, caller.bypass)
         .await?;
-    match inner_update_handle(
-        body,
+    let UpdateHandleInput { handle } = body.into_inner();
+    match update_handle_for(
+        did,
+        handle,
         sequencer,
         server_config,
         id_resolver,
-        auth,
-        account_manager,
+        &account_manager,
     )
     .await
     {

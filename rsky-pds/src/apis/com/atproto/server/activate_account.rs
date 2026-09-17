@@ -31,15 +31,13 @@ async fn inner_activate_account(
 
 /// Activates `requester` and announces it on the firehose, for the XRPC
 /// method and the browser pages alike.
-pub(crate) async fn activate_account_for(
+pub async fn activate_account_for(
     requester: String,
     sequencer: &SharedSequencer,
     blobstore_factory: &BlobstoreFactory,
     actor_store: &ActorStore,
     account_manager: &AccountManager,
 ) -> Result<(), ApiError> {
-    assert_valid_did_documents_for_service(actor_store, requester.clone()).await?;
-
     let account = account_manager
         .get_account(
             &requester,
@@ -51,6 +49,7 @@ pub(crate) async fn activate_account_for(
         .await?;
 
     if let Some(account) = account {
+        assert_valid_did_documents_for_service(actor_store, requester.clone()).await?;
         account_manager.activate_account(&requester).await?;
 
         let actor_store = actor_store

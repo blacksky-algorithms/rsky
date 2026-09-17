@@ -110,11 +110,33 @@ mod tests {
     use rocket::local::blocking::Client;
     use rocket::routes;
 
+    /// A template written by hand, so the test binary carries no derive
+    /// output of its own: `Tiny` renders its text, `Broken` never renders.
+    struct Tiny {
+        text: String,
+    }
+
+    impl std::fmt::Display for Tiny {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "<p>{}</p>", self.text)
+        }
+    }
+
+    impl Template for Tiny {
+        fn render_into(&self, writer: &mut (impl std::fmt::Write + ?Sized)) -> askama::Result<()> {
+            write!(writer, "{self}")?;
+            Ok(())
+        }
+        const EXTENSION: Option<&'static str> = Some("html");
+        const SIZE_HINT: usize = 16;
+        const MIME_TYPE: &'static str = "text/html";
+    }
+
     struct Broken;
 
     impl std::fmt::Display for Broken {
-        fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            Err(std::fmt::Error)
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("broken")
         }
     }
 
@@ -129,15 +151,10 @@ mod tests {
 
     #[test]
     fn a_template_that_fails_to_render_still_answers_a_page() {
+        assert_eq!(Broken.to_string(), "broken");
         let page = render_page(Status::Ok, &shell("https://pds.test"), &Broken);
         assert!(page.html.contains("Something went wrong"));
         assert_eq!(page.status, Status::Ok);
-    }
-
-    #[derive(Template)]
-    #[template(source = "<p>{{ text }}</p>", ext = "html")]
-    struct Tiny {
-        text: String,
     }
 
     fn shell(public_url: &str) -> PageShell {
