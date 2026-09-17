@@ -1643,3 +1643,338 @@ async fn the_sign_in_page_shows_a_second_factor_field_when_told_to() {
     assert!(html.contains("class=\"error\""), "{html}");
     assert!(!html.contains("name=\"email_otp\""));
 }
+
+/// PAR with extra request parameters (a prompt, a login hint), after the
+/// nonce challenge. Returns the request_uri and the fresh server nonce.
+async fn run_par_with(
+    client: &Client,
+    key: &Jwk,
+    client_id: &str,
+    scope: &str,
+    extra: &[(&str, &str)],
+) -> (String, String) {
+    let htu = format!("{}/oauth/par", public_url(client));
+    let response = client
+        .post("/oauth/par")
+        .header(ContentType::Form)
+        .header(Header::new(
+            "DPoP",
+            dpop_proof(key, "POST", &htu, None, None),
+        ))
+        .body(par_body(client_id, scope, "state-123"))
+        .dispatch()
+        .await;
+    let nonce = response
+        .headers()
+        .get_one("DPoP-Nonce")
+        .expect("DPoP-Nonce header on nonce challenge")
+        .to_string();
+    let mut pairs = vec![
+        ("client_id", client_id),
+        ("response_type", "code"),
+        ("redirect_uri", REDIRECT_URI),
+        ("scope", scope),
+        ("state", "state-123"),
+        ("code_challenge", PKCE_CHALLENGE),
+        ("code_challenge_method", "S256"),
+    ];
+    pairs.extend_from_slice(extra);
+    let response = client
+        .post("/oauth/par")
+        .header(ContentType::Form)
+        .header(Header::new(
+            "DPoP",
+            dpop_proof(key, "POST", &htu, Some(&nonce), None),
+        ))
+        .body(form_encode(&pairs))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Created);
+    let body: Value = serde_json::from_str(&response.into_string().await.unwrap()).unwrap();
+    (body["request_uri"].as_str().unwrap().to_string(), nonce)
+}
+
+async fn get_authorize_html(client: &Client, path: String, session: &AuthorizeSession) -> String {
+    let response = client
+        .get(path)
+        .cookie(("device-id", session.cookie.clone()))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    response.into_string().await.unwrap()
+}
+
+/// The picker offers "Another account", which shows the plain form; a hint
+/// naming a signed-in account that still needs consent goes straight to
+/// the consent screen; the branded shell carries the page headers.
+#[tokio::test]
+async fn oauth_sign_in_page_variants_after_a_session_exists() {
+    let (_dir, client) = get_oauth_client().await;
+    common::create_account(&client).await;
+    let key = dpop_key();
+    let (request_uri, nonce) = run_par(&client, &key).await;
+    let mut session = open_authorize_page(&client, &request_uri).await;
+    let code = sign_in_and_accept(&client, &request_uri, &mut session).await;
+    exchange_code(&client, &key, &code, &nonce).await;
+
+    let (request_uri, _) = run_par(&client, &key).await;
+    let html = get_authorize_html(
+        &client,
+        authorize_path(LOOPBACK_CLIENT_ID, &request_uri),
+        &session,
+    )
+    .await;
+    assert!(html.contains("Sign in as..."), "{html}");
+    assert!(html.contains("Another account"));
+    assert!(html.contains("&amp;view=sign-in"));
+    assert!(!html.contains("name=\"password\""));
+
+    let html = get_authorize_html(
+        &client,
+        format!(
+            "{}&view=sign-in",
+            authorize_path(LOOPBACK_CLIENT_ID, &request_uri)
+        ),
+        &session,
+    )
+    .await;
+    assert!(html.contains("name=\"password\""), "{html}");
+    assert!(html.contains("Enter your username and password"));
+    assert!(html.contains(">Back</a>"));
+    assert!(!html.contains("Another account"));
+
+    // the hint names the session and the client asks for consent again,
+    // so the consent screen comes up without the picker
+    let (request_uri, _) = run_par_with(
+        &client,
+        &key,
+        LOOPBACK_CLIENT_ID,
+        "atproto transition:generic",
+        &[
+            ("login_hint", "did:plc:khvyd3oiw46vif5gm7hijslk"),
+            ("prompt", "consent"),
+        ],
+    )
+    .await;
+    let response = client
+        .get(authorize_path(LOOPBACK_CLIENT_ID, &request_uri))
+        .cookie(("device-id", session.cookie.clone()))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let csp = response
+        .headers()
+        .get_one("Content-Security-Policy")
+        .expect("pages carry a CSP")
+        .to_string();
+    assert!(csp.contains("default-src 'none'"));
+    assert_eq!(
+        response.headers().get_one("Cache-Control"),
+        Some("no-store")
+    );
+    let html = response.into_string().await.unwrap();
+    assert!(html.contains("Grant access to your"), "{html}");
+    assert!(html.contains("Full access to your account data"));
+    assert!(!html.contains("name=\"password\""));
+
+    // a hint naming an account this device never signed in fixes the
+    // identifier on the form
+    let (request_uri, _) = run_par_with(
+        &client,
+        &key,
+        LOOPBACK_CLIENT_ID,
+        "atproto transition:generic",
+        &[("login_hint", "someone.else.test")],
+    )
+    .await;
+    let html = get_authorize_html(
+        &client,
+        authorize_path(LOOPBACK_CLIENT_ID, &request_uri),
+        &session,
+    )
+    .await;
+    assert!(html.contains("Enter your password"), "{html}");
+    assert!(html.contains("value=\"someone.else.test\""));
+    assert!(html.contains("readonly"));
+    assert!(!html.contains("Another account"));
+}
+
+/// Picking a session whose authentication no longer counts asks for the
+/// password again instead of showing consent.
+#[tokio::test]
+async fn oauth_select_stale_session_confirms_the_password() {
+    let (_dir, client) = get_oauth_client().await;
+    common::create_account(&client).await;
+    let key = dpop_key();
+    let (request_uri, nonce) = run_par(&client, &key).await;
+    let mut session = open_authorize_page(&client, &request_uri).await;
+    let code = sign_in_and_accept(&client, &request_uri, &mut session).await;
+    exchange_code(&client, &key, &code, &nonce).await;
+
+    let select = |request_uri: String, session: &AuthorizeSession| {
+        client
+            .post("/oauth/authorize/select")
+            .header(ContentType::Form)
+            .cookie(("device-id", session.cookie.clone()))
+            .body(form_encode(&[
+                ("request_uri", &request_uri),
+                ("client_id", LOOPBACK_CLIENT_ID),
+                ("csrf", &session.csrf),
+                ("did", "did:plc:khvyd3oiw46vif5gm7hijslk"),
+            ]))
+            .dispatch()
+    };
+
+    // an authentication older than the maximum age is stale
+    let device_id = session.cookie.split_once('.').unwrap().0.to_string();
+    let shared = client
+        .rocket()
+        .state::<rsky_pds::oauth::SharedOAuthProvider>()
+        .unwrap();
+    shared
+        .provider
+        .store()
+        .upsert_device_account(
+            &device_id,
+            "did:plc:khvyd3oiw46vif5gm7hijslk",
+            now_secs() - rsky_oauth::store::AUTHENTICATION_MAX_AGE - 60,
+        )
+        .await
+        .unwrap();
+    let (request_uri, _) = run_par(&client, &key).await;
+    let html = get_authorize_html(
+        &client,
+        authorize_path(LOOPBACK_CLIENT_ID, &request_uri),
+        &session,
+    )
+    .await;
+    assert!(html.contains("Login required"), "{html}");
+    let response = select(request_uri, &session).await;
+    assert_eq!(response.status(), Status::Ok);
+    let html = response.into_string().await.unwrap();
+    assert!(html.contains("Confirm your password to continue"), "{html}");
+    assert!(html.contains("value=\"foo.rsky.com\""));
+    assert!(html.contains("readonly"));
+}
+
+/// The consent page offers to decline the email grant; an unchecked box
+/// narrows what the token carries.
+#[tokio::test]
+async fn oauth_consent_can_decline_the_email_grant() {
+    let (_dir, client) = get_oauth_client().await;
+    common::create_account(&client).await;
+    let key = dpop_key();
+    let scope = "atproto account:email repo:app.bsky.feed.post";
+    let client_id = loopback_client_id(scope);
+    let (request_uri, nonce) = run_par_scoped(&client, &key, &client_id, scope).await;
+    let mut session = open_authorize_page_scoped(&client, &client_id, &request_uri).await;
+    let response = client
+        .post("/oauth/authorize/sign-in")
+        .header(ContentType::Form)
+        .cookie(("device-id", session.cookie.clone()))
+        .body(form_encode(&[
+            ("request_uri", &request_uri),
+            ("client_id", &client_id),
+            ("csrf", &session.csrf),
+            ("identifier", "foo@example.com"),
+            ("password", "password"),
+        ]))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    session.cookie = response
+        .cookies()
+        .get("device-id")
+        .unwrap()
+        .value()
+        .to_string();
+    let html = response.into_string().await.unwrap();
+    assert!(
+        html.contains("name=\"email_optional\" value=\"1\""),
+        "{html}"
+    );
+    assert!(html.contains("name=\"allow_email\""));
+    assert!(html.contains("Read your account's email address"));
+    session.csrf = extract_csrf(&html);
+
+    let response = client
+        .post("/oauth/authorize/accept")
+        .header(ContentType::Form)
+        .cookie(("device-id", session.cookie.clone()))
+        .body(form_encode(&[
+            ("request_uri", &request_uri),
+            ("client_id", &client_id),
+            ("csrf", &session.csrf),
+            ("did", "did:plc:khvyd3oiw46vif5gm7hijslk"),
+            ("scope", scope),
+            ("email_optional", "1"),
+        ]))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::SeeOther);
+    let location = response.headers().get_one("Location").unwrap().to_string();
+    let url = url::Url::parse(&location).unwrap();
+    let code = url
+        .query_pairs()
+        .find(|(key, _)| key == "code")
+        .map(|(_, value)| value.into_owned())
+        .unwrap();
+    let token = exchange_code_scoped(&client, &client_id, &key, &code, &nonce).await;
+    assert_eq!(token["scope"], "atproto repo:app.bsky.feed.post");
+}
+
+/// Accepting without naming the account is refused on the error page.
+#[tokio::test]
+async fn oauth_accept_requires_a_did() {
+    let (_dir, client) = get_oauth_client().await;
+    common::create_account(&client).await;
+    let key = dpop_key();
+    let (request_uri, _) = run_par(&client, &key).await;
+    let session = open_authorize_page(&client, &request_uri).await;
+    let response = client
+        .post("/oauth/authorize/accept")
+        .header(ContentType::Form)
+        .cookie(("device-id", session.cookie.clone()))
+        .body(form_encode(&[
+            ("request_uri", &request_uri),
+            ("client_id", LOOPBACK_CLIENT_ID),
+            ("csrf", &session.csrf),
+        ]))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::BadRequest);
+    let html = response.into_string().await.unwrap();
+    assert!(html.contains("did is required"), "{html}");
+    assert!(html.contains("An error occurred"));
+}
+
+/// The stylesheet the pages link to is served under its content hash.
+#[tokio::test]
+async fn oauth_pages_link_a_served_stylesheet() {
+    let (_dir, client) = get_oauth_client().await;
+    common::create_account(&client).await;
+    let key = dpop_key();
+    let (request_uri, _) = run_par(&client, &key).await;
+    let response = client
+        .get(authorize_path(LOOPBACK_CLIENT_ID, &request_uri))
+        .dispatch()
+        .await;
+    let html = response.into_string().await.unwrap();
+    let marker = "<link rel=\"stylesheet\" href=\"";
+    let start = html.find(marker).unwrap() + marker.len();
+    let href = &html[start..start + html[start..].find('"').unwrap()];
+    assert!(href.starts_with("/oauth/assets/ui-"), "{href}");
+    let response = client.get(href).dispatch().await;
+    assert_eq!(response.status(), Status::Ok);
+    assert_eq!(
+        response.headers().get_one("Cache-Control"),
+        Some("public, max-age=31536000, immutable")
+    );
+    assert!(response
+        .into_string()
+        .await
+        .unwrap()
+        .contains("--branding-color-primary"));
+    let response = client.get("/oauth/assets/ui-0000.css").dispatch().await;
+    assert_eq!(response.status(), Status::NotFound);
+}
