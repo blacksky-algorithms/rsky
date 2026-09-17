@@ -143,6 +143,13 @@ impl ErrorPage {
         }
     }
 
+    pub fn with_back(shell: PageShell, message: impl Into<String>, back_href: String) -> Self {
+        ErrorPage {
+            back_href,
+            ..ErrorPage::new(shell, message)
+        }
+    }
+
     pub fn not_found(shell: PageShell) -> Self {
         ErrorPage {
             shell,
@@ -455,10 +462,7 @@ mod tests {
         .render()
         .unwrap();
         assert!(html.contains("Cookie Error"));
-        assert!(
-            html.contains("allow cookies for the &quot;pds.test&quot; website")
-                || html.contains("allow cookies for the \"pds.test\" website")
-        );
+        assert!(html.contains("allow cookies for the &quot;pds.test&quot; website"));
         assert!(html.contains("name=\"redirect-test\" value=\"1\""));
         assert!(html.contains(">Continue</button>"));
 
@@ -468,9 +472,52 @@ mod tests {
         assert!(html.contains("An error occurred"));
         assert!(html.contains("class=\"error\">client_id and request_uri are required"));
         assert!(!html.contains(">Back</a>"));
+        let html = ErrorPage::with_back(shell(), "nope", "/back".into())
+            .render()
+            .unwrap();
+        assert!(html.contains("href=\"/back\">Back</a>"));
         let html = ErrorPage::not_found(shell()).render().unwrap();
         assert!(html.contains("Page not found"));
         assert!(html.contains("href=\"/account\">Back</a>"));
+    }
+
+    #[test]
+    fn every_page_also_displays_as_its_rendering() {
+        let page = sign_in(SignInView::Form);
+        assert_eq!(page.to_string(), page.render().unwrap());
+        let page = consent(true);
+        assert_eq!(page.to_string(), page.render().unwrap());
+        let page = WelcomePage {
+            shell: shell(),
+            csrf: "c".into(),
+            client_id: "cid".into(),
+            request_uri: "req".into(),
+            signup_href: "/s".into(),
+            sign_in_href: "/i".into(),
+            cancel_action: "/r".into(),
+        };
+        assert_eq!(page.to_string(), page.render().unwrap());
+        let page = ReactivatePage {
+            shell: shell(),
+            csrf: "c".into(),
+            client_id: "cid".into(),
+            request_uri: "req".into(),
+            account: alice(),
+            session_token: None,
+            error: None,
+            reactivate_action: "/a".into(),
+            cancel_action: "/r".into(),
+        };
+        assert_eq!(page.to_string(), page.render().unwrap());
+        let page = CookieErrorPage {
+            shell: shell(),
+            cookie_message: CookieErrorPage::message("pds.test"),
+            continue_action: "/oauth/authorize".into(),
+            continue_params: vec![],
+        };
+        assert_eq!(page.to_string(), page.render().unwrap());
+        let page = ErrorPage::not_found(shell());
+        assert_eq!(page.to_string(), page.render().unwrap());
     }
 
     #[test]

@@ -859,6 +859,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 oauth::routes::oauth_authorize_select,
                 oauth::routes::oauth_authorize_accept,
                 oauth::routes::oauth_authorize_reject,
+                oauth::routes::oauth_authorize_reactivate,
                 ui::assets::ui_asset,
                 all_options
             ],

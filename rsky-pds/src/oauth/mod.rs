@@ -4,13 +4,14 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use rocket::fairing::{Fairing, Info, Kind};
 use rocket::http::{Cookie, CookieJar, Header, SameSite};
+use rocket::time::Duration;
 use rocket::{Request, Response};
 use rsky_common::env::{env_list, env_str};
 use rsky_oauth::dpop::{
     DpopManager, DpopNonce, InMemoryReplayStore, ReplayStore, DEFAULT_ROTATION_INTERVAL,
 };
 use rsky_oauth::jwk::{EcCurve, Jwk, SigningKey};
-use rsky_oauth::store::DeviceData;
+use rsky_oauth::store::{DeviceData, DEVICE_TOUCH_INTERVAL};
 use rsky_oauth::{OAuthError, OAuthProvider, OAuthProviderConfig, ScopeExpandError, ScopeExpander};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -22,6 +23,13 @@ pub mod replay;
 pub mod routes;
 
 pub const DEVICE_COOKIE: &str = "device-id";
+/// Set before the first page on browsers that may refuse cookies, and
+/// checked when the page comes back.
+pub const COOKIE_TEST: &str = "cookie-test";
+/// The path the device cookie was scoped to before it covered the whole
+/// site; a cookie still carrying it is expired when seen next to the new one.
+const LEGACY_DEVICE_COOKIE_PATH: &str = "/oauth";
+const DEVICE_COOKIE_MAX_AGE: Duration = Duration::days(365);
 
 /// Expands `include:` permission sets into a granted scope's effective grants,
 /// so the issued access token's `scope` claim carries the resolved `space:`
@@ -56,6 +64,8 @@ impl ScopeExpander for IncludeExpander {
 /// Rocket-managed OAuth provider handle.
 pub struct SharedOAuthProvider {
     pub provider: Arc<OAuthProvider>,
+    /// Cookies carry `Secure` when the service is served over https
+    pub secure_cookies: bool,
 }
 
 /// The access-token signing key: the shared session secret when the server
@@ -139,6 +149,7 @@ impl SharedOAuthProvider {
             sessions_since,
         });
         Self {
+            secure_cookies: provider.issuer().starts_with("https://"),
             provider: Arc::new(provider),
         }
     }
@@ -172,33 +183,65 @@ pub struct DeviceSession {
     pub csrf: String,
 }
 
-/// Builds the device cookie carrying `device_id` and `session_id`.
-pub fn device_cookie(device_id: &str, session_id: &str) -> Cookie<'static> {
+/// Builds the persistent device cookie carrying `device_id` and
+/// `session_id`, scoped to the whole site.
+pub fn device_cookie(device_id: &str, session_id: &str, secure: bool) -> Cookie<'static> {
     Cookie::build((DEVICE_COOKIE, format!("{device_id}.{session_id}")))
         .http_only(true)
+        .secure(secure)
         .same_site(SameSite::Lax)
-        .path("/oauth")
+        .path("/")
+        .max_age(DEVICE_COOKIE_MAX_AGE)
         .build()
 }
 
+/// The probe cookie for browsers that may refuse cookies.
+pub fn cookie_test_cookie(secure: bool) -> Cookie<'static> {
+    Cookie::build((COOKIE_TEST, "1"))
+        .http_only(true)
+        .secure(secure)
+        .same_site(SameSite::Lax)
+        .path("/")
+        .build()
+}
+
+/// The `Set-Cookie` value that expires a device cookie left at the old
+/// path. Browsers hide it behind the site-wide one, so every page answers
+/// with this until the old cookies have died out.
+pub fn legacy_device_cookie_removal() -> String {
+    format!("{DEVICE_COOKIE}=; Path={LEGACY_DEVICE_COOKIE_PATH}; Max-Age=0; HttpOnly; SameSite=Lax")
+}
+
 /// Loads the device session from the cookie, creating a fresh device row
-/// (and cookie) when absent or invalid.
+/// (and cookie) when absent or invalid. A known device gets its cookie
+/// re-issued, which moves a cookie from the old path to the site-wide one
+/// and keeps the expiry rolling.
 pub async fn ensure_device_session(
-    provider: &OAuthProvider,
+    shared: &SharedOAuthProvider,
     jar: &CookieJar<'_>,
     user_agent: Option<&str>,
     ip_address: &str,
     now: u64,
 ) -> Result<DeviceSession, OAuthError> {
+    let provider = &shared.provider;
     if let Some(cookie) = jar.get(DEVICE_COOKIE) {
         let value = cookie.value().to_string();
         if let Some((device_id, session_id)) = value.split_once('.') {
             if let Some(device) = provider.store().read_device(device_id).await? {
                 if device.session_id == session_id {
+                    if now.saturating_sub(device.last_seen_at) >= DEVICE_TOUCH_INTERVAL {
+                        provider
+                            .store()
+                            .touch_device(device_id, user_agent, ip_address, now)
+                            .await?;
+                    }
+                    let cookie = device_cookie(device_id, session_id, shared.secure_cookies);
+                    let csrf = csrf_token(cookie.value());
+                    jar.add(cookie);
                     return Ok(DeviceSession {
                         device_id: device_id.to_string(),
                         session_id: session_id.to_string(),
-                        csrf: csrf_token(&value),
+                        csrf,
                     });
                 }
             }
@@ -218,7 +261,7 @@ pub async fn ensure_device_session(
             },
         )
         .await?;
-    let cookie = device_cookie(&device_id, &session_id);
+    let cookie = device_cookie(&device_id, &session_id, shared.secure_cookies);
     let csrf = csrf_token(cookie.value());
     jar.add(cookie);
     Ok(DeviceSession {
@@ -302,13 +345,24 @@ mod configuration_tests {
     }
 
     #[test]
-    fn device_cookie_carries_both_ids_under_the_oauth_path() {
-        let cookie = device_cookie("dev-1", "ses-1");
+    fn device_cookie_is_persistent_site_wide_and_secure_on_https() {
+        let cookie = device_cookie("dev-1", "ses-1", true);
         assert_eq!(cookie.name(), DEVICE_COOKIE);
         assert_eq!(cookie.value(), "dev-1.ses-1");
-        assert_eq!(cookie.path(), Some("/oauth"));
+        assert_eq!(cookie.path(), Some("/"));
         assert_eq!(cookie.http_only(), Some(true));
+        assert_eq!(cookie.secure(), Some(true));
         assert_eq!(cookie.same_site(), Some(SameSite::Lax));
+        assert_eq!(cookie.max_age(), Some(DEVICE_COOKIE_MAX_AGE));
+        assert_eq!(device_cookie("dev-1", "ses-1", false).secure(), Some(false));
+        let probe = cookie_test_cookie(false);
+        assert_eq!(probe.name(), COOKIE_TEST);
+        assert_eq!(probe.path(), Some("/"));
+        assert_eq!(probe.max_age(), None);
+        assert_eq!(
+            legacy_device_cookie_removal(),
+            "device-id=; Path=/oauth; Max-Age=0; HttpOnly; SameSite=Lax"
+        );
     }
 
     #[test]

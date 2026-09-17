@@ -1,18 +1,26 @@
 use super::body::OAuthBody;
 use super::{
-    csrf_token, device_cookie, ensure_device_session, now_secs, DeviceSession, SharedOAuthProvider,
+    cookie_test_cookie, csrf_token, device_cookie, ensure_device_session, now_secs, DeviceSession,
+    SharedOAuthProvider, COOKIE_TEST,
 };
+use crate::account_manager::AccountManager;
+use crate::actor_store::blobstore::BlobstoreFactory;
+use crate::actor_store::ActorStore;
+use crate::apis::com::atproto::server::activate_account::activate_account_for;
 use crate::metrics::{record_login_success, record_oauth_authorization_granted};
 use crate::oauth_scope::INCLUDE_PREFIX;
 use crate::permission_set::SharedPermissionSets;
 use crate::ui::client::client_view;
-use crate::ui::pages::oauth::{ConsentPage, ErrorPage, SignInPage, SignInView};
+use crate::ui::pages::oauth::{
+    ConsentPage, CookieErrorPage, ErrorPage, ReactivatePage, SignInPage, SignInView, WelcomePage,
+};
 use crate::ui::pages::AccountCardView;
 use crate::ui::respond::{render_page, UiHtml};
 use crate::ui::scopes::{permission_groups, IncludeSetView};
 use crate::ui::shell::PageShell;
 use crate::ui::technical::technical_items;
 use crate::ui::UiState;
+use crate::SharedSequencer;
 use rocket::form::Form;
 use rocket::http::{ContentType, CookieJar, Header, Status};
 use rocket::request::{FromRequest, Outcome, Request};
@@ -20,17 +28,18 @@ use rocket::response::{Redirect, Responder, Response};
 use rocket::serde::json::Json;
 use rocket::FromForm;
 use rocket::State;
-use rsky_common::env::env_str;
 use rsky_oauth::client::ParRequest;
 use rsky_oauth::dpop::DpopRequest;
 use rsky_oauth::store::AccountInfo;
 use rsky_oauth::types::GRANT_AUTHORIZATION_CODE;
 use rsky_oauth::{
-    AccountProof, AuthorizeOutcome, AuthorizePageData, ClientCredentials, OAuthError, TokenRequest,
+    generate_session_id, AccountProof, AuthorizeOutcome, AuthorizePageData, ClientCredentials,
+    OAuthError, TokenRequest,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::Cursor;
+use url::Url;
 
 /// Request material needed to validate DPoP proofs.
 pub struct OAuthRequestInfo {
@@ -39,6 +48,31 @@ pub struct OAuthRequestInfo {
     pub dpop_headers: Vec<String>,
     pub user_agent: Option<String>,
     pub ip_address: String,
+    /// The request carries fetch metadata or an Origin naming another site
+    pub cross_site: bool,
+}
+
+/// Whether the request came from another site, judged by the browser's
+/// own fetch metadata and Origin header. Neither header being present is
+/// not held against the request, so a proxy posting a gated form still
+/// passes.
+fn is_cross_site(sec_fetch_site: Option<&str>, origin: Option<&str>, public_url: &str) -> bool {
+    if let Some(site) = sec_fetch_site {
+        if site.eq_ignore_ascii_case("cross-site") {
+            return true;
+        }
+    }
+    match origin {
+        None => false,
+        Some(origin) => match (Url::parse(origin), Url::parse(public_url)) {
+            (Ok(origin), Ok(own)) => origin.origin() != own.origin(),
+            _ => true,
+        },
+    }
+}
+
+fn is_ios(user_agent: Option<&str>) -> bool {
+    user_agent.is_some_and(|ua| ["iPhone", "iPad", "iPod"].iter().any(|d| ua.contains(d)))
 }
 
 #[rocket::async_trait]
@@ -58,6 +92,11 @@ impl<'r> FromRequest<'r> for OAuthRequestInfo {
                 .client_ip()
                 .map(|ip| ip.to_string())
                 .unwrap_or_else(|| "unknown".to_string()),
+            cross_site: is_cross_site(
+                req.headers().get_one("sec-fetch-site"),
+                req.headers().get_one("origin"),
+                &cfg.service.public_url,
+            ),
         })
     }
 }
@@ -336,9 +375,15 @@ const SIGN_IN_ACTION: &str = "/oauth/authorize/sign-in";
 const SELECT_ACTION: &str = "/oauth/authorize/select";
 const ACCEPT_ACTION: &str = "/oauth/authorize/accept";
 const REJECT_ACTION: &str = "/oauth/authorize/reject";
+const REACTIVATE_ACTION: &str = "/oauth/authorize/reactivate";
+const AUTHORIZE_PATH: &str = "/oauth/authorize";
 const CREDENTIALS_REJECTED: &str = "Invalid identifier or password";
 const CODE_REJECTED: &str = "The sign-in code was not accepted";
 const PERMISSION_SETS_UNAVAILABLE: &str = "Unable to retrieve permission sets";
+const SESSION_CHANGED: &str = "Your session changed in another tab. Please try again.";
+const CROSS_SITE_POST: &str = "This request came from another site and was not accepted.";
+const COOKIES_UNSUPPORTED: &str =
+    "Your browser does not accept cookies, so sign-in cannot continue.";
 
 fn authorize_href(client_id: &str, request_uri: &str, view: Option<&str>) -> String {
     let mut pairs = vec![("client_id", client_id), ("request_uri", request_uri)];
@@ -348,7 +393,7 @@ fn authorize_href(client_id: &str, request_uri: &str, view: Option<&str>) -> Str
     let query: String = url::form_urlencoded::Serializer::new(String::new())
         .extend_pairs(pairs)
         .finish();
-    format!("/oauth/authorize?{query}")
+    format!("{AUTHORIZE_PATH}?{query}")
 }
 
 /// What the sign-in page is asked to show on top of the request itself.
@@ -359,14 +404,16 @@ struct SignInOptions {
     error: Option<String>,
     otp_hint: Option<String>,
     otp_error: bool,
+    remember_checked: bool,
 }
 
 fn sign_in_page(
-    shell: &PageShell,
+    ui: &UiState,
     page: &AuthorizePageData,
     session: &DeviceSession,
     options: SignInOptions,
 ) -> SignInPage {
+    let shell = &ui.shell;
     let hinted = page.login_hint.clone().filter(|hint| !hint.is_empty());
     let view = options.view.unwrap_or(if hinted.is_some() {
         SignInView::ForcedIdentifier
@@ -380,13 +427,24 @@ fn sign_in_page(
         SignInView::ForcedIdentifier | SignInView::ConfirmSelected
     );
     let identifier = options.identifier.or(hinted).unwrap_or_default();
-    let back_href = if view == SignInView::Picker || page.sessions.is_empty() {
-        String::new()
-    } else {
-        authorize_href(&page.client_id, &page.request_uri, None)
-    };
+    // the picker goes back to the welcome view when sign-up is offered;
+    // the form goes back to the picker, or to the welcome view
+    let back_href = match view {
+        SignInView::Picker => ui
+            .signup_url
+            .is_some()
+            .then(|| authorize_href(&page.client_id, &page.request_uri, Some("welcome"))),
+        _ if !page.sessions.is_empty() => {
+            Some(authorize_href(&page.client_id, &page.request_uri, None))
+        }
+        _ => ui
+            .signup_url
+            .is_some()
+            .then(|| authorize_href(&page.client_id, &page.request_uri, Some("welcome"))),
+    }
+    .unwrap_or_default();
     SignInPage {
-        shell: shell.clone(),
+        shell: (**shell).clone(),
         view,
         subtitle: SignInPage::subtitle_for(view).to_string(),
         client: client_view(page),
@@ -398,8 +456,8 @@ fn sign_in_page(
         error: options.error,
         otp_hint: options.otp_hint,
         otp_error: options.otp_error,
-        show_remember: false,
-        remember_checked: false,
+        show_remember: true,
+        remember_checked: options.remember_checked,
         submit_label: "Sign in".to_string(),
         sessions: page
             .sessions
@@ -410,10 +468,43 @@ fn sign_in_page(
         sign_in_action: SIGN_IN_ACTION.to_string(),
         select_action: SELECT_ACTION.to_string(),
         another_account_href: authorize_href(&page.client_id, &page.request_uri, Some("sign-in")),
-        signup_href: env_str("PDS_OAUTH_SIGNUP_URL").filter(|url| !url.is_empty()),
+        signup_href: ui.signup_url.clone(),
         forgot_href: None,
         back_href,
         back_label: "Back".to_string(),
+    }
+}
+
+fn welcome_page(ui: &UiState, page: &AuthorizePageData, session: &DeviceSession) -> WelcomePage {
+    WelcomePage {
+        shell: (*ui.shell).clone(),
+        csrf: session.csrf.clone(),
+        client_id: page.client_id.clone(),
+        request_uri: page.request_uri.clone(),
+        signup_href: ui.signup_url.clone().unwrap_or_default(),
+        sign_in_href: authorize_href(&page.client_id, &page.request_uri, Some("sign-in")),
+        cancel_action: REJECT_ACTION.to_string(),
+    }
+}
+
+fn reactivate_page(
+    ui: &UiState,
+    page: &AuthorizePageData,
+    session: &DeviceSession,
+    account: &AccountInfo,
+    session_token: Option<String>,
+    error: Option<String>,
+) -> ReactivatePage {
+    ReactivatePage {
+        shell: (*ui.shell).clone(),
+        csrf: session.csrf.clone(),
+        client_id: page.client_id.clone(),
+        request_uri: page.request_uri.clone(),
+        account: AccountCardView::from_account(account, false),
+        session_token,
+        error,
+        reactivate_action: REACTIVATE_ACTION.to_string(),
+        cancel_action: REJECT_ACTION.to_string(),
     }
 }
 
@@ -455,6 +546,7 @@ async fn consent_page(
     page: &AuthorizePageData,
     session: &DeviceSession,
     account: &AccountInfo,
+    session_token: Option<String>,
 ) -> Result<ConsentPage, HtmlPage> {
     let shell = &ui.shell;
     let include_sets = include_sets(sets, &page.scopes)
@@ -480,11 +572,32 @@ async fn consent_page(
         email_optional: grouping.can_drop_email,
         groups: grouping.groups,
         technical: technical_items(&page.scopes),
-        session_token: None,
+        session_token,
         accept_action: ACCEPT_ACTION.to_string(),
         reject_action: REJECT_ACTION.to_string(),
         back_href: authorize_href(&page.client_id, &page.request_uri, None),
     })
+}
+
+/// The screen after an account is established for the request: the
+/// reactivation offer for a deactivated account, otherwise consent.
+async fn account_page(
+    ui: &UiState,
+    sets: &SharedPermissionSets,
+    page: &AuthorizePageData,
+    session: &DeviceSession,
+    account: &AccountInfo,
+    session_token: Option<String>,
+) -> Result<HtmlPage, HtmlPage> {
+    if account.deactivated {
+        return Ok(render_page(
+            Status::Ok,
+            &ui.shell,
+            &reactivate_page(ui, page, session, account, session_token, None),
+        ));
+    }
+    let consent = consent_page(ui, sets, page, session, account, session_token).await?;
+    Ok(render_page(Status::Ok, &ui.shell, &consent))
 }
 
 async fn device_session(
@@ -495,7 +608,7 @@ async fn device_session(
     now: u64,
 ) -> Result<DeviceSession, HtmlPage> {
     ensure_device_session(
-        &shared.provider,
+        shared,
         jar,
         info.user_agent.as_deref(),
         &info.ip_address,
@@ -554,18 +667,106 @@ async fn linked_account(
     }
 }
 
+/// The proof a form carries for its account: the ephemeral token of a
+/// sign-in that was not remembered, else the device session.
+fn account_proof<'a>(
+    session: &'a DeviceSession,
+    session_token: Option<&'a str>,
+) -> AccountProof<'a> {
+    match session_token {
+        Some(token) => AccountProof::Ephemeral(token),
+        None => AccountProof::Device {
+            session_id: &session.session_id,
+        },
+    }
+}
+
+/// Refuses a form posted from another site or with a csrf token from
+/// before the session changed, with the page a destructive form gets.
+fn check_form_origin(
+    shell: &PageShell,
+    info: &OAuthRequestInfo,
+    session: &DeviceSession,
+    csrf: &str,
+    back_href: String,
+) -> Result<(), HtmlPage> {
+    if info.cross_site {
+        return Err(render_page(
+            Status::Forbidden,
+            shell,
+            &ErrorPage::with_back(shell.clone(), CROSS_SITE_POST, back_href),
+        ));
+    }
+    if csrf != session.csrf {
+        return Err(render_page(
+            Status::BadRequest,
+            shell,
+            &ErrorPage::with_back(shell.clone(), SESSION_CHANGED, back_href),
+        ));
+    }
+    Ok(())
+}
+
+/// Rotates the device secret after a privilege transition and hands the
+/// browser the new cookie. A device whose secret changed underneath the
+/// request keeps whatever secret it has now.
+async fn rotate_session(
+    shared: &SharedOAuthProvider,
+    jar: &CookieJar<'_>,
+    session: &mut DeviceSession,
+) -> Result<(), OAuthError> {
+    let new_session_id = generate_session_id();
+    match shared
+        .provider
+        .store()
+        .rotate_device_session(&session.device_id, &session.session_id, &new_session_id)
+        .await
+    {
+        Ok(()) => {
+            adopt_session(shared, jar, session, new_session_id);
+            Ok(())
+        }
+        Err(OAuthError::InvalidRequest(reason)) if reason == "device session changed" => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// The browser and the forms rendered from here on carry the new secret.
+fn adopt_session(
+    shared: &SharedOAuthProvider,
+    jar: &CookieJar<'_>,
+    session: &mut DeviceSession,
+    new_session_id: String,
+) {
+    let cookie = device_cookie(&session.device_id, &new_session_id, shared.secure_cookies);
+    session.csrf = csrf_token(cookie.value());
+    session.session_id = new_session_id;
+    jar.add(cookie);
+}
+
+#[derive(FromForm)]
+pub struct AuthorizeQuery {
+    pub client_id: Option<String>,
+    pub request_uri: Option<String>,
+    /// A second-factor gate in front of this route sends the browser back
+    /// here with the address hint, after a bad code with an error, and
+    /// after rejecting the credentials of an account it will not forward
+    /// without a code; `remember` keeps the checkbox through those hops.
+    pub otp_hint: Option<String>,
+    pub otp_error: Option<bool>,
+    pub auth_error: Option<bool>,
+    pub remember: Option<String>,
+    pub view: Option<String>,
+    /// Set on the cookie probe's return trip
+    #[field(name = "redirect-test")]
+    pub redirect_test: Option<String>,
+}
+
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
-#[rocket::get(
-    "/oauth/authorize?<client_id>&<request_uri>&<otp_hint>&<otp_error>&<auth_error>&<view>"
-)]
+#[rocket::get("/oauth/authorize?<query..>")]
 pub async fn oauth_authorize(
-    client_id: Option<String>,
-    request_uri: Option<String>,
-    otp_hint: Option<String>,
-    otp_error: Option<bool>,
-    auth_error: Option<bool>,
-    view: Option<String>,
+    query: AuthorizeQuery,
     jar: &CookieJar<'_>,
     info: OAuthRequestInfo,
     shared: &State<SharedOAuthProvider>,
@@ -573,7 +774,7 @@ pub async fn oauth_authorize(
     ui: &State<UiState>,
 ) -> Result<Redirect, HtmlPage> {
     let shell = &ui.shell;
-    let (Some(client_id), Some(request_uri)) = (client_id, request_uri) else {
+    let (Some(client_id), Some(request_uri)) = (query.client_id, query.request_uri) else {
         return Err(render_error(
             shell,
             Status::BadRequest,
@@ -581,19 +782,52 @@ pub async fn oauth_authorize(
         ));
     };
     let now = now_secs();
+    // browsers known to drop cookies in some embedded contexts are asked
+    // to come back once with a probe cookie before anything is bound to
+    // this device
+    if is_ios(info.user_agent.as_deref()) && jar.get(COOKIE_TEST).is_none() {
+        if query.redirect_test.is_none() {
+            jar.add(cookie_test_cookie(shared.secure_cookies));
+            let page = CookieErrorPage {
+                shell: (**shell).clone(),
+                cookie_message: CookieErrorPage::message(&shell.hostname),
+                continue_action: AUTHORIZE_PATH.to_string(),
+                continue_params: vec![
+                    ("client_id".to_string(), client_id),
+                    ("request_uri".to_string(), request_uri),
+                    ("redirect-test".to_string(), "1".to_string()),
+                ],
+            };
+            return Err(render_page(Status::Ok, shell, &page));
+        }
+        let session = device_session(shell, shared, jar, &info, now).await?;
+        return match shared
+            .provider
+            .abandon_request(
+                &client_id,
+                &request_uri,
+                &session.device_id,
+                "invalid_request",
+                "ERR_COOKIES_UNSUPPORTED",
+                now,
+            )
+            .await
+        {
+            Ok(url) => Ok(Redirect::to(url)),
+            Err(_) => Err(render_error(shell, Status::BadRequest, COOKIES_UNSUPPORTED)),
+        };
+    }
     let session = device_session(shell, shared, jar, &info, now).await?;
     let page =
         match authorize_or_redirect(shell, shared, &client_id, &request_uri, &session, now).await {
             Ok(page) => page,
             Err(answer) => return answer,
         };
-    // a second-factor gate in front of this route sends the browser back
-    // here with the address hint, after a bad code with an error, and after
-    // rejecting the credentials of an account it will not forward without
-    // a code
-    let otp_error = otp_error.unwrap_or(false);
-    let auth_error = auth_error.unwrap_or(false);
-    let gated = otp_error || auth_error || otp_hint.as_deref().is_some_and(|h| !h.is_empty());
+    let otp_error = query.otp_error.unwrap_or(false);
+    let auth_error = query.auth_error.unwrap_or(false);
+    let otp_hint = query.otp_hint.filter(|hint| !hint.is_empty());
+    let gated = otp_error || auth_error || otp_hint.is_some();
+    let view = query.view.as_deref();
     if !gated {
         if let Some(selected) = page.selected_did.as_deref() {
             if let Some(info) = page
@@ -601,9 +835,20 @@ pub async fn oauth_authorize(
                 .iter()
                 .find(|info| info.account.did == selected && !info.login_required)
             {
-                let consent = consent_page(ui, sets, &page, &session, &info.account).await?;
-                return Err(render_page(Status::Ok, shell, &consent));
+                return Err(account_page(ui, sets, &page, &session, &info.account, None)
+                    .await
+                    .unwrap_or_else(|error| error));
             }
+        }
+        let welcome = ui.signup_url.is_some()
+            && page.login_hint.is_none()
+            && (view == Some("welcome") || (view.is_none() && page.sessions.is_empty()));
+        if welcome {
+            return Err(render_page(
+                Status::Ok,
+                shell,
+                &welcome_page(ui, &page, &session),
+            ));
         }
     }
     let error = if otp_error {
@@ -614,22 +859,21 @@ pub async fn oauth_authorize(
         None
     };
     let options = SignInOptions {
-        view: (gated || view.as_deref() == Some("sign-in")).then_some(
-            if page.login_hint.is_some() {
-                SignInView::ForcedIdentifier
-            } else {
-                SignInView::Form
-            },
-        ),
+        view: (gated || view == Some("sign-in")).then_some(if page.login_hint.is_some() {
+            SignInView::ForcedIdentifier
+        } else {
+            SignInView::Form
+        }),
         identifier: None,
         error,
-        otp_hint: otp_hint.filter(|hint| !hint.is_empty()),
+        otp_hint,
         otp_error,
+        remember_checked: query.remember.as_deref() == Some("1"),
     };
     Err(render_page(
         Status::Ok,
         shell,
-        &sign_in_page(shell, &page, &session, options),
+        &sign_in_page(ui, &page, &session, options),
     ))
 }
 
@@ -642,6 +886,8 @@ pub struct SignInFormData {
     pub password: String,
     /// Consumed by a second-factor gate in front of this route; ignored here.
     pub email_otp: Option<String>,
+    /// `on` when the account is to stay signed in on this device.
+    pub remember: Option<String>,
 }
 
 #[tracing::instrument(skip_all)]
@@ -657,11 +903,52 @@ pub async fn oauth_authorize_sign_in(
     let shell = &ui.shell;
     let now = now_secs();
     let mut session = device_session(shell, shared, jar, &info, now).await?;
-    if form.csrf != session.csrf {
-        return Err(render_error(
+    if info.cross_site {
+        return Err(render_page(
+            Status::Forbidden,
             shell,
-            Status::BadRequest,
-            "invalid CSRF token",
+            &ErrorPage::with_back(
+                (**shell).clone(),
+                CROSS_SITE_POST,
+                authorize_href(&form.client_id, &form.request_uri, None),
+            ),
+        ));
+    }
+    let remember = form.remember.as_deref() == Some("on");
+    let form_view = |page: &AuthorizePageData| {
+        if page.login_hint.is_some() {
+            SignInView::ForcedIdentifier
+        } else {
+            SignInView::Form
+        }
+    };
+    if form.csrf != session.csrf {
+        // the secret changed in another tab: the same form again, with the
+        // token that matches the cookie the browser now holds
+        let page = match authorize_or_redirect(
+            shell,
+            shared,
+            &form.client_id,
+            &form.request_uri,
+            &session,
+            now,
+        )
+        .await
+        {
+            Ok(page) => page,
+            Err(answer) => return answer,
+        };
+        let options = SignInOptions {
+            view: Some(form_view(&page)),
+            identifier: Some(form.identifier.clone()),
+            error: Some(SESSION_CHANGED.to_string()),
+            remember_checked: remember,
+            ..SignInOptions::default()
+        };
+        return Err(render_page(
+            Status::Ok,
+            shell,
+            &sign_in_page(ui, &page, &session, options),
         ));
     }
     let signed_in = shared
@@ -672,19 +959,14 @@ pub async fn oauth_authorize_sign_in(
             &session.device_id,
             &form.identifier,
             &form.password,
-            true,
+            remember,
             &session.session_id,
             now,
         )
         .await;
     if let Ok(result) = &signed_in {
         if let Some(new_session_id) = &result.new_session_id {
-            // the sign-in rotated the device secret: the browser and the
-            // forms rendered from here on must carry the new one
-            let cookie = device_cookie(&session.device_id, new_session_id);
-            session.csrf = csrf_token(cookie.value());
-            session.session_id = new_session_id.clone();
-            jar.add(cookie);
+            adopt_session(shared, jar, &mut session, new_session_id.clone());
         }
     }
     let page = match authorize_or_redirect(
@@ -701,10 +983,16 @@ pub async fn oauth_authorize_sign_in(
         Err(answer) => return answer,
     };
     match signed_in {
-        Ok(result) => {
-            let consent = consent_page(ui, sets, &page, &session, &result.account).await?;
-            Err(render_page(Status::Ok, shell, &consent))
-        }
+        Ok(result) => Err(account_page(
+            ui,
+            sets,
+            &page,
+            &session,
+            &result.account,
+            result.ephemeral_token,
+        )
+        .await
+        .unwrap_or_else(|error| error)),
         Err(error) => {
             let message = match &error {
                 OAuthError::InvalidRequest(description)
@@ -715,19 +1003,16 @@ pub async fn oauth_authorize_sign_in(
                 other => other.error_description().to_string(),
             };
             let options = SignInOptions {
-                view: Some(if page.login_hint.is_some() {
-                    SignInView::ForcedIdentifier
-                } else {
-                    SignInView::Form
-                }),
+                view: Some(form_view(&page)),
                 identifier: Some(form.identifier.clone()),
                 error: Some(message),
+                remember_checked: remember,
                 ..SignInOptions::default()
             };
             Err(render_page(
                 Status::Ok,
                 shell,
-                &sign_in_page(shell, &page, &session, options),
+                &sign_in_page(ui, &page, &session, options),
             ))
         }
     }
@@ -754,11 +1039,40 @@ pub async fn oauth_authorize_select(
     let shell = &ui.shell;
     let now = now_secs();
     let session = device_session(shell, shared, jar, &info, now).await?;
-    if form.csrf != session.csrf {
-        return Err(render_error(
+    if info.cross_site {
+        return Err(render_page(
+            Status::Forbidden,
             shell,
-            Status::BadRequest,
-            "invalid CSRF token",
+            &ErrorPage::with_back(
+                (**shell).clone(),
+                CROSS_SITE_POST,
+                authorize_href(&form.client_id, &form.request_uri, None),
+            ),
+        ));
+    }
+    if form.csrf != session.csrf {
+        let page = match authorize_or_redirect(
+            shell,
+            shared,
+            &form.client_id,
+            &form.request_uri,
+            &session,
+            now,
+        )
+        .await
+        {
+            Ok(page) => page,
+            Err(answer) => return answer,
+        };
+        let options = SignInOptions {
+            view: (page.sessions.is_empty()).then_some(SignInView::Form),
+            error: Some(SESSION_CHANGED.to_string()),
+            ..SignInOptions::default()
+        };
+        return Err(render_page(
+            Status::Ok,
+            shell,
+            &sign_in_page(ui, &page, &session, options),
         ));
     }
     let (account, login_required) = linked_account(shell, shared, &session, &form.did, now).await?;
@@ -790,16 +1104,18 @@ pub async fn oauth_authorize_select(
                     .clone()
                     .unwrap_or_else(|| account.did.clone()),
             ),
+            remember_checked: true,
             ..SignInOptions::default()
         };
         return Err(render_page(
             Status::Ok,
             shell,
-            &sign_in_page(shell, &page, &session, options),
+            &sign_in_page(ui, &page, &session, options),
         ));
     }
-    let consent = consent_page(ui, sets, &page, &session, &account).await?;
-    Err(render_page(Status::Ok, shell, &consent))
+    Err(account_page(ui, sets, &page, &session, &account, None)
+        .await
+        .unwrap_or_else(|error| error))
 }
 
 #[derive(FromForm)]
@@ -814,6 +1130,8 @@ pub struct ConsentFormData {
     pub email_optional: Option<String>,
     /// Present when the email grant was left checked.
     pub allow_email: Option<String>,
+    /// The proof of a sign-in that was not remembered on this device.
+    pub session_token: Option<String>,
 }
 
 impl ConsentFormData {
@@ -846,13 +1164,13 @@ pub async fn oauth_authorize_accept(
     let shell = &ui.shell;
     let now = now_secs();
     let session = device_session(shell, shared, jar, &info, now).await?;
-    if form.csrf != session.csrf {
-        return Err(render_error(
-            shell,
-            Status::BadRequest,
-            "invalid CSRF token",
-        ));
-    }
+    check_form_origin(
+        shell,
+        &info,
+        &session,
+        &form.csrf,
+        authorize_href(&form.client_id, &form.request_uri, None),
+    )?;
     let Some(did) = form.did.clone() else {
         return Err(render_error(shell, Status::BadRequest, "did is required"));
     };
@@ -864,9 +1182,7 @@ pub async fn oauth_authorize_accept(
             &form.request_uri,
             &session.device_id,
             &did,
-            AccountProof::Device {
-                session_id: &session.session_id,
-            },
+            account_proof(&session, form.session_token.as_deref()),
             granted.as_deref(),
             now,
         )
@@ -887,20 +1203,162 @@ pub async fn oauth_authorize_reject(
 ) -> Result<Redirect, HtmlPage> {
     let shell = &ui.shell;
     let now = now_secs();
-    let session = device_session(shell, shared, jar, &info, now).await?;
-    if form.csrf != session.csrf {
-        return Err(render_error(
-            shell,
-            Status::BadRequest,
-            "invalid CSRF token",
-        ));
-    }
-    shared
+    let mut session = device_session(shell, shared, jar, &info, now).await?;
+    check_form_origin(
+        shell,
+        &info,
+        &session,
+        &form.csrf,
+        authorize_href(&form.client_id, &form.request_uri, None),
+    )?;
+    let redirect = shared
         .provider
         .reject(&form.client_id, &form.request_uri, &session.device_id, now)
         .await
-        .map(Redirect::to)
-        .map_err(|error| oauth_error_page(shell, error))
+        .map_err(|error| oauth_error_page(shell, error))?;
+    rotate_session(shared, jar, &mut session)
+        .await
+        .map_err(|error| oauth_error_page(shell, error))?;
+    Ok(Redirect::to(redirect))
+}
+
+#[derive(FromForm)]
+pub struct ReactivateFormData {
+    pub request_uri: String,
+    pub client_id: String,
+    pub csrf: String,
+    pub did: String,
+    pub session_token: Option<String>,
+}
+
+/// Reactivates the account the flow just authenticated, then continues to
+/// consent. The proof is the same one `accept` takes.
+#[allow(clippy::too_many_arguments)]
+#[tracing::instrument(skip_all)]
+#[rocket::post("/oauth/authorize/reactivate", data = "<form>")]
+pub async fn oauth_authorize_reactivate(
+    form: Form<ReactivateFormData>,
+    jar: &CookieJar<'_>,
+    info: OAuthRequestInfo,
+    shared: &State<SharedOAuthProvider>,
+    sets: &State<SharedPermissionSets>,
+    ui: &State<UiState>,
+    sequencer: &State<SharedSequencer>,
+    blobstore_factory: &State<BlobstoreFactory>,
+    actor_store: &State<ActorStore>,
+    account_manager: &State<AccountManager>,
+) -> Result<Redirect, HtmlPage> {
+    let shell = &ui.shell;
+    let now = now_secs();
+    let session = device_session(shell, shared, jar, &info, now).await?;
+    check_form_origin(
+        shell,
+        &info,
+        &session,
+        &form.csrf,
+        authorize_href(&form.client_id, &form.request_uri, None),
+    )?;
+    let account = match form.session_token.as_deref() {
+        Some(token) => {
+            shared
+                .provider
+                .verify_ephemeral_token(
+                    token,
+                    &form.did,
+                    &session.device_id,
+                    &form.request_uri,
+                    now,
+                )
+                .map_err(|error| oauth_error_page(shell, error))?;
+            match shared.provider.store().get_account(&form.did).await {
+                Ok(Some(account)) => account,
+                Ok(None) => return Err(render_error(shell, Status::BadRequest, "unknown account")),
+                Err(error) => return Err(oauth_error_page(shell, error)),
+            }
+        }
+        None => {
+            let (account, login_required) =
+                linked_account(shell, shared, &session, &form.did, now).await?;
+            if login_required {
+                return Err(render_page(
+                    Status::BadRequest,
+                    shell,
+                    &ErrorPage::with_back(
+                        (**shell).clone(),
+                        "Please sign in again to reactivate this account.",
+                        authorize_href(&form.client_id, &form.request_uri, None),
+                    ),
+                ));
+            }
+            account
+        }
+    };
+    let page = match authorize_or_redirect(
+        shell,
+        shared,
+        &form.client_id,
+        &form.request_uri,
+        &session,
+        now,
+    )
+    .await
+    {
+        Ok(page) => page,
+        Err(answer) => return answer,
+    };
+    if account.deactivated {
+        if let Err(error) = activate_account_for(
+            account.did.clone(),
+            sequencer,
+            blobstore_factory,
+            actor_store,
+            account_manager,
+        )
+        .await
+        {
+            tracing::warn!(%error, did = %account.did, "reactivation from the authorization flow failed");
+            return Err(render_page(
+                Status::Ok,
+                shell,
+                &reactivate_page(
+                    ui,
+                    &page,
+                    &session,
+                    &account,
+                    form.session_token.clone(),
+                    Some("Something went wrong".to_string()),
+                ),
+            ));
+        }
+    }
+    let account = AccountInfo {
+        deactivated: false,
+        ..account
+    };
+    // the request may no longer need consent now that the account is active
+    let page = match authorize_or_redirect(
+        shell,
+        shared,
+        &form.client_id,
+        &form.request_uri,
+        &session,
+        now,
+    )
+    .await
+    {
+        Ok(page) => page,
+        Err(answer) => return answer,
+    };
+    Err(account_page(
+        ui,
+        sets,
+        &page,
+        &session,
+        &account,
+        form.session_token.clone(),
+    )
+    .await
+    .unwrap_or_else(|error| error))
 }
 
 #[cfg(test)]
@@ -926,6 +1384,7 @@ mod tests {
             scope: None,
             email_optional: None,
             allow_email: None,
+            session_token: None,
         };
         assert_eq!(form.granted_scope(), None);
         form.scope = Some("atproto account:email?action=manage repo:a.b.c".into());
@@ -968,6 +1427,54 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error, PERMISSION_SETS_UNAVAILABLE);
+    }
+
+    #[test]
+    fn cross_site_posts_are_told_apart_by_fetch_metadata_and_origin() {
+        let own = "https://pds.test";
+        assert!(!is_cross_site(None, None, own));
+        assert!(!is_cross_site(Some("same-origin"), None, own));
+        assert!(!is_cross_site(Some("none"), Some("https://pds.test"), own));
+        assert!(is_cross_site(Some("cross-site"), None, own));
+        assert!(is_cross_site(
+            Some("Cross-Site"),
+            Some("https://pds.test"),
+            own
+        ));
+        assert!(!is_cross_site(None, Some("https://pds.test"), own));
+        assert!(!is_cross_site(None, Some("HTTPS://PDS.TEST/"), own));
+        assert!(is_cross_site(None, Some("https://evil.test"), own));
+        assert!(is_cross_site(None, Some("null"), own));
+        assert!(is_cross_site(None, Some("https://pds.test"), "not a url"));
+        assert!(is_ios(Some(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)"
+        )));
+        assert!(is_ios(Some(
+            "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)"
+        )));
+        assert!(!is_ios(Some(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)"
+        )));
+        assert!(!is_ios(None));
+    }
+
+    #[test]
+    fn account_proofs_prefer_the_ephemeral_token() {
+        let session = DeviceSession {
+            device_id: "dev-1".into(),
+            session_id: "ses-1".into(),
+            csrf: "c".into(),
+        };
+        assert_eq!(
+            account_proof(&session, Some("tok")),
+            AccountProof::Ephemeral("tok")
+        );
+        assert_eq!(
+            account_proof(&session, None),
+            AccountProof::Device {
+                session_id: "ses-1"
+            }
+        );
     }
 
     #[test]

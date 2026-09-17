@@ -12,7 +12,7 @@ pub mod shell;
 pub mod technical;
 
 use branding::Branding;
-use rsky_common::env::env_list;
+use rsky_common::env::{env_list, env_str};
 use shell::PageShell;
 use std::sync::Arc;
 
@@ -23,23 +23,28 @@ pub struct UiState {
     /// `PDS_OAUTH_FIRST_PARTY_CLIENTS`; the identity warning is not shown
     /// for one of these when it is also trusted
     pub first_party_clients: Vec<String>,
+    /// Where "Create a new account" leads, from `PDS_OAUTH_SIGNUP_URL`;
+    /// without it the pages offer no sign-up
+    pub signup_url: Option<String>,
 }
 
 impl UiState {
     pub fn new(branding: &Branding, public_url: &str, hostname: &str) -> Self {
-        Self::with_first_party(
+        Self::with_options(
             branding,
             public_url,
             hostname,
             env_list("PDS_OAUTH_FIRST_PARTY_CLIENTS"),
+            env_str("PDS_OAUTH_SIGNUP_URL"),
         )
     }
 
-    pub fn with_first_party(
+    pub fn with_options(
         branding: &Branding,
         public_url: &str,
         hostname: &str,
         first_party_clients: Vec<String>,
+        signup_url: Option<String>,
     ) -> Self {
         UiState {
             shell: Arc::new(PageShell::new(branding, public_url, hostname)),
@@ -48,6 +53,9 @@ impl UiState {
                 .map(|id| id.trim().to_string())
                 .filter(|id| !id.is_empty())
                 .collect(),
+            signup_url: signup_url
+                .map(|url| url.trim().to_string())
+                .filter(|url| !url.is_empty()),
         }
     }
 
@@ -62,15 +70,26 @@ mod tests {
 
     #[test]
     fn first_party_clients_are_trimmed_and_matched_exactly() {
-        let state = UiState::with_first_party(
+        let state = UiState::with_options(
             &Branding::default(),
             "https://pds.test",
             "pds.test",
             vec![" https://a.test/c.json ".into(), String::new()],
+            Some(" ".into()),
         );
         assert_eq!(state.first_party_clients, ["https://a.test/c.json"]);
+        assert_eq!(state.signup_url, None);
         assert!(state.is_first_party_client("https://a.test/c.json"));
         assert!(!state.is_first_party_client("https://b.test/c.json"));
+        let state = UiState::with_options(
+            &Branding::default(),
+            "https://pds.test",
+            "pds.test",
+            vec![],
+            Some(" https://signup.test ".into()),
+        );
+        assert_eq!(state.signup_url.as_deref(), Some("https://signup.test"));
+        assert!(state.first_party_clients.is_empty());
         assert_eq!(state.shell.hostname, "pds.test");
     }
 }

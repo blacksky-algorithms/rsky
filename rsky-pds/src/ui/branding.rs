@@ -399,6 +399,9 @@ mod tests {
             "PDS_APP_URL",
             "PDS_ORG_NAME",
         ];
+        // one variable is always set going in, so the restore below puts a
+        // value back as well as clearing the rest
+        std::env::set_var("PDS_ORG_NAME", "Kept");
         let saved: Vec<(&str, Option<String>)> =
             vars.iter().map(|v| (*v, std::env::var(v).ok())).collect();
         for v in vars {
@@ -431,5 +434,7 @@ mod tests {
                 None => std::env::remove_var(v),
             }
         }
+        assert_eq!(std::env::var("PDS_ORG_NAME").as_deref(), Ok("Kept"));
+        std::env::remove_var("PDS_ORG_NAME");
     }
 }

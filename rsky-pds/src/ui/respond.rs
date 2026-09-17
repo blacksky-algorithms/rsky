@@ -91,6 +91,12 @@ impl<'r> Responder<'r, 'static> for UiHtml {
         if self.hsts {
             response.header(Header::new("Strict-Transport-Security", "max-age=63072000"));
         }
+        // the device cookie moved from /oauth to the whole site; the copy a
+        // browser still holds at the old path is retired page by page
+        response.header_adjoin(Header::new(
+            "Set-Cookie",
+            crate::oauth::legacy_device_cookie_removal(),
+        ));
         response
             .sized_body(self.html.len(), Cursor::new(self.html))
             .ok()
@@ -103,6 +109,30 @@ mod tests {
     use crate::ui::branding::Branding;
     use rocket::local::blocking::Client;
     use rocket::routes;
+
+    struct Broken;
+
+    impl std::fmt::Display for Broken {
+        fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            Err(std::fmt::Error)
+        }
+    }
+
+    impl Template for Broken {
+        fn render_into(&self, _: &mut (impl std::fmt::Write + ?Sized)) -> askama::Result<()> {
+            Err(askama::Error::Fmt(std::fmt::Error))
+        }
+        const EXTENSION: Option<&'static str> = Some("html");
+        const SIZE_HINT: usize = 0;
+        const MIME_TYPE: &'static str = "text/html";
+    }
+
+    #[test]
+    fn a_template_that_fails_to_render_still_answers_a_page() {
+        let page = render_page(Status::Ok, &shell("https://pds.test"), &Broken);
+        assert!(page.html.contains("Something went wrong"));
+        assert_eq!(page.status, Status::Ok);
+    }
 
     #[derive(Template)]
     #[template(source = "<p>{{ text }}</p>", ext = "html")]
@@ -143,6 +173,9 @@ mod tests {
         assert_eq!(response.status(), Status::Ok);
         let h = response.headers();
         assert_eq!(h.get_one("Cache-Control"), Some("no-store"));
+        assert!(h
+            .get("Set-Cookie")
+            .any(|c| c.starts_with("device-id=; Path=/oauth; Max-Age=0")));
         assert_eq!(h.get_one("Pragma"), Some("no-cache"));
         assert_eq!(h.get_one("X-Frame-Options"), Some("DENY"));
         assert_eq!(h.get_one("Referrer-Policy"), Some("same-origin"));

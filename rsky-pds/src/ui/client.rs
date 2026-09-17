@@ -57,16 +57,7 @@ pub fn is_loopback_client_id(id: &str) -> bool {
 
 /// `https://host/oauth-client-metadata.json` with no port and no query.
 pub fn is_conventional_client_id(id: &str) -> bool {
-    match Url::parse(id) {
-        Ok(url) => {
-            url.scheme() == "https"
-                && url.path() == "/oauth-client-metadata.json"
-                && url.port().is_none()
-                && url.query().is_none()
-                && url.host_str().is_some()
-        }
-        Err(_) => false,
-    }
+    conventional_host(id).is_some()
 }
 
 pub fn client_display(page: &AuthorizePageData) -> ClientDisplay {
@@ -86,12 +77,12 @@ pub fn display_for(client_id: &str, client_name: Option<&str>, trusted: bool) ->
     if is_loopback_client_id(client_id) {
         return ClientDisplay::LocalApp;
     }
+    if let Some(host) = conventional_host(client_id) {
+        return ClientDisplay::Host(host);
+    }
     match Url::parse(client_id) {
         Ok(url) if url.scheme() == "https" && url.host_str().is_some() => {
             let host = url.host_str().unwrap_or_default().to_string();
-            if is_conventional_client_id(client_id) {
-                return ClientDisplay::Host(host);
-            }
             let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
             let query = url.query().map(|q| format!("?{q}")).unwrap_or_default();
             ClientDisplay::Url {
@@ -129,27 +120,28 @@ pub fn client_app_name(client_id: &str, client_name: Option<&str>) -> String {
     if let Some(name) = client_name.map(str::trim).filter(|n| !n.is_empty()) {
         return name.to_string();
     }
-    if is_conventional_client_id(client_id) {
-        return Url::parse(client_id)
-            .ok()
-            .and_then(|u| u.host_str().map(str::to_string))
-            .unwrap_or_else(|| client_id.to_string());
-    }
-    client_id.to_string()
+    client_identifier(client_id)
 }
 
-/// The "Client" column of the apps list.
+/// The "Client" column of the apps list: the host of a conventional id,
+/// otherwise the id itself.
 pub fn client_identifier(client_id: &str) -> String {
     if is_loopback_client_id(client_id) {
         return "loopback".to_string();
     }
-    if is_conventional_client_id(client_id) {
-        return Url::parse(client_id)
-            .ok()
-            .and_then(|u| u.host_str().map(str::to_string))
-            .unwrap_or_else(|| client_id.to_string());
-    }
-    client_id.to_string()
+    conventional_host(client_id).unwrap_or_else(|| client_id.to_string())
+}
+
+/// The host of a conventional client id, which is `https://` plus a host
+/// plus the metadata path and nothing else.
+fn conventional_host(client_id: &str) -> Option<String> {
+    let url = Url::parse(client_id).ok()?;
+    let host = url.host_str()?;
+    (url.scheme() == "https"
+        && url.path() == "/oauth-client-metadata.json"
+        && url.port().is_none()
+        && url.query().is_none())
+    .then(|| host.to_string())
 }
 
 #[cfg(test)]

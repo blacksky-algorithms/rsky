@@ -601,6 +601,18 @@ pub fn permission_groups(
 mod tests {
     use super::*;
 
+    #[test]
+    fn an_unknown_transition_scope_is_not_a_group_of_its_own() {
+        let g = permission_groups(
+            &["atproto".to_string(), "transition:other".to_string()],
+            &BTreeMap::new(),
+            false,
+            None,
+        );
+        assert!(g.groups.is_empty());
+        assert!(!g.only_atproto);
+    }
+
     fn scopes(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
     }

@@ -19,6 +19,25 @@ async fn inner_activate_account(
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     let requester = auth.did().await?;
+    activate_account_for(
+        requester,
+        sequencer,
+        blobstore_factory,
+        actor_store,
+        &account_manager,
+    )
+    .await
+}
+
+/// Activates `requester` and announces it on the firehose, for the XRPC
+/// method and the browser pages alike.
+pub(crate) async fn activate_account_for(
+    requester: String,
+    sequencer: &SharedSequencer,
+    blobstore_factory: &BlobstoreFactory,
+    actor_store: &ActorStore,
+    account_manager: &AccountManager,
+) -> Result<(), ApiError> {
     assert_valid_did_documents_for_service(actor_store, requester.clone()).await?;
 
     let account = account_manager

@@ -1,4 +1,6 @@
 use http_auth_basic::Credentials;
+pub mod oauth;
+
 use rocket::http::{ContentType, Header};
 use rocket::local::asynchronous::Client;
 use rocket::serde::json::json;
