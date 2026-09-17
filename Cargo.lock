@@ -8490,7 +8490,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-oauth"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -8511,7 +8511,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-pds"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "anyhow",
  "argon2",

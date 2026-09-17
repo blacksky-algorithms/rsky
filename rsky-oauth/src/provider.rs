@@ -1316,11 +1316,10 @@ fn account_matches_hint(account: &AccountInfo, hint: &str) -> bool {
             .is_some_and(|handle| handle.eq_ignore_ascii_case(hint))
 }
 
+/// Without a hint no session matches, as in the reference: the silent paths
+/// and the preselection need the client to name the account.
 fn session_matches_hint(account: &AccountInfo, hint: Option<&str>) -> bool {
-    match hint {
-        None => true,
-        Some(hint) => account_matches_hint(account, hint),
-    }
+    hint.is_some_and(|hint| account_matches_hint(account, hint))
 }
 
 fn compare_client_auth(original: &ClientAuth, current: &ClientAuth) -> Result<(), OAuthError> {
@@ -3900,7 +3899,7 @@ mod tests {
             Some("account_selection_required")
         );
 
-        // sign alice in; nothing authorized yet, so prompt=none needs consent
+        // sign alice in; prompt=none without a hint names no session
         let par = run_par(&setup, CLIENT_ID, &key, NOW).await;
         sign_in(
             &setup,
@@ -3922,10 +3921,28 @@ mod tests {
         );
         assert_eq!(
             query_value(&url, "error").as_deref(),
+            Some("login_required")
+        );
+
+        // with the hint, nothing authorized yet, so prompt=none needs consent
+        let par = run_par_with(&setup, &key, NOW, |r| {
+            r.prompt = Some("none".to_string());
+            r.login_hint = Some("alice.example.com".to_string());
+        })
+        .await;
+        let url = expect_redirect(
+            setup
+                .provider
+                .authorize(CLIENT_ID, &par.request_uri, DEVICE, NOW)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            query_value(&url, "error").as_deref(),
             Some("consent_required")
         );
 
-        // no prompt, no hint: the page, alice preselected and consent required
+        // no prompt, no hint: the page, nothing preselected, consent required
         let par = run_par(&setup, CLIENT_ID, &key, NOW).await;
         let page = expect_page(
             setup
@@ -3935,10 +3952,24 @@ mod tests {
                 .unwrap(),
         );
         assert!(page.prompt.is_none());
-        assert_eq!(page.selected_did.as_deref(), Some("did:plc:alice"));
+        assert!(page.selected_did.is_none());
         assert_eq!(page.sessions.len(), 1);
         assert!(page.sessions[0].consent_required);
         assert!(!page.sessions[0].login_required);
+
+        // a hint naming a session that still needs consent: preselected
+        let par = run_par_with(&setup, &key, NOW, |r| {
+            r.login_hint = Some("did:plc:alice".to_string())
+        })
+        .await;
+        let page = expect_page(
+            setup
+                .provider
+                .authorize(CLIENT_ID, &par.request_uri, DEVICE, NOW)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(page.selected_did.as_deref(), Some("did:plc:alice"));
 
         // a previous grant covering the request: prompt=none issues a code
         setup
@@ -3950,7 +3981,11 @@ mod tests {
             )
             .await
             .unwrap();
-        let par = run_par_with(&setup, &key, NOW, |r| r.prompt = Some("none".to_string())).await;
+        let par = run_par_with(&setup, &key, NOW, |r| {
+            r.prompt = Some("none".to_string());
+            r.login_hint = Some("alice.example.com".to_string());
+        })
+        .await;
         let url = expect_redirect(
             setup
                 .provider
@@ -3993,7 +4028,8 @@ mod tests {
 
         // prompt=consent keeps the page even though the grant covers it
         let par = run_par_with(&setup, &key, NOW, |r| {
-            r.prompt = Some("consent".to_string())
+            r.prompt = Some("consent".to_string());
+            r.login_hint = Some("alice.example.com".to_string());
         })
         .await;
         let page = expect_page(
@@ -4007,7 +4043,11 @@ mod tests {
         assert_eq!(page.selected_did.as_deref(), Some("did:plc:alice"));
 
         // prompt=login marks every session as needing a login
-        let par = run_par_with(&setup, &key, NOW, |r| r.prompt = Some("login".to_string())).await;
+        let par = run_par_with(&setup, &key, NOW, |r| {
+            r.prompt = Some("login".to_string());
+            r.login_hint = Some("alice.example.com".to_string());
+        })
+        .await;
         let page = expect_page(
             setup
                 .provider
@@ -4069,19 +4109,22 @@ mod tests {
             .await
             .unwrap();
 
-        // two eligible sessions: prompt=none cannot pick one
-        let par = run_par(&setup, CLIENT_ID, &key, NOW).await;
-        sign_in(
-            &setup,
-            CLIENT_ID,
-            &par.request_uri,
-            "bob.example.com",
-            "bobs-password",
-            NOW,
-        )
-        .await
-        .unwrap();
-        let par = run_par_with(&setup, &key, NOW, |r| r.prompt = Some("none".to_string())).await;
+        // two sessions matching the hint (a handle that moved between
+        // accounts): prompt=none cannot pick one
+        setup.store.add_account(
+            account("did:plc:alice2", "alice.example.com", None),
+            "second-password",
+        );
+        setup
+            .store
+            .upsert_device_account(DEVICE, "did:plc:alice2", NOW)
+            .await
+            .unwrap();
+        let par = run_par_with(&setup, &key, NOW, |r| {
+            r.prompt = Some("none".to_string());
+            r.login_hint = Some("alice.example.com".to_string());
+        })
+        .await;
         let url = expect_redirect(
             setup
                 .provider
@@ -4305,6 +4348,7 @@ mod tests {
         let par = run_par_with(&setup, &key, NOW, |r| {
             include_par(r);
             r.prompt = Some("none".to_string());
+            r.login_hint = Some("alice.example.com".to_string());
         })
         .await;
         setup.expander.fail.store(true, Ordering::SeqCst);
