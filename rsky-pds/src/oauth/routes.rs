@@ -473,7 +473,7 @@ fn sign_in_page(
         select_action: SELECT_ACTION.to_string(),
         another_account_href: authorize_href(&page.client_id, &page.request_uri, Some("sign-in")),
         signup_href: ui.signup_url.clone(),
-        forgot_href: None,
+        forgot_href: Some(crate::account::reset::RESET_PATH.to_string()),
         back_href,
         back_label: "Back".to_string(),
     }

@@ -177,6 +177,121 @@ pub struct AboutPage {
     pub profile_href: Option<String>,
 }
 
+/// A row of the manage page.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SettingRow {
+    pub href: String,
+    pub title: &'static str,
+    /// The current value, when the row has one
+    pub value: String,
+    pub icon: &'static str,
+    pub destructive: bool,
+}
+
+#[derive(Template)]
+#[template(path = "account/manage.html")]
+pub struct ManagePage {
+    pub shell: PageShell,
+    pub nav: AccountNav,
+    /// The address awaiting verification, when there is one
+    pub unverified_email: Option<String>,
+    pub verify_href: String,
+    pub deactivated: bool,
+    pub rows: Vec<SettingRow>,
+    pub notice: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmailStep {
+    /// Ask for the new address
+    Choose,
+    /// The current address is confirmed: a code went there first
+    Token,
+    /// The address changed; offer to send a code to the new one
+    VerifyRequest,
+    /// Enter the code sent to the new address
+    Verify,
+}
+
+#[derive(Template)]
+#[template(path = "account/email.html")]
+pub struct EmailPage {
+    pub shell: PageShell,
+    pub nav: AccountNav,
+    pub step: EmailStep,
+    pub current_email: Option<String>,
+    pub new_email: String,
+    pub error: Option<String>,
+    pub request_action: String,
+    pub confirm_action: String,
+    pub verify_request_action: String,
+    pub verify_action: String,
+    pub verify_code_href: String,
+    pub cancel_href: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandleMode {
+    Choose,
+    Default,
+    Custom,
+}
+
+#[derive(Template)]
+#[template(path = "account/handle.html")]
+pub struct HandlePage {
+    pub shell: PageShell,
+    pub nav: AccountNav,
+    pub mode: HandleMode,
+    pub did: String,
+    /// The handle without its domain, when it is on one of this server's
+    pub segment: String,
+    pub domains: Vec<String>,
+    pub selected_domain: String,
+    /// The typed domain of a custom handle
+    pub custom: String,
+    pub error: Option<String>,
+    pub default_href: String,
+    pub custom_href: String,
+    pub submit_action: String,
+    pub cancel_href: String,
+    pub mailto_href: String,
+}
+
+impl HandlePage {
+    /// The instructions as a mail body, for "Email these instructions".
+    pub fn instructions_mailto(handle: &str, did: &str) -> String {
+        let body = format!(
+            "Hello,\n\nTo associate the domain \"{handle}\" with my AT Protocol identity ({did}), one of the following configuration changes is required. Either method is sufficient, only one needs to be applied.\n\nDNS: Add the following record to your domain's DNS configuration.\nHost: _atproto.{handle}\nType: TXT\nValue: did={did}\n\nHTTP: Make a text file with the contents below available at the following URL.\nURL: https://{handle}/.well-known/atproto-did\nFile contents: {did}\n\nThank you."
+        );
+        format!(
+            "mailto:?body={}",
+            url::form_urlencoded::byte_serialize(body.as_bytes())
+                .collect::<String>()
+                .replace('+', "%20")
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PasswordStep {
+    Request,
+    Confirm,
+}
+
+#[derive(Template)]
+#[template(path = "account/password.html")]
+pub struct PasswordPage {
+    pub shell: PageShell,
+    pub nav: AccountNav,
+    pub step: PasswordStep,
+    pub error: Option<String>,
+    pub request_action: String,
+    pub confirm_action: String,
+    pub code_href: String,
+    pub cancel_href: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,6 +475,184 @@ mod tests {
         details.groups.clear();
         let html = details.render().unwrap();
         assert!(html.contains("This app can uniquely identify you through your account."));
+    }
+
+    #[test]
+    fn manage_page_rows_and_notices() {
+        let rows = vec![
+            SettingRow {
+                href: "/m/email".into(),
+                title: "Email address",
+                value: "alice@example.com".into(),
+                icon: "mail",
+                destructive: false,
+            },
+            SettingRow {
+                href: "/m/delete".into(),
+                title: "Delete account",
+                value: String::new(),
+                icon: "trash",
+                destructive: true,
+            },
+        ];
+        let mut page = ManagePage {
+            shell: shell(),
+            nav: nav(Section::Manage),
+            unverified_email: Some("alice@example.com".into()),
+            verify_href: "/m/email/verify".into(),
+            deactivated: false,
+            rows,
+            notice: Some("Your password has been updated.".into()),
+        };
+        let html = page.render().unwrap();
+        assert!(html.contains("<h2>Account</h2>"));
+        assert!(html.contains("Your email address needs to be verified."));
+        assert!(html.contains("href=\"/m/email/verify\">Verify now</a>"));
+        assert!(html.contains("Your password has been updated."));
+        assert!(html.contains("alice@example.com"));
+        assert!(html.contains("class=\"item destructive\""));
+        page.unverified_email = None;
+        page.notice = None;
+        page.deactivated = true;
+        let html = page.render().unwrap();
+        assert!(!html.contains("Verify now"));
+        assert!(html.contains("Your account is deactivated."));
+    }
+
+    #[test]
+    fn email_page_steps() {
+        let mut page = EmailPage {
+            shell: shell(),
+            nav: nav(Section::Manage),
+            step: EmailStep::Choose,
+            current_email: Some("alice@example.com".into()),
+            new_email: String::new(),
+            error: None,
+            request_action: "/m/email/request".into(),
+            confirm_action: "/m/email/confirm".into(),
+            verify_request_action: "/m/email/verify/request".into(),
+            verify_action: "/m/email/verify".into(),
+            verify_code_href: "/m/email/verify?step=code".into(),
+            cancel_href: "/m".into(),
+        };
+        let html = page.render().unwrap();
+        assert!(html.contains("Update your email"));
+        assert!(html.contains("Your account currently uses <b>alice@example.com</b>. Choose a new email address to associate with it."));
+        assert!(html.contains("name=\"new_email\""));
+        assert!(html.contains("action=\"/m/email/request\""));
+        page.current_email = None;
+        assert!(page
+            .render()
+            .unwrap()
+            .contains("Choose a new email address to associate with your account."));
+
+        page.step = EmailStep::Token;
+        page.new_email = "new@example.com".into();
+        page.error = Some("Token is invalid".into());
+        let html = page.render().unwrap();
+        assert!(html.contains("Security step required"));
+        assert!(
+            html.contains("Please enter the security code that was sent to your email address.")
+        );
+        assert!(html.contains("name=\"new_email\" value=\"new@example.com\""));
+        assert!(html.contains("name=\"code\""));
+        assert!(html.contains("action=\"/m/email/confirm\""));
+        assert!(html.contains("class=\"error\">Token is invalid"));
+
+        page.step = EmailStep::VerifyRequest;
+        let html = page.render().unwrap();
+        assert!(html.contains("Verify your email"));
+        assert!(html.contains("security code sent to <b>new@example.com</b>"));
+        assert!(html.contains("Send verification code"));
+        assert!(html.contains("href=\"/m/email/verify?step=code\">Already have a code?</a>"));
+
+        page.step = EmailStep::Verify;
+        let html = page.render().unwrap();
+        assert!(html.contains("Verification code"));
+        assert!(html.contains("action=\"/m/email/verify\""));
+    }
+
+    #[test]
+    fn handle_page_modes() {
+        let mut page = HandlePage {
+            shell: shell(),
+            nav: nav(Section::Manage),
+            mode: HandleMode::Choose,
+            did: "did:plc:alice".into(),
+            segment: "alice".into(),
+            domains: vec![".pds.test".into(), ".other.test".into()],
+            selected_domain: ".pds.test".into(),
+            custom: String::new(),
+            error: None,
+            default_href: "/m/handle?mode=default".into(),
+            custom_href: "/m/handle?mode=custom".into(),
+            submit_action: "/m/handle".into(),
+            cancel_href: "/m".into(),
+            mailto_href: HandlePage::instructions_mailto("alice.com", "did:plc:alice"),
+        };
+        let html = page.render().unwrap();
+        assert!(html.contains("Update your username"));
+        assert!(html.contains("Use a default username"));
+        assert!(html.contains("<em>alice.pds.test</em>"));
+        assert!(html.contains("Use a domain name I own"));
+
+        page.mode = HandleMode::Default;
+        let html = page.render().unwrap();
+        assert!(html.contains("Choose a new default username."));
+        assert!(html.contains("name=\"handle\" value=\"alice\""));
+        assert!(html.contains("name=\"domain\" value=\".pds.test\" checked"));
+        assert!(html.contains("name=\"domain\" value=\".other.test\""));
+        assert!(html.contains("Use 3–18 letters, numbers or hyphens"));
+        page.domains = vec![".pds.test".into()];
+        let html = page.render().unwrap();
+        assert!(html.contains("type=\"hidden\" name=\"domain\" value=\".pds.test\""));
+
+        page.mode = HandleMode::Custom;
+        page.custom = "alice.com".into();
+        page.error = Some("Handle already taken".into());
+        let html = page.render().unwrap();
+        assert!(html.contains(
+            "Update your username to a domain name you own to self-verify your identity."
+        ));
+        assert!(html.contains("_atproto.alice.com"));
+        assert!(html.contains("did=did:plc:alice"));
+        assert!(html.contains("https://alice.com/.well-known/atproto-did"));
+        assert!(html.contains("Email these instructions"));
+        assert!(html.contains("mailto:?body=Hello"));
+        assert!(html.contains("Verify and Save"));
+        assert!(html.contains("class=\"error\">Handle already taken"));
+        page.custom = String::new();
+        let html = page.render().unwrap();
+        assert!(html.contains("_atproto.&lt;your-domain&gt;"));
+        assert!(!html.contains("Email these instructions"));
+    }
+
+    #[test]
+    fn password_page_steps() {
+        let mut page = PasswordPage {
+            shell: shell(),
+            nav: nav(Section::Manage),
+            step: PasswordStep::Request,
+            error: None,
+            request_action: "/m/password/request".into(),
+            confirm_action: "/m/password".into(),
+            code_href: "/m/password?step=code".into(),
+            cancel_href: "/m".into(),
+        };
+        let html = page.render().unwrap();
+        assert!(html.contains("Change your password"));
+        assert!(html.contains(
+            "To change your password, you'll need to enter a security code sent to your email."
+        ));
+        assert!(html.contains("Send verification code"));
+        page.step = PasswordStep::Confirm;
+        page.error = Some("Token is expired".into());
+        let html = page.render().unwrap();
+        assert!(html.contains("name=\"code\""));
+        assert!(html.contains("name=\"current_password\""));
+        assert!(html.contains("name=\"password\""));
+        assert!(html.contains("minlength=\"8\""));
+        assert!(html.contains("class=\"error\">Token is expired"));
     }
 
     #[test]

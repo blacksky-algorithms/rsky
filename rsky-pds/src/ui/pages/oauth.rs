@@ -124,6 +124,29 @@ impl CookieErrorPage {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResetView {
+    Request,
+    Confirm,
+    Updated,
+}
+
+#[derive(Template)]
+#[template(path = "oauth/reset_password.html")]
+pub struct ResetPasswordPage {
+    pub shell: PageShell,
+    pub view: ResetView,
+    pub csrf: String,
+    pub email: String,
+    pub error: Option<String>,
+    pub request_action: String,
+    pub confirm_action: String,
+    pub request_href: String,
+    pub code_href: String,
+    pub back_href: String,
+    pub sign_in_href: String,
+}
+
 #[derive(Template)]
 #[template(path = "oauth/error.html")]
 pub struct ErrorPage {
@@ -516,6 +539,45 @@ mod tests {
         };
         assert_eq!(page.to_string(), page.render().unwrap());
         let page = ErrorPage::not_found(shell());
+        assert_eq!(page.to_string(), page.render().unwrap());
+    }
+
+    #[test]
+    fn reset_password_views() {
+        let mut page = ResetPasswordPage {
+            shell: shell(),
+            view: ResetView::Request,
+            csrf: "c".into(),
+            email: "alice@example.com".into(),
+            error: None,
+            request_action: "/account/reset-password/request".into(),
+            confirm_action: "/account/reset-password/confirm".into(),
+            request_href: "/account/reset-password".into(),
+            code_href: "/account/reset-password?view=confirm".into(),
+            back_href: "/account/sign-in".into(),
+            sign_in_href: "/account/sign-in".into(),
+        };
+        let html = page.render().unwrap();
+        assert!(html.contains("<title>Forgot Password</title>"));
+        assert!(html.contains("Let's get your password reset!"));
+        assert!(html.contains("Enter the email you used to create your account."));
+        assert!(html.contains("name=\"email\" value=\"alice@example.com\""));
+        assert!(html.contains(">Already have a code?</a>"));
+        page.view = ResetView::Confirm;
+        page.error = Some("Token is invalid".into());
+        let html = page.render().unwrap();
+        assert!(html.contains("<title>Reset Password</title>"));
+        assert!(html.contains("Enter the code you received to reset your password."));
+        assert!(html.contains("name=\"username\" value=\"alice@example.com\""));
+        assert!(html.contains("name=\"code\""));
+        assert!(html.contains("name=\"password\""));
+        assert!(html.contains("class=\"error\">Token is invalid"));
+        page.email = String::new();
+        assert!(!page.render().unwrap().contains("name=\"username\""));
+        page.view = ResetView::Updated;
+        let html = page.render().unwrap();
+        assert!(html.contains("You can now sign in with your new password."));
+        assert!(html.contains("href=\"/account/sign-in\">Okay</a>"));
         assert_eq!(page.to_string(), page.render().unwrap());
     }
 

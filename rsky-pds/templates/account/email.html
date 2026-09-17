@@ -1,0 +1,95 @@
+{% extends "layouts/account_shell.html" %}
+{% import "components/macros.html" as ui %}
+{% block content %}
+<div class="card">
+  {% match step %}
+  {% when EmailStep::VerifyRequest %}
+  <div class="card-header">
+    <h1 class="card-title">Verify your email</h1>
+    <p class="card-description">To verify your email, you'll need to enter a security code sent to <b>{{ new_email }}</b>.</p>
+  </div>
+  <div class="card-content">
+    {% if let Some(message) = error %}{% call ui::error_notice(message) %}{% endif %}
+    <div class="action-row">
+      <form method="post" action="{{ verify_request_action }}">
+        {% call ui::csrf_fields(nav.csrf) %}
+        <button type="submit" class="btn btn-default">Send verification code</button>
+      </form>
+      <a class="btn btn-ghost" href="{{ verify_code_href }}">Already have a code?</a>
+      <a class="btn btn-secondary" href="{{ cancel_href }}">Cancel</a>
+    </div>
+  </div>
+  {% when EmailStep::Verify %}
+  <div class="card-header">
+    <h1 class="card-title">Verify your email</h1>
+    <p class="card-description">Please enter the verification code that was sent to <b>{{ new_email }}</b>.</p>
+  </div>
+  <div class="card-content">
+    <form method="post" action="{{ verify_action }}" class="form">
+      {% call ui::csrf_fields(nav.csrf) %}
+      {% if let Some(message) = error %}{% call ui::error_notice(message) %}{% endif %}
+      <div class="field">
+        <label class="label" for="code">Verification code</label>
+        <input class="input" type="text" id="code" name="code" autocomplete="one-time-code" placeholder="XXXXX-XXXXX" required>
+      </div>
+      <div class="action-row">
+        <button type="submit" class="btn btn-default">Verify</button>
+        <a class="btn btn-secondary" href="{{ cancel_href }}">Cancel</a>
+      </div>
+    </form>
+    <form method="post" action="{{ verify_request_action }}" class="resend">
+      {% call ui::csrf_fields(nav.csrf) %}
+      <button type="submit" class="btn btn-link btn-sm">Resend the code</button>
+    </form>
+  </div>
+  {% when EmailStep::Token %}
+  <div class="card-header">
+    <h1 class="card-title">Update your email</h1>
+    <p class="card-description">{% if let Some(current) = current_email %}Your account currently uses <b>{{ current }}</b>. Choose a new email address to associate with it.{% else %}Choose a new email address to associate with your account.{% endif %}</p>
+  </div>
+  <div class="card-content">
+    <form method="post" action="{{ confirm_action }}" class="form">
+      {% call ui::csrf_fields(nav.csrf) %}
+      {% if let Some(message) = error %}{% call ui::error_notice(message) %}{% endif %}
+      <input type="hidden" name="new_email" value="{{ new_email }}">
+      <div class="field">
+        <label class="label" for="new_email_shown">New email address</label>
+        <input class="input" type="email" id="new_email_shown" value="{{ new_email }}" readonly>
+      </div>
+      <div class="separator"></div>
+      <div>
+        <h3 class="font-medium">Security step required</h3>
+        <p class="text-sm muted">Please enter the security code that was sent to your email address.</p>
+      </div>
+      <div class="field">
+        <label class="label" for="code">Security code</label>
+        <input class="input" type="text" id="code" name="code" autocomplete="one-time-code" placeholder="XXXXX-XXXXX" required>
+      </div>
+      <div class="action-row">
+        <button type="submit" class="btn btn-default">Update</button>
+        <a class="btn btn-secondary" href="{{ cancel_href }}">Cancel</a>
+      </div>
+    </form>
+  </div>
+  {% when EmailStep::Choose %}
+  <div class="card-header">
+    <h1 class="card-title">Update your email</h1>
+    <p class="card-description">{% if let Some(current) = current_email %}Your account currently uses <b>{{ current }}</b>. Choose a new email address to associate with it.{% else %}Choose a new email address to associate with your account.{% endif %}</p>
+  </div>
+  <div class="card-content">
+    <form method="post" action="{{ request_action }}" class="form">
+      {% call ui::csrf_fields(nav.csrf) %}
+      {% if let Some(message) = error %}{% call ui::error_notice(message) %}{% endif %}
+      <div class="field">
+        <label class="label" for="new_email">New email address</label>
+        <input class="input" type="email" id="new_email" name="new_email" value="{{ new_email }}" autocomplete="email" required>
+      </div>
+      <div class="action-row">
+        <button type="submit" class="btn btn-default">Next</button>
+        <a class="btn btn-secondary" href="{{ cancel_href }}">Cancel</a>
+      </div>
+    </form>
+  </div>
+  {% endmatch %}
+</div>
+{% endblock %}

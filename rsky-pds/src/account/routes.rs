@@ -25,13 +25,13 @@ use rsky_oauth::OAuthError;
 use std::collections::BTreeMap;
 
 const ACCOUNT_PATH: &str = "/account";
-const SIGN_IN_PATH: &str = "/account/sign-in";
+pub(super) const SIGN_IN_PATH: &str = "/account/sign-in";
 const SELECT_PATH: &str = "/account/select";
 const CANNOT_REMOVE_CURRENT_DEVICE: &str = "Cannot remove current device";
 
 /// Every route of the account manager, mounted when the pages are enabled.
 pub fn routes() -> Vec<Route> {
-    rocket::routes![
+    let mut routes = rocket::routes![
         account_index,
         account_sign_in_page,
         account_sign_in,
@@ -46,19 +46,22 @@ pub fn routes() -> Vec<Route> {
         account_app_revoke,
         account_about,
         account_not_found,
-    ]
+    ];
+    routes.extend(super::manage::routes());
+    routes.extend(super::reset::routes());
+    routes
 }
 
 /// The segment that names an account in page URLs: its handle, or its DID
 /// when it has none.
-fn account_id(account: &AccountInfo) -> String {
+pub(super) fn account_id(account: &AccountInfo) -> String {
     account
         .handle
         .clone()
         .unwrap_or_else(|| account.did.clone())
 }
 
-fn account_href(account_id: &str) -> String {
+pub(super) fn account_href(account_id: &str) -> String {
     format!("{ACCOUNT_PATH}/u/{account_id}")
 }
 
@@ -72,7 +75,7 @@ fn sign_in_href(login_hint: Option<&str>) -> String {
     }
 }
 
-fn redirect(href: String) -> Result<Redirect, UiHtml> {
+pub(super) fn redirect(href: String) -> Result<Redirect, UiHtml> {
     Ok(Redirect::to(href))
 }
 
@@ -169,13 +172,17 @@ fn sign_in_page(
         select_action: SELECT_PATH.to_string(),
         another_account_href: format!("{SIGN_IN_PATH}?view=sign-in"),
         signup_href: ui.signup_url.clone(),
-        forgot_href: None,
+        forgot_href: Some(super::reset::RESET_PATH.to_string()),
         back_href,
         back_label: "Back".to_string(),
     }
 }
 
-fn nav_for(session: &DeviceSession, account: &AccountInfo, section: Section) -> AccountNav {
+pub(super) fn nav_for(
+    session: &DeviceSession,
+    account: &AccountInfo,
+    section: Section,
+) -> AccountNav {
     let id = account_id(account);
     AccountNav {
         base_href: account_href(&id),
@@ -193,7 +200,7 @@ fn nav_for(session: &DeviceSession, account: &AccountInfo, section: Section) -> 
 /// The device session and the account the URL names, when the session may
 /// act for it: linked to this device, authenticated recently enough, and
 /// active unless the page is one a deactivated account may still reach.
-async fn page_session(
+pub(super) async fn page_session(
     ui: &UiState,
     shared: &SharedOAuthProvider,
     jar: &CookieJar<'_>,
@@ -253,7 +260,15 @@ async fn resolve_linked(
         .await
 }
 
-fn cross_site_page(ui: &UiState, back_href: String) -> UiHtml {
+pub(super) fn error_page(
+    shell: &crate::ui::shell::PageShell,
+    status: Status,
+    message: String,
+) -> UiHtml {
+    render_error(shell, status, message)
+}
+
+pub(super) fn cross_site_page(ui: &UiState, back_href: String) -> UiHtml {
     render_page(
         Status::Forbidden,
         &ui.shell,

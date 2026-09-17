@@ -102,6 +102,12 @@ strong, b { font-weight: 600; }
 .row.between { justify-content: space-between; }
 .row.top { align-items: flex-start; }
 .underline { text-decoration: underline; }
+.resend { margin-top: 0.75rem; }
+.radio-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.25rem 0; font-size: 0.875rem; }
+.item.destructive, .item.destructive .item-title, .item.destructive svg { color: var(--destructive); }
+.item.destructive:hover { background: color-mix(in srgb, var(--destructive) 10%, transparent); }
+.settings-list .item-content.row { flex-direction: row; align-items: center; gap: 0.75rem; }
+.settings-list .item-title { flex-shrink: 0; }
 .center { text-align: center; }
 .nowrap { white-space: nowrap; }
 .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
