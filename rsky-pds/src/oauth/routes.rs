@@ -399,12 +399,13 @@ async fn device_session(
 }
 
 #[tracing::instrument(skip_all)]
-#[rocket::get("/oauth/authorize?<client_id>&<request_uri>&<otp_hint>&<otp_error>")]
+#[rocket::get("/oauth/authorize?<client_id>&<request_uri>&<otp_hint>&<otp_error>&<auth_error>")]
 pub async fn oauth_authorize(
     client_id: Option<String>,
     request_uri: Option<String>,
     otp_hint: Option<String>,
     otp_error: Option<bool>,
+    auth_error: Option<bool>,
     jar: &CookieJar<'_>,
     info: OAuthRequestInfo,
     shared: &State<SharedOAuthProvider>,
@@ -424,10 +425,16 @@ pub async fn oauth_authorize(
     {
         Ok(page) => {
             // a second-factor gate in front of this route sends the browser
-            // back here with the address hint and, after a bad code, an error
-            let error = otp_error
-                .unwrap_or(false)
-                .then(|| "The sign-in code was not accepted".to_string());
+            // back here with the address hint, after a bad code with an
+            // error, and after rejecting the credentials of an account it
+            // will not forward without a code
+            let error = if otp_error.unwrap_or(false) {
+                Some("The sign-in code was not accepted".to_string())
+            } else if auth_error.unwrap_or(false) {
+                Some("Invalid identifier or password".to_string())
+            } else {
+                None
+            };
             let otp_hint = otp_hint.filter(|hint| !hint.is_empty());
             render(Status::Ok, &sign_in_page(&page, &session, error, otp_hint))
         }

@@ -1504,6 +1504,32 @@ async fn oauth_forbidden_declaration_still_accepts_a_legacy_session() {
 /// A second-factor gate in front of the sign-in route sends the browser
 /// back with a hint and, after a bad code, an error; the form then carries
 /// the code, which this server accepts and ignores.
+/// The gate also sends the browser back with `auth_error=true` when it
+/// refused the credentials of an account it will not forward without a
+/// code; the page shows the same error the PDS would, and no code field.
+#[tokio::test]
+async fn the_sign_in_page_shows_rejected_credentials_when_told_to() {
+    let (_dir, client) = get_oauth_client().await;
+    common::create_account(&client).await;
+    activate_test_account(&client).await;
+    let key = dpop_key();
+    let (request_uri, _nonce) = run_par(&client, &key).await;
+    let path = format!(
+        "{}&auth_error=true",
+        authorize_path(LOOPBACK_CLIENT_ID, &request_uri)
+    );
+    let response = client
+        .get(path)
+        .header(Header::new("Accept", "text/html"))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let html = response.into_string().await.unwrap();
+    assert!(html.contains("Invalid identifier or password"), "{html}");
+    assert!(html.contains("class=\"error\""));
+    assert!(!html.contains("name=\"email_otp\""));
+}
+
 #[tokio::test]
 async fn the_sign_in_page_shows_a_second_factor_field_when_told_to() {
     let (_dir, client) = get_oauth_client().await;
