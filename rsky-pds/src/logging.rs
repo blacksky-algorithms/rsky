@@ -174,17 +174,45 @@ where
 /// (default `info`), `PDS_LOG_FORMAT` selects `json` (default), `text`, or
 /// `traced`, and spans are exported when `OTEL_EXPORTER_OTLP_ENDPOINT` is
 /// set.
+/// Where log lines go. The server logs to stdout; a maintenance command
+/// prints its JSON result there, so its logs must go to stderr or the
+/// result stops being parseable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogTarget {
+    Stdout,
+    Stderr,
+}
+
 pub fn init(format: LogFormat) {
+    init_to(format, LogTarget::Stdout)
+}
+
+pub fn init_to(format: LogFormat, target: LogTarget) {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let registry = tracing_subscriber::registry()
         .with(filter)
         .with(crate::telemetry::layer());
-    let installed = match format {
-        LogFormat::Json => registry
+    let installed = match (format, target) {
+        (LogFormat::Json, LogTarget::Stdout) => registry
             .with(tracing_subscriber::fmt::layer().event_format(PinoFormat::new("pds")))
             .try_init(),
-        LogFormat::Text => registry.with(tracing_subscriber::fmt::layer()).try_init(),
-        LogFormat::Traced => registry.with(crate::telemetry::fmt_layer()).try_init(),
+        (LogFormat::Json, LogTarget::Stderr) => registry
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(PinoFormat::new("pds"))
+                    .with_writer(std::io::stderr),
+            )
+            .try_init(),
+        (LogFormat::Text, LogTarget::Stdout) => {
+            registry.with(tracing_subscriber::fmt::layer()).try_init()
+        }
+        // a maintenance command has no request spans worth exporting
+        (LogFormat::Text, LogTarget::Stderr) | (LogFormat::Traced, LogTarget::Stderr) => registry
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+            .try_init(),
+        (LogFormat::Traced, LogTarget::Stdout) => {
+            registry.with(crate::telemetry::fmt_layer()).try_init()
+        }
     };
     if let Err(err) = installed {
         eprintln!("logging already initialised: {err}");

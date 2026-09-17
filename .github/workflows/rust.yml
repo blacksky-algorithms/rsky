@@ -256,6 +256,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
           
+      # The crate version from its manifest, so a release is pullable by
+      # the version people see in `_health` and in the changelog.
+      - name: Read crate version
+        id: crate
+        run: |
+          version=$(sed -nE 's/^version = "([^"]+)"/\1/p' "${{ matrix.dockerfile }}/Cargo.toml" | head -1)
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5.7.0
@@ -266,6 +274,9 @@ jobs:
             type=sha,format=long
             # Add 'main' tag if this is on the main branch
             type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+            # On main, also tag the crate version and 'latest'
+            type=raw,value=${{ steps.crate.outputs.version }},enable=${{ github.ref == 'refs/heads/main' && steps.crate.outputs.version != '' }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
       
       # Build the Docker image (no push if from fork)
       - name: Build Docker image

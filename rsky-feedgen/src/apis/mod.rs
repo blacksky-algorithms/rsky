@@ -1312,6 +1312,7 @@ mod tests {
                 let config = FeedGenConfig {
                     show_sponsored_post: false,
                     sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
+                    pinned_post_uri: String::new(),
                     sponsored_post_probability: 1.0,
                     trending_percentile_min: 0.9,
                 };
@@ -1371,6 +1372,7 @@ mod tests {
                 let config = FeedGenConfig {
                     show_sponsored_post: true,
                     sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
+                    pinned_post_uri: String::new(),
                     sponsored_post_probability: 1.0,
                     trending_percentile_min: 0.9,
                 };
@@ -1429,6 +1431,7 @@ mod tests {
                 let config = FeedGenConfig {
                     show_sponsored_post: true,
                     sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
+                    pinned_post_uri: String::new(),
                     sponsored_post_probability: 1.0,
                     trending_percentile_min: 0.9,
                 };
@@ -1488,6 +1491,7 @@ mod tests {
                 let config = FeedGenConfig {
                     show_sponsored_post: true,
                     sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
+                    pinned_post_uri: String::new(),
                     sponsored_post_probability: 0.5,
                     trending_percentile_min: 0.9,
                 };
@@ -1559,6 +1563,7 @@ mod tests {
                 let config = FeedGenConfig {
                     show_sponsored_post: true,
                     sponsored_post_uri: "at://did:example/sponsored-post".to_string(),
+                    pinned_post_uri: String::new(),
                     sponsored_post_probability: 1.0,
                     trending_percentile_min: 0.9,
                 };
