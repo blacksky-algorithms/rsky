@@ -379,6 +379,19 @@ pub struct BskyAppStatePref {
     // that should be shown to the user.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queued_nudges: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nuxs: Option<Vec<Nux>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Nux {
+    pub id: String,
+    pub completed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
 
 /// If set, an active progress guide. Once completed, can be set to undefined.
@@ -401,6 +414,40 @@ pub struct LabelersPrefItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_state_nux_preferences_roundtrip() {
+        for state in [
+            serde_json::json!({}),
+            serde_json::json!({"nuxs": []}),
+            serde_json::json!({
+                "queuedNudges": ["existing-nudge"],
+                "nuxs": [
+                    {"id": "GroupChatsAnnouncement", "completed": true},
+                    {
+                        "id": "ExampleTour",
+                        "completed": false,
+                        "data": "{\"step\":2}",
+                        "expiresAt": "2026-10-01T00:00:00.000Z"
+                    }
+                ]
+            }),
+        ] {
+            let mut pref = state;
+            pref["$type"] = serde_json::json!("app.bsky.actor.defs#bskyAppStatePref");
+            let input = serde_json::json!({"preferences": [pref]});
+            let parsed: PutPreferencesInput = serde_json::from_value(input.clone()).unwrap();
+            assert!(matches!(
+                parsed.preferences[0],
+                RefPreferences::BskyAppStatePref(_)
+            ));
+            let stored = serde_json::to_string(&parsed.preferences[0]).unwrap();
+            let output = GetPreferencesOutput {
+                preferences: vec![serde_json::from_str(&stored).unwrap()],
+            };
+            assert_eq!(serde_json::to_value(output).unwrap(), input);
+        }
+    }
 
     #[test]
     fn unknown_preference_type_roundtrips() {
