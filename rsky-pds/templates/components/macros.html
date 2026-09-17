@@ -1,0 +1,51 @@
+{% macro brand_links(links) %}
+<nav class="brand-links" aria-label="Links">
+  {% for link in links %}<a href="{{ link.href }}" rel="{{ link.rel }} noopener" target="_blank">{{ link.title }}</a>{% endfor %}
+</nav>
+{% endmacro %}
+
+{% macro csrf_fields(csrf) %}
+<input type="hidden" name="csrf" value="{{ csrf }}">
+{% endmacro %}
+
+{% macro request_fields(client_id, request_uri) %}
+{% if !client_id.is_empty() %}<input type="hidden" name="client_id" value="{{ client_id }}">{% endif %}
+{% if !request_uri.is_empty() %}<input type="hidden" name="request_uri" value="{{ request_uri }}">{% endif %}
+{% endmacro %}
+
+{% macro notice(role, variant, title, body) %}
+<div role="{{ role }}" class="notice notice-{{ variant }}">
+  {% if variant == "error" %}{% include "icons/circle-alert.svg.html" %}{% else if variant == "warning" %}{% include "icons/triangle-alert.svg.html" %}{% else if variant == "success" %}{% include "icons/circle-check.svg.html" %}{% else %}{% include "icons/info.svg.html" %}{% endif %}
+  {% if !title.is_empty() %}<div class="notice-title">{{ title }}</div>{% endif %}
+  <div class="notice-body">{{ body|safe }}</div>
+</div>
+{% endmacro %}
+
+{% macro error_notice(message) %}
+<div role="alert" class="notice notice-error">
+  {% include "icons/circle-alert.svg.html" %}
+  <div class="notice-body"><p class="error">{{ message }}</p></div>
+</div>
+{% endmacro %}
+
+{% macro avatar(size_class, picture) %}
+<span class="avatar {{ size_class }}">{% if !picture.is_empty() %}<img src="{{ picture }}" alt="">{% else %}{% include "icons/user.svg.html" %}{% endif %}</span>
+{% endmacro %}
+
+{% macro account_card(session, action, csrf, label) %}
+<form method="post" action="{{ action }}">
+  {% call csrf_fields(csrf) %}
+  <input type="hidden" name="did" value="{{ session.did }}">
+  <button type="submit" class="item item-outline" aria-label="{{ label }} {{ session.handle }}">
+    <span class="item-media">{% call avatar("avatar-sm", session.picture) %}</span>
+    <span class="item-content">
+      {% if !session.name.is_empty() %}<span class="item-title">{{ session.name }}</span>{% endif %}
+      <span class="item-description">{{ session.handle }}</span>
+    </span>
+    <span class="item-actions">
+      {% if session.login_required %}<span class="badge badge-outline">Login required</span>{% endif %}
+      {% include "icons/chevron-right.svg.html" %}
+    </span>
+  </button>
+</form>
+{% endmacro %}

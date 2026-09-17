@@ -1,0 +1,46 @@
+{% extends "layouts/auth_shell.html" %}
+{% import "components/macros.html" as ui %}
+{% block title %}Authorize{% endblock %}
+{% block card_title %}Authorize{% endblock %}
+{% block card_subtitle %}<p class="card-description">Grant access to your <b>{{ account.handle }}</b> account</p>{% endblock %}
+{% block content %}
+<form method="post" action="{{ accept_action }}" class="form" id="consent">
+  {% call ui::csrf_fields(csrf) %}
+  {% call ui::request_fields(client_id, request_uri) %}
+  <input type="hidden" name="did" value="{{ account.did }}">
+  <input type="hidden" name="scope" value="{{ scope_raw }}">
+  {% if email_optional %}<input type="hidden" name="email_optional" value="1">{% endif %}
+  {% if let Some(token) = session_token %}<input type="hidden" name="session_token" value="{{ token }}">{% endif %}
+  <div class="description-card">
+    {% if let Some(logo) = client.logo_uri %}<span class="avatar avatar-sm client-logo"><img src="{{ logo }}" alt=""></span>{% else %}<span class="avatar avatar-sm avatar-brand">{% include "icons/info.svg.html" %}</span>{% endif %}
+    <div class="description-body">
+      <div class="description-title">{% match client.display %}{% when ClientDisplay::Name with (name) %}{{ name }}{% when ClientDisplay::LocalApp %}An application on your device{% when ClientDisplay::Host with (host) %}{{ host }}{% when ClientDisplay::Url with { proto, host, rest } %}<span class="url-viewer"><span class="url-rest">{{ proto }}</span><span class="url-host">{{ host }}</span><span class="url-rest">{{ rest }}</span></span>{% when ClientDisplay::Raw with (raw) %}{{ raw }}{% endmatch %}</div>
+      <div class="description-text">{% if only_atproto %}wants to uniquely identify you through your <b>{{ account.handle }}</b> account{% else %}wants to access your <b>{{ account.handle }}</b> account{% endif %}</div>
+      <details>
+        <summary>Technical details</summary>
+        <p class="text-xs muted">This application is requesting the following permissions (scopes) to access your account:</p>
+        <pre class="text-xs">{{ scope_raw }}</pre>
+        <ul class="text-xs">{% for item in technical %}<li><b>{{ item.title }}</b>{% if let Some(detail) = item.detail %} <span class="muted">{{ detail }}</span>{% endif %} <code>{{ item.scope }}</code></li>{% endfor %}</ul>
+      </details>
+    </div>
+  </div>
+  {% if !groups.is_empty() %}
+  <div class="permission-groups" role="list">
+    {% for group in groups %}{% include "components/permission_group.html" %}{% endfor %}
+  </div>
+  {% endif %}
+  {% if identity_warning %}
+  {% call ui::notice("status", "warning", "", "The application is asking for full control over your network identity, meaning that it could <b>permanently break</b>, or even <b>steal</b>, your account. Only grant this permission to applications you really trust.") %}
+  {% endif %}
+  <p class="text-sm muted">By clicking <b>Authorize</b>, you will grant this application access to your account in accordance with its {% if let Some(tos) = client.tos_uri %}<a href="{{ tos }}" rel="noopener" target="_blank" class="underline">terms of service</a>{% else %}terms of service{% endif %} and {% if let Some(policy) = client.policy_uri %}<a href="{{ policy }}" rel="noopener" target="_blank" class="underline">privacy policy</a>{% else %}privacy policy{% endif %}.</p>
+  <div class="action-row">
+    <button type="submit" class="btn btn-default">Authorize</button>
+    <button type="submit" class="btn btn-secondary" form="reject">Deny access</button>
+    {% if !back_href.is_empty() %}<a class="btn btn-secondary" href="{{ back_href }}">Back</a>{% endif %}
+  </div>
+</form>
+<form method="post" action="{{ reject_action }}" id="reject">
+  {% call ui::csrf_fields(csrf) %}
+  {% call ui::request_fields(client_id, request_uri) %}
+</form>
+{% endblock %}

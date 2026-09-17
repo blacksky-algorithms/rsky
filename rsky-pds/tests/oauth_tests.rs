@@ -817,7 +817,7 @@ async fn oauth_sign_in_failures() {
         .await;
     assert_eq!(response.status(), Status::Ok);
     let html = response.into_string().await.unwrap();
-    assert!(html.contains("invalid identifier or password"));
+    assert!(html.contains("Invalid identifier or password"));
 
     // csrf mismatch is rejected
     let response = client
@@ -884,7 +884,7 @@ async fn oauth_account_picker_select_flow() {
         .await;
     assert_eq!(response.status(), Status::Ok);
     let html = response.into_string().await.unwrap();
-    assert!(html.contains("Continue as"));
+    assert!(html.contains("Sign in as"));
 
     let response = client
         .post("/oauth/authorize/select")
@@ -939,7 +939,8 @@ async fn oauth_trusted_client_gets_silent_consent_after_a_grant() {
     let code = sign_in_and_accept_scoped(&client, &client_id, &request_uri, &mut session).await;
     exchange_code_scoped(&client, &client_id, &key, &code, &nonce).await;
 
-    // second round: prompt=none goes straight back to the client
+    // second round: prompt=none with the account named goes straight back
+    // to the client
     let htu = format!("{}/oauth/par", public_url(&client));
     let response = client
         .post("/oauth/par")
@@ -957,6 +958,7 @@ async fn oauth_trusted_client_gets_silent_consent_after_a_grant() {
             ("code_challenge", PKCE_CHALLENGE),
             ("code_challenge_method", "S256"),
             ("prompt", "none"),
+            ("login_hint", "did:plc:khvyd3oiw46vif5gm7hijslk"),
         ]))
         .dispatch()
         .await;

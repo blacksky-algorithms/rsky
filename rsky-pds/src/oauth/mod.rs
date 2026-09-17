@@ -20,7 +20,6 @@ pub mod body;
 pub mod fetcher;
 pub mod replay;
 pub mod routes;
-pub mod templates;
 
 pub const DEVICE_COOKIE: &str = "device-id";
 

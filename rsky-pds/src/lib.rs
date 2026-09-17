@@ -54,6 +54,7 @@ pub mod space_auth;
 pub mod space_scope;
 pub mod spool;
 pub mod telemetry;
+pub mod ui;
 pub mod well_known;
 pub mod xrpc_server;
 use crate::account_manager::AccountManager;
@@ -536,6 +537,9 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
     )
     .await;
     let account_manager = AccountManager::new(account_db);
+    let branding = ui::branding::Branding::from_env(&cfg.service.hostname)
+        .expect("the branding environment must parse");
+    let ui_state = ui::UiState::new(&branding, &cfg.service.public_url, &cfg.service.hostname);
 
     let sequencer = SharedSequencer {
         sequencer: RwLock::new(Sequencer::with_broadcast_capacity(
@@ -855,6 +859,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 oauth::routes::oauth_authorize_select,
                 oauth::routes::oauth_authorize_accept,
                 oauth::routes::oauth_authorize_reject,
+                ui::assets::ui_asset,
                 all_options
             ],
         )
@@ -872,6 +877,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(app_view_agent)
         .manage(account_manager)
         .manage(shared_oauth_provider)
+        .manage(ui_state)
         .manage(crate::space_auth::SharedSpaceDpop::default())
         .manage(crate::permission_set::SharedPermissionSets::default())
         .manage(actor_store)

@@ -102,7 +102,7 @@ pub enum AccountAction {
 /// the proposal's defaults (no collection = all, no action = all three).
 ///
 /// `pub(crate)` rather than private: the OAuth consent screen (see
-/// `crate::oauth::templates`) reuses this to describe a `repo:` grant in
+/// `crate::ui::technical`) reuses this to describe a `repo:` grant in
 /// plain language instead of duplicating the parse.
 pub(crate) fn parse_repo_scope(suffix: &str) -> (Vec<String>, Vec<RepoAction>) {
     let (positional, params) = match suffix.find('?') {
@@ -166,7 +166,7 @@ fn split_suffix(suffix: &str) -> (Option<&str>, Option<&str>) {
 /// everything (see the module docs on why unrecognised input must narrow,
 /// never widen, access).
 ///
-/// `pub(crate)`: the OAuth consent screen (see `crate::oauth::templates`)
+/// `pub(crate)`: the OAuth consent screen (see `crate::ui::technical`)
 /// reuses this to describe an `identity:` grant in plain language.
 pub(crate) fn parse_identity_scope(suffix: &str) -> Option<String> {
     let (positional, params) = split_suffix(suffix);
@@ -198,7 +198,7 @@ pub(crate) fn parse_identity_scope(suffix: &str) -> Option<String> {
 /// unrecognised attribute or action denies rather than defaulting wide, for
 /// the same reason as [`parse_identity_scope`].
 ///
-/// `pub(crate)`: reused by `crate::oauth::templates` for consent-screen copy.
+/// `pub(crate)`: reused by `crate::ui::technical` for consent-screen copy.
 pub(crate) fn parse_account_scope(suffix: &str) -> Option<(String, Vec<AccountAction>)> {
     let (positional, params) = split_suffix(suffix);
     let mut attr: Option<String> = positional.map(str::to_string);
@@ -232,7 +232,7 @@ pub(crate) fn parse_account_scope(suffix: &str) -> Option<(String, Vec<AccountAc
 /// (repeated) names several. An empty suffix accepts nothing -- unlike
 /// `repo:`'s bare form, there is no wildcard default here.
 ///
-/// `pub(crate)`: reused by `crate::oauth::templates` for consent-screen copy.
+/// `pub(crate)`: reused by `crate::ui::technical` for consent-screen copy.
 pub(crate) fn parse_blob_scope(suffix: &str) -> Vec<String> {
     let (positional, params) = split_suffix(suffix);
     let mut accepts: Vec<String> = Vec::new();
@@ -278,7 +278,7 @@ fn percent_decoded(value: &str) -> String {
 /// every service -- is rejected outright, matching the reference
 /// implementation's constructor check.
 ///
-/// `pub(crate)`: reused by `crate::oauth::templates` for consent-screen copy.
+/// `pub(crate)`: reused by `crate::ui::technical` for consent-screen copy.
 pub(crate) fn parse_rpc_scope(suffix: &str) -> Option<(Vec<String>, String)> {
     let (positional, params) = split_suffix(suffix);
     let mut lxms: Vec<String> = Vec::new();
