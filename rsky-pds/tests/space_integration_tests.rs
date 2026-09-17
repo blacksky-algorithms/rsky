@@ -1433,6 +1433,16 @@ async fn blob_upload_and_space_get_blob() {
     let blob = body["blob"].clone();
     let blob_cid = blob["ref"]["$link"].as_str().unwrap().to_string();
 
+    // An uploaded but not-yet-referenced blob is refused, as before this change.
+    let response = s
+        .client
+        .get(format!(
+            "/xrpc/com.atproto.sync.getBlob?did={AUTHOR_DID}&cid={blob_cid}"
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::BadRequest);
+
     // a record referencing a blob that was never uploaded is rejected
     let (status, body) = post_json(
         &s.client,
@@ -1472,6 +1482,103 @@ async fn blob_upload_and_space_get_blob() {
     )
     .await;
     assert_eq!(status, Status::Ok, "{body}");
+
+    // A blob referenced only by a space record is hidden from the public route.
+    let response = s
+        .client
+        .get(format!(
+            "/xrpc/com.atproto.sync.getBlob?did={AUTHOR_DID}&cid={blob_cid}"
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::BadRequest);
+    assert_eq!(
+        response.into_json::<Value>().await.unwrap()["error"],
+        "BlobNotFound"
+    );
+
+    // The repo owner can still fetch the space-only blob through sync.getBlob.
+    let response = s
+        .client
+        .get(format!(
+            "/xrpc/com.atproto.sync.getBlob?did={AUTHOR_DID}&cid={blob_cid}"
+        ))
+        .header(bearer(&s.author_token))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+
+    // A public record keeps the same blob available through the public route.
+    let (status, body) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.repo.createRecord",
+        &s.author_token,
+        json!({
+            "repo": AUTHOR_DID,
+            "collection": "app.bsky.feed.post",
+            "rkey": "3kpublicblob",
+            "record": {
+                "$type": "app.bsky.feed.post",
+                "text": "public blob",
+                "createdAt": "2024-01-01T00:00:00.000Z",
+                "embed": {
+                    "$type": "app.bsky.embed.images",
+                    "images": [{"image": blob, "alt": ""}]
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{body}");
+    let response = s
+        .client
+        .get(format!(
+            "/xrpc/com.atproto.sync.getBlob?did={AUTHOR_DID}&cid={blob_cid}"
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+
+    let response = s
+        .client
+        .post("/xrpc/com.atproto.repo.uploadBlob")
+        .header(ContentType::PNG)
+        .header(bearer(&s.author_token))
+        .body(vec![0x89u8, 0x50, 0x4E, 0x47, 5, 6, 7, 8])
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let public_blob = response.into_json::<Value>().await.unwrap()["blob"].clone();
+    let public_blob_cid = public_blob["ref"]["$link"].as_str().unwrap();
+    let (status, body) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.repo.createRecord",
+        &s.author_token,
+        json!({
+            "repo": AUTHOR_DID,
+            "collection": "app.bsky.feed.post",
+            "rkey": "3kpubliconly",
+            "record": {
+                "$type": "app.bsky.feed.post",
+                "text": "public-only blob",
+                "createdAt": "2024-01-01T00:00:01.000Z",
+                "embed": {
+                    "$type": "app.bsky.embed.images",
+                    "images": [{"image": public_blob, "alt": ""}]
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{body}");
+    let response = s
+        .client
+        .get(format!(
+            "/xrpc/com.atproto.sync.getBlob?did={AUTHOR_DID}&cid={public_blob_cid}"
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
 
     // listBlobs names what a syncer would have to mirror
     let (status, body) = get_json(

@@ -33,6 +33,16 @@ async fn inner_get_blob(
         .read(did.clone(), blobstore_factory.blobstore(did.clone()))
         .await?;
 
+    if !is_user_or_admin
+        && actor_store.blob.get_records_for_blob(cid).await?.is_empty()
+        && actor_store
+            .space
+            .any_space_references_blob(&cid.to_string())
+            .await?
+    {
+        return Err(BlobNotFoundError.into());
+    }
+
     let found = actor_store.blob.get_blob(cid).await?;
     Ok(BlobBody::new(
         found.stream.into_async_read(),
