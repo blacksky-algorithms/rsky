@@ -185,9 +185,17 @@ jobs:
 
   # Coverage gate for the sqlite PDS stack. Standalone so a coverage
   # failure never blocks CI for unrelated crates.
+  # One instrumented test run serves the crate-wide floor and the changed-line
+  # gate. The instrumented target tree is tens of gigabytes with debuginfo,
+  # which is more than the runner's disk; coverage needs none of it.
   coverage-pds:
     needs: determine-workspace-members
     runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_JOBS: 2
+      RUST_TEST_THREADS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     if: |
       contains(fromJson(needs.determine-workspace-members.outputs.workspace_members), 'rsky-pds') ||
       contains(fromJson(needs.determine-workspace-members.outputs.workspace_members), 'rsky-oauth') ||
@@ -195,6 +203,12 @@ jobs:
       contains(fromJson(needs.determine-workspace-members.outputs.workspace_members), 'rsky-space-host') ||
       contains(fromJson(needs.determine-workspace-members.outputs.workspace_members), 'rsky-daemon')
     steps:
+      - name: Clean up large directories
+        run: |
+          sudo rm -rf /usr/local/share/boost \
+                      /usr/share/dotnet \
+                      /usr/local/lib/android \
+                      /opt/ghc
       - name: Checkout code
         uses: actions/checkout@v4
       - name: Rust Cache
@@ -203,13 +217,18 @@ jobs:
           shared-key: coverage-pds
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Run coverage for PDS crates
+      - name: Run the PDS crates' tests under coverage
         run: >-
-          cargo llvm-cov --fail-under-lines 95
+          cargo llvm-cov --no-report --no-fail-fast
           -p rsky-pds -p rsky-oauth -p rsky-space -p rsky-space-host -p rsky-daemon
-      # Every rsky-pds / rsky-oauth source file the push touched must be fully covered.
-      - name: Gate changed files at 100% coverage
+      - name: Enforce the crate-wide line floor
+        run: >-
+          cargo llvm-cov report --fail-under-lines 95
+          -p rsky-pds -p rsky-oauth -p rsky-space -p rsky-space-host -p rsky-daemon
+      # Every rsky-pds / rsky-oauth line the push added or rewrote must be covered.
+      - name: Gate changed lines at 100% coverage
         env:
+          COVERAGE_GATE_REUSE_PROFILE: 1
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           if [ -n "$BASE_SHA" ] && [ "$BASE_SHA" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then

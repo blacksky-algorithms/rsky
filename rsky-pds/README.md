@@ -401,9 +401,14 @@ tracked in git (the `data/` directory is exempt from the workspace's
 unchanged in CI.
 
 Coverage is enforced by `scripts/coverage-gate.sh <base-ref>` from the
-workspace root: every `rsky-pds` or `rsky-oauth` source file changed since the
-base must report 100% line and function coverage. CI runs the same script
-against the pushed range, next to its crate-wide 95% line floor.
+workspace root: every line a change adds or rewrites in `rsky-pds` or
+`rsky-oauth` source must be covered. Lines with no code of their own (blank,
+comments, attributes, closing brackets, struct and enum headers) are not
+gated, since that is where derive-generated code no test can reach is
+attributed; function coverage is reported, not gated, because it counts
+those generated functions and every per-binary instantiation of a closure.
+CI runs the same script against the pushed range, next to its crate-wide 95%
+line floor.
 
 ## Upgrading to 1.0
 
