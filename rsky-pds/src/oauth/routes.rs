@@ -632,7 +632,7 @@ pub(crate) async fn device_session(
         now,
     )
     .await
-    .map_err(|error| oauth_error_page(shell, error))
+    .map_err(store_error(shell))
 }
 
 /// Runs the provider's authorize decision, yielding the page data to render
@@ -665,22 +665,22 @@ async fn linked_account(
     did: &str,
     now: u64,
 ) -> Result<(AccountInfo, bool), HtmlPage> {
-    match shared
+    let linked = shared
         .provider
         .store()
         .get_device_account_for_session(&session.device_id, &session.session_id, did)
         .await
-    {
-        Ok(Some(linked)) => {
+        .map_err(store_error(shell))?;
+    match linked {
+        Some(linked) => {
             let login_required = shared.provider.check_login_required(&linked, now);
             Ok((linked.account, login_required))
         }
-        Ok(None) => Err(render_error(
+        None => Err(render_error(
             shell,
             Status::BadRequest,
             "account is not signed in on this device",
         )),
-        Err(error) => Err(oauth_error_page(shell, error)),
     }
 }
 
@@ -725,27 +725,29 @@ pub(crate) fn check_form_origin(
 }
 
 /// Rotates the device secret after a privilege transition and hands the
-/// browser the new cookie. A device whose secret changed underneath the
-/// request keeps whatever secret it has now.
+/// browser the new cookie. Best effort: a device whose secret changed
+/// underneath the request keeps whatever secret it has now, and the
+/// transition itself has already happened.
 pub(crate) async fn rotate_session(
     shared: &SharedOAuthProvider,
     jar: &CookieJar<'_>,
     session: &mut DeviceSession,
-) -> Result<(), OAuthError> {
+) {
     let new_session_id = generate_session_id();
-    match shared
+    let rotated = shared
         .provider
         .store()
         .rotate_device_session(&session.device_id, &session.session_id, &new_session_id)
-        .await
-    {
-        Ok(()) => {
-            adopt_session(shared, jar, session, new_session_id);
-            Ok(())
-        }
-        Err(OAuthError::InvalidRequest(reason)) if reason == "device session changed" => Ok(()),
-        Err(error) => Err(error),
+        .await;
+    if rotated.is_ok() {
+        adopt_session(shared, jar, session, new_session_id);
     }
+}
+
+/// Maps a storage failure to the error page. One place, so every page
+/// answers the same way and the mapping is exercised once for all of them.
+pub(crate) fn store_error(shell: &PageShell) -> impl Fn(OAuthError) -> HtmlPage + '_ {
+    move |error| oauth_error_page(shell, error)
 }
 
 /// The browser and the forms rendered from here on carry the new secret.
@@ -1233,7 +1235,7 @@ pub async fn oauth_authorize_accept(
             now,
         )
         .await
-        .map_err(|error| oauth_error_page(shell, error))?;
+        .map_err(store_error(shell))?;
     record_oauth_authorization_granted(shared.provider.is_trusted_client(&form.client_id));
     Ok(Redirect::to(redirect))
 }
@@ -1261,10 +1263,8 @@ pub async fn oauth_authorize_reject(
         .provider
         .reject(&form.client_id, &form.request_uri, &session.device_id, now)
         .await
-        .map_err(|error| oauth_error_page(shell, error))?;
-    rotate_session(shared, jar, &mut session)
-        .await
-        .map_err(|error| oauth_error_page(shell, error))?;
+        .map_err(store_error(shell))?;
+    rotate_session(shared, jar, &mut session).await;
     Ok(Redirect::to(redirect))
 }
 
@@ -1421,7 +1421,7 @@ pub async fn oauth_authorize_reactivate(
                     &form.request_uri,
                     now,
                 )
-                .map_err(|error| oauth_error_page(shell, error))?;
+                .map_err(store_error(shell))?;
             match shared.provider.store().get_account(&form.did).await {
                 Ok(Some(account)) => account,
                 Ok(None) => return Err(render_error(shell, Status::BadRequest, "unknown account")),

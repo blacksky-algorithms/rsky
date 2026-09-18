@@ -34,12 +34,12 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a resolved set is trusted. Permission sets change about as often as
 /// an application's own lexicons, so this is long enough to make a transient
 /// DNS or PDS fault invisible.
-const SUCCESS_TTL: Duration = Duration::from_secs(3600);
+const OK_TTL: Duration = Duration::from_secs(3600);
 
 /// How long a failure is remembered. Short, so a set that comes back is picked
 /// up quickly, but non-zero so an unresolvable `include:` cannot make every
 /// request from that session a fresh DNS lookup.
-const FAILURE_TTL: Duration = Duration::from_secs(60);
+const ERR_TTL: Duration = Duration::from_secs(60);
 
 /// One entry of a published permission set.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -306,19 +306,14 @@ impl PermissionSetResolver {
                 };
             }
         }
-        let (result, ttl) = match self.fetch(nsid).await {
-            Ok(scopes) => (Ok(scopes), SUCCESS_TTL),
-            Err(error) => {
-                tracing::debug!(%nsid, %error, "permission set unresolved; it confers nothing");
-                (
-                    Err(PermissionSetError {
-                        nsid: nsid.to_string(),
-                        reason: error.to_string(),
-                    }),
-                    FAILURE_TTL,
-                )
+        let result = self.fetch(nsid).await.map_err(|error| {
+            tracing::debug!(%nsid, %error, "permission set unresolved; it confers nothing");
+            PermissionSetError {
+                nsid: nsid.to_string(),
+                reason: error.to_string(),
             }
-        };
+        });
+        let ttl = if result.is_ok() { OK_TTL } else { ERR_TTL };
         self.cache.write().await.insert(
             nsid.to_string(),
             CacheEntry {
@@ -336,7 +331,7 @@ impl PermissionSetResolver {
             nsid.to_string(),
             CacheEntry {
                 scopes,
-                expires: Instant::now() + SUCCESS_TTL,
+                expires: Instant::now() + OK_TTL,
                 failed: false,
             },
         );

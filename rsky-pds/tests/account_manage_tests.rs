@@ -271,6 +271,55 @@ async fn manage_page_and_email_flows() {
         .await
         .unwrap()
         .contains("Your session changed in another tab"));
+
+    // a code that cannot be recorded leaves the request form with the reason
+    drop_table(dir.path(), "email_token");
+    let response = post(
+        &client,
+        &format!("{MANAGE}/email/verify/request"),
+        &manager.cookie,
+        &[("csrf", &manager.csrf)],
+    )
+    .await;
+    assert_eq!(response.status(), Status::Ok);
+    let html = response.into_string().await.unwrap();
+    assert!(html.contains("Something went wrong"), "{html}");
+}
+
+#[tokio::test]
+async fn a_custom_handle_prefills_the_custom_form() {
+    let (_dir, client) = get_oauth_client().await;
+    create_active_account(&client).await;
+    let manager = sign_in(&client).await;
+    client
+        .rocket()
+        .state::<rsky_pds::account_manager::AccountManager>()
+        .unwrap()
+        .update_handle(TEST_DID, "custom.example")
+        .await
+        .unwrap();
+
+    let response = get(
+        &client,
+        &format!("/account/u/{TEST_DID}/manage/handle?mode=custom"),
+        &manager.cookie,
+    )
+    .await;
+    assert_eq!(response.status(), Status::Ok);
+    let html = response.into_string().await.unwrap();
+    assert!(
+        html.contains("name=\"domain\" value=\"custom.example\""),
+        "{html}"
+    );
+    assert!(html.contains("_atproto.custom.example"));
+    let response = get(
+        &client,
+        &format!("/account/u/{TEST_DID}/manage/handle?mode=default"),
+        &manager.cookie,
+    )
+    .await;
+    let html = response.into_string().await.unwrap();
+    assert!(html.contains("name=\"handle\" value=\"\""), "{html}");
 }
 
 #[tokio::test]
@@ -321,10 +370,33 @@ async fn handle_and_password_flows() {
     assert!(html.contains("class=\"error\">"), "{html}");
     assert!(html.contains("name=\"handle\" value=\"a\""));
 
-    // a new default handle is recorded and the page follows the DID
+    // a domain this server does not offer falls back to its first one
     let response = post(
         &client,
         &format!("{MANAGE}/handle"),
+        &manager.cookie,
+        &[
+            ("csrf", &manager.csrf),
+            ("mode", "default"),
+            ("handle", "Fallback"),
+            ("domain", ".other.com"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        Status::SeeOther,
+        "{}",
+        location(&response)
+    );
+    let response = get(&client, &location(&response), &manager.cookie).await;
+    let html = response.into_string().await.unwrap();
+    assert!(html.contains("@fallback.rsky.com"), "{html}");
+
+    // a new default handle is recorded and the page follows the DID
+    let response = post(
+        &client,
+        &format!("/account/u/{TEST_DID}/manage/handle"),
         &manager.cookie,
         &[
             ("csrf", &manager.csrf),

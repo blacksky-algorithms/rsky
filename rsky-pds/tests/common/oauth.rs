@@ -46,6 +46,15 @@ pub async fn get_oauth_client() -> (tempfile::TempDir, Client) {
     super::get_client().await
 }
 
+/// Removes a table from the account database under a running server, so
+/// the next page that needs it meets a storage failure.
+pub fn drop_table(dir: &std::path::Path, table: &str) {
+    rusqlite::Connection::open(dir.join("account.sqlite"))
+        .unwrap()
+        .execute_batch(&format!("DROP TABLE {table}"))
+        .unwrap();
+}
+
 pub fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

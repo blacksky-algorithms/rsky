@@ -1,7 +1,7 @@
 use crate::oauth::routes::{
     adopt_session, check_form_origin, device_session, oauth_error_page, render_error,
-    rotate_session, OAuthRequestInfo, CODE_REJECTED, CREDENTIALS_REJECTED, CROSS_SITE_POST,
-    SESSION_CHANGED,
+    rotate_session, store_error, OAuthRequestInfo, CODE_REJECTED, CREDENTIALS_REJECTED,
+    CROSS_SITE_POST, SESSION_CHANGED,
 };
 use crate::oauth::{now_secs, DeviceSession, SharedOAuthProvider};
 use crate::ui::client::{client_app_name, client_identifier};
@@ -213,10 +213,13 @@ pub(super) async fn page_session(
     let session = device_session(shell, shared, jar, info, now)
         .await
         .map_err(Err)?;
-    let linked = match resolve_linked(shared, &session, id).await {
+    let linked = match resolve_linked(shared, &session, id)
+        .await
+        .map_err(store_error(shell))
+    {
         Ok(Some(linked)) => linked,
         Ok(None) => return Err(redirect(sign_in_href(Some(id)))),
-        Err(error) => return Err(Err(oauth_error_page(shell, error))),
+        Err(page) => return Err(Err(page)),
     };
     if shared.provider.check_login_required(&linked, now) {
         return Err(redirect(sign_in_href(Some(id))));
@@ -260,14 +263,6 @@ async fn resolve_linked(
         .await
 }
 
-pub(super) fn error_page(
-    shell: &crate::ui::shell::PageShell,
-    status: Status,
-    message: String,
-) -> UiHtml {
-    render_error(shell, status, message)
-}
-
 pub(super) fn cross_site_page(ui: &UiState, back_href: String) -> UiHtml {
     render_page(
         Status::Forbidden,
@@ -289,7 +284,7 @@ pub async fn account_index(
     let session = device_session(shell, shared, jar, &info, now).await?;
     let sessions = device_sessions(shared, &session, now)
         .await
-        .map_err(|error| oauth_error_page(shell, error))?;
+        .map_err(store_error(shell))?;
     let usable: Vec<&DeviceSessionInfo> = sessions.iter().filter(|s| !s.login_required).collect();
     if let [only] = usable.as_slice() {
         return redirect(account_href(&account_id(&only.linked.account)));
@@ -334,7 +329,7 @@ pub async fn account_sign_in_page(
     let session = device_session(shell, shared, jar, &info, now).await?;
     let sessions = device_sessions(shared, &session, now)
         .await
-        .map_err(|error| oauth_error_page(shell, error))?;
+        .map_err(store_error(shell))?;
     let otp_error = query.otp_error.unwrap_or(false);
     let auth_error = query.auth_error.unwrap_or(false);
     let otp_hint = query.otp_hint.filter(|hint| !hint.is_empty());
@@ -396,7 +391,7 @@ pub async fn account_sign_in(
     }
     let sessions = device_sessions(shared, &session, now)
         .await
-        .map_err(|error| oauth_error_page(shell, error))?;
+        .map_err(store_error(shell))?;
     let form_again = |error: &str| {
         let options = SignInOptions {
             view: Some(SignInView::Form),
@@ -467,7 +462,7 @@ pub async fn account_select(
     }
     let sessions = device_sessions(shared, &session, now)
         .await
-        .map_err(|error| oauth_error_page(shell, error))?;
+        .map_err(store_error(shell))?;
     if form.csrf != session.csrf {
         let options = SignInOptions {
             error: Some(SESSION_CHANGED.to_string()),
@@ -524,16 +519,14 @@ pub async fn account_sign_out_all(
     let linked = store
         .list_device_accounts(&session.device_id)
         .await
-        .map_err(|error| oauth_error_page(shell, error))?;
+        .map_err(store_error(shell))?;
     for account in linked {
         store
             .remove_device_account(&session.device_id, &account.account.did)
             .await
-            .map_err(|error| oauth_error_page(shell, error))?;
+            .map_err(store_error(shell))?;
     }
-    rotate_session(shared, jar, &mut session)
-        .await
-        .map_err(|error| oauth_error_page(shell, error))?;
+    rotate_session(shared, jar, &mut session).await;
     redirect(ACCOUNT_PATH.to_string())
 }
 
@@ -577,21 +570,24 @@ pub async fn account_sign_out(
     let now = now_secs();
     let mut session = device_session(shell, shared, jar, &info, now).await?;
     check_form_origin(shell, &info, &session, &form.csrf, account_href(id))?;
-    let Some(linked) = resolve_linked(shared, &session, id)
-        .await
-        .map_err(|error| oauth_error_page(shell, error))?
-    else {
-        return redirect(ACCOUNT_PATH.to_string());
+    let did = if id.starts_with("did:") {
+        id.to_string()
+    } else {
+        match resolve_linked(shared, &session, id)
+            .await
+            .map_err(store_error(shell))?
+        {
+            Some(linked) => linked.account.did,
+            None => return redirect(ACCOUNT_PATH.to_string()),
+        }
     };
     shared
         .provider
         .store()
-        .remove_device_account(&session.device_id, &linked.account.did)
+        .remove_device_account(&session.device_id, &did)
         .await
-        .map_err(|error| oauth_error_page(shell, error))?;
-    rotate_session(shared, jar, &mut session)
-        .await
-        .map_err(|error| oauth_error_page(shell, error))?;
+        .map_err(store_error(shell))?;
+    rotate_session(shared, jar, &mut session).await;
     redirect(ACCOUNT_PATH.to_string())
 }
 
@@ -625,7 +621,7 @@ pub async fn account_devices(
         .store()
         .list_account_devices(&account.did)
         .await
-        .map_err(|error| oauth_error_page(shell, error))?;
+        .map_err(store_error(shell))?;
     linked.sort_by(|a, b| b.device.last_seen_at.cmp(&a.device.last_seen_at));
     let filter = q.unwrap_or_default();
     let total = linked.len();
@@ -694,7 +690,7 @@ pub async fn account_device_sign_out(
         .store()
         .remove_device_account(&form.device_id, &account.did)
         .await
-        .map_err(|error| oauth_error_page(shell, error))?;
+        .map_err(store_error(shell))?;
     redirect(devices_href)
 }
 
@@ -719,7 +715,7 @@ pub async fn account_apps(
         .provider
         .list_account_sessions(&account.did, now)
         .await
-        .map_err(|error| oauth_error_page(shell, error))?;
+        .map_err(store_error(shell))?;
     sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     let nav = nav_for(&session, &account, Section::Apps);
     let filter = q.unwrap_or_default();
@@ -774,7 +770,7 @@ pub async fn account_app_details(
         .provider
         .list_account_sessions(&account.did, now)
         .await
-        .map_err(|error| oauth_error_page(shell, error))?
+        .map_err(store_error(shell))?
         .into_iter()
         .find(|s| s.token_id == token_id)
     else {
@@ -784,11 +780,7 @@ pub async fn account_app_details(
             &ErrorPage::with_back((**shell).clone(), "Unknown app session", apps_href),
         ));
     };
-    let scope = found
-        .scope
-        .clone()
-        .or_else(|| found.client_metadata.as_ref().and_then(|m| m.scope.clone()))
-        .unwrap_or_default();
+    let scope = found.scope.clone().unwrap_or_default();
     let scopes: Vec<String> = scope.split_ascii_whitespace().map(String::from).collect();
     let first_party = shared.provider.is_trusted_client(&found.client_id)
         && ui.is_first_party_client(&found.client_id);
@@ -847,7 +839,7 @@ pub async fn account_app_revoke(
         .provider
         .revoke_account_token(&account.did, &form.token_id)
         .await
-        .map_err(|error| oauth_error_page(shell, error))?;
+        .map_err(store_error(shell))?;
     redirect(apps_href)
 }
 
@@ -871,16 +863,15 @@ pub async fn account_about(
     let page = AboutPage {
         shell: (**shell).clone(),
         handle: nav.account.handle.clone(),
-        profile_href: shell.app_url.as_ref().map(|url| {
-            format!(
-                "{}/profile/{}",
-                url.trim_end_matches('/'),
-                account_id(&account)
-            )
-        }),
+        profile_href: profile_href(shell.app_url.as_deref(), &account_id(&account)),
         nav,
     };
     Err(render_page(Status::Ok, shell, &page))
+}
+
+/// The account's profile on the deployment's app, when one is named.
+fn profile_href(app_url: Option<&str>, account_id: &str) -> Option<String> {
+    app_url.map(|url| format!("{}/profile/{account_id}", url.trim_end_matches('/')))
 }
 
 /// Anything else under `/account` is a page that does not exist.
@@ -914,6 +905,11 @@ mod tests {
         };
         assert_eq!(account_id(&account), "did:plc:a");
         assert!(matches_filter("", &["anything"]));
+        assert_eq!(profile_href(None, "alice.test"), None);
+        assert_eq!(
+            profile_href(Some("https://app.test/"), "alice.test").as_deref(),
+            Some("https://app.test/profile/alice.test")
+        );
         assert!(matches_filter(
             " Saf ",
             &["macOS \u{2022} Safari", "10.0.0.1"]

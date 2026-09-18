@@ -3,7 +3,6 @@
 //! the XRPC methods use.
 
 use super::routes::{account_href, account_id, nav_for, page_session, redirect};
-use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::{AccountManager, ResetPasswordOpts};
 use crate::apis::com::atproto::identity::update_handle::update_handle_for;
 use crate::apis::com::atproto::server::confirm_email::confirm_email_for;
@@ -71,6 +70,12 @@ pub(super) fn page_message(error: &ApiError) -> String {
     }
 }
 
+/// A code could not be mailed; the reason is for the log, not the page.
+fn mail_failure(error: anyhow::Error) -> String {
+    tracing::warn!(%error, "a code could not be mailed");
+    SOMETHING_WENT_WRONG.to_string()
+}
+
 fn manage_href(account: &AccountInfo) -> String {
     format!("{}/manage", account_href(&account_id(account)))
 }
@@ -87,25 +92,6 @@ fn notice_for(key: Option<&str>) -> Option<String> {
     }
 }
 
-/// What the account manager knows about the account beyond the OAuth
-/// store's view: its address and whether it is confirmed.
-async fn account_details(
-    account_manager: &AccountManager,
-    did: &str,
-) -> Result<(Option<String>, bool), ApiError> {
-    let account = account_manager
-        .get_account(
-            did,
-            Some(AvailabilityFlags {
-                include_deactivated: Some(true),
-                include_taken_down: None,
-            }),
-        )
-        .await?
-        .ok_or_else(|| ApiError::InvalidRequest("Account not found".to_string()))?;
-    Ok((account.email, account.email_confirmed_at.is_some()))
-}
-
 #[tracing::instrument(skip_all)]
 #[rocket::get("/account/u/<id>/manage?<notice>")]
 pub async fn manage_page(
@@ -115,7 +101,6 @@ pub async fn manage_page(
     info: OAuthRequestInfo,
     shared: &State<SharedOAuthProvider>,
     ui: &State<UiState>,
-    account_manager: &State<AccountManager>,
 ) -> Result<Redirect, UiHtml> {
     let now = now_secs();
     let (session, account) =
@@ -123,11 +108,7 @@ pub async fn manage_page(
             Ok(found) => found,
             Err(answer) => return answer,
         };
-    let (email, email_confirmed) = account_details(account_manager, &account.did)
-        .await
-        .map_err(|error| {
-            super::routes::error_page(&ui.shell, Status::BadRequest, page_message(&error))
-        })?;
+    let (email, email_confirmed) = (account.email.clone(), account.email_verified);
     let base = manage_href(&account);
     let nav = nav_for(&session, &account, Section::Manage);
     let mut rows = Vec::new();
@@ -229,7 +210,6 @@ struct EmailContext {
 async fn email_context(
     ui: &UiState,
     shared: &SharedOAuthProvider,
-    account_manager: &AccountManager,
     jar: &CookieJar<'_>,
     info: &OAuthRequestInfo,
     id: &str,
@@ -239,15 +219,7 @@ async fn email_context(
     if account.deactivated {
         return Err(redirect(manage_href(&account)));
     }
-    let (current_email, _) = account_details(account_manager, &account.did)
-        .await
-        .map_err(|error| {
-            Err(super::routes::error_page(
-                &ui.shell,
-                Status::BadRequest,
-                page_message(&error),
-            ))
-        })?;
+    let current_email = account.email.clone();
     Ok(EmailContext {
         session,
         account,
@@ -263,9 +235,8 @@ pub async fn email_page_route(
     info: OAuthRequestInfo,
     shared: &State<SharedOAuthProvider>,
     ui: &State<UiState>,
-    account_manager: &State<AccountManager>,
 ) -> Result<Redirect, UiHtml> {
-    let ctx = match email_context(ui, shared, account_manager, jar, &info, id, now_secs()).await {
+    let ctx = match email_context(ui, shared, jar, &info, id, now_secs()).await {
         Ok(ctx) => ctx,
         Err(answer) => return answer,
     };
@@ -304,7 +275,7 @@ pub async fn email_request(
     caller: Caller,
 ) -> Result<Redirect, UiHtml> {
     let now = now_secs();
-    let ctx = match email_context(ui, shared, account_manager, jar, &info, id, now).await {
+    let ctx = match email_context(ui, shared, jar, &info, id, now).await {
         Ok(ctx) => ctx,
         Err(answer) => return answer,
     };
@@ -402,7 +373,7 @@ pub async fn email_confirm(
     ui: &State<UiState>,
     account_manager: &State<AccountManager>,
 ) -> Result<Redirect, UiHtml> {
-    let ctx = match email_context(ui, shared, account_manager, jar, &info, id, now_secs()).await {
+    let ctx = match email_context(ui, shared, jar, &info, id, now_secs()).await {
         Ok(ctx) => ctx,
         Err(answer) => return answer,
     };
@@ -452,9 +423,8 @@ pub async fn email_verify_page(
     info: OAuthRequestInfo,
     shared: &State<SharedOAuthProvider>,
     ui: &State<UiState>,
-    account_manager: &State<AccountManager>,
 ) -> Result<Redirect, UiHtml> {
-    let ctx = match email_context(ui, shared, account_manager, jar, &info, id, now_secs()).await {
+    let ctx = match email_context(ui, shared, jar, &info, id, now_secs()).await {
         Ok(ctx) => ctx,
         Err(answer) => return answer,
     };
@@ -496,7 +466,7 @@ pub async fn email_verify_request(
     limits: &State<RateLimits>,
     caller: Caller,
 ) -> Result<Redirect, UiHtml> {
-    let ctx = match email_context(ui, shared, account_manager, jar, &info, id, now_secs()).await {
+    let ctx = match email_context(ui, shared, jar, &info, id, now_secs()).await {
         Ok(ctx) => ctx,
         Err(answer) => return answer,
     };
@@ -522,10 +492,7 @@ pub async fn email_verify_request(
         Ok(()) => request_email_confirmation_for(&ctx.account.did, account_manager)
             .await
             .err()
-            .map(|error| {
-                tracing::warn!(%error, "email confirmation request failed");
-                SOMETHING_WENT_WRONG.to_string()
-            }),
+            .map(mail_failure),
         Err(error) => Some(page_message(&error)),
     };
     let step = if error.is_some() {
@@ -561,7 +528,7 @@ pub async fn email_verify(
     ui: &State<UiState>,
     account_manager: &State<AccountManager>,
 ) -> Result<Redirect, UiHtml> {
-    let ctx = match email_context(ui, shared, account_manager, jar, &info, id, now_secs()).await {
+    let ctx = match email_context(ui, shared, jar, &info, id, now_secs()).await {
         Ok(ctx) => ctx,
         Err(answer) => return answer,
     };
@@ -870,19 +837,7 @@ pub async fn password_request(
         &form.csrf,
         manage_href(&account),
     )?;
-    let (email, _) = match account_details(account_manager, &account.did).await {
-        Ok(details) => details,
-        Err(error) => {
-            return Err(password_page(
-                ui,
-                &session,
-                &account,
-                PasswordStep::Request,
-                Some(page_message(&error)),
-            ))
-        }
-    };
-    let Some(email) = email else {
+    let Some(email) = account.email.clone() else {
         return redirect(manage_href(&account));
     };
     let error = match limits
@@ -897,10 +852,7 @@ pub async fn password_request(
         Ok(()) => request_password_reset_for(&email, account_manager)
             .await
             .err()
-            .map(|error| {
-                tracing::warn!(%error, "password reset request failed");
-                SOMETHING_WENT_WRONG.to_string()
-            }),
+            .map(mail_failure),
         Err(error) => Some(page_message(&error)),
     };
     let step = if error.is_some() {

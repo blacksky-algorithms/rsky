@@ -214,20 +214,16 @@ pub(crate) async fn create_and_sign_in(
             now,
         )
         .await
-        .map_err(|error| match error {
-            rsky_oauth::OAuthError::InvalidRequest(reason)
-                if reason == "device session changed" =>
-            {
-                SESSION_CHANGED.to_string()
-            }
-            other => page_message(&ApiError::RuntimeError).replace(
-                "Something went wrong",
-                &format!("Something went wrong ({other})"),
-            ),
-        })?;
+        .map_err(sign_in_after_create)?;
     adopt_session(shared, jar, session, new_session_id);
     crate::metrics::record_login_success("account");
     Ok(created.handle)
+}
+
+/// The account exists but this device could not be signed in to it.
+fn sign_in_after_create(error: rsky_oauth::OAuthError) -> String {
+    tracing::warn!(%error, "new account created but the device was not signed in");
+    "Your account was created, but this device could not be signed in. Please sign in.".to_string()
 }
 
 /// The reference's wording for what can go wrong creating an account.

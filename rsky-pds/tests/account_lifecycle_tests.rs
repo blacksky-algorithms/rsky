@@ -287,6 +287,20 @@ async fn delete_account_in_three_steps() {
     .await;
     let html = response.into_string().await.unwrap();
     assert!(html.contains("Token is invalid"), "{html}");
+    let too_long = "p".repeat(600);
+    let response = post(
+        &client,
+        &format!("{MANAGE}/delete/verify"),
+        &manager.cookie,
+        &[
+            ("csrf", &manager.csrf),
+            ("code", &code),
+            ("password", &too_long),
+        ],
+    )
+    .await;
+    let html = response.into_string().await.unwrap();
+    assert!(html.contains("Password too long"), "{html}");
 
     // the right ones reach the last word, with an attestation and no password
     let response = post(
@@ -504,6 +518,46 @@ async fn sign_up_from_the_account_pages() {
         .await
         .unwrap()
         .contains("Your session changed in another tab"));
+}
+
+#[tokio::test]
+async fn sign_up_keeps_the_account_when_the_device_cannot_be_signed_in() {
+    std::env::set_var("PDS_INVITE_REQUIRED", "false");
+    let (dir, client) = get_oauth_client().await;
+    let response = client.get("/account/sign-up").dispatch().await;
+    let cookie = cookie_of(&response);
+    let csrf = extract_csrf(&response.into_string().await.unwrap());
+
+    drop_table(dir.path(), "account_device");
+    let response = post(
+        &client,
+        "/account/sign-up",
+        &cookie,
+        &[
+            ("csrf", &csrf),
+            ("step", "credentials"),
+            ("handle", "orphan"),
+            ("domain", ".rsky.com"),
+            ("email", "orphan@example.com"),
+            ("password", "a-long-enough-password"),
+        ],
+    )
+    .await;
+    assert_eq!(response.status(), Status::Ok);
+    let html = response.into_string().await.unwrap();
+    assert!(
+        html.contains("Your account was created, but this device could not be signed in."),
+        "{html}"
+    );
+
+    // the account exists all the same
+    let response = client
+        .post("/xrpc/com.atproto.server.createSession")
+        .header(ContentType::JSON)
+        .body(r#"{"identifier":"orphan.rsky.com","password":"a-long-enough-password"}"#)
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
 }
 
 #[tokio::test]

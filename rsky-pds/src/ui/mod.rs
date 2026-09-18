@@ -197,6 +197,28 @@ mod tests {
     }
 
     #[test]
+    fn sign_up_is_internal_only_with_handle_domains() {
+        std::env::remove_var("PDS_OAUTH_SIGNUP_URL");
+        std::env::set_var("PDS_JWT_SECRET", "secret");
+        let without = UiState::new(&Branding::default(), "https://pds.test", "pds.test", &[]);
+        assert_eq!(without.signup, SignUp::Disabled);
+        let with = UiState::new(
+            &Branding::default(),
+            "https://pds.test",
+            "pds.test",
+            &[".pds.test".to_string()],
+        );
+        assert_eq!(with.signup, SignUp::Internal);
+        std::env::set_var("PDS_OAUTH_SIGNUP_URL", "https://signup.test");
+        let external = UiState::new(&Branding::default(), "https://pds.test", "pds.test", &[]);
+        assert_eq!(
+            external.signup,
+            SignUp::External("https://signup.test".into())
+        );
+        std::env::remove_var("PDS_OAUTH_SIGNUP_URL");
+    }
+
+    #[test]
     fn the_intent_key_derives_from_either_signing_material() {
         let from_secret = intent_key_for(Some("secret".into()), None);
         let from_key = intent_key_for(

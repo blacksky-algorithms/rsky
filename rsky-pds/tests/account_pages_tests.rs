@@ -395,6 +395,11 @@ async fn apps_page_details_and_revocation() {
     let code = sign_in_and_accept(&client, &request_uri, &mut session).await;
     let tokens = exchange_code(&client, &key, &code, &nonce).await;
     let refresh_token = tokens["refresh_token"].as_str().unwrap().to_string();
+    // a second app session from another device
+    let (second_request_uri, second_nonce) = run_par(&client, &key).await;
+    let mut second = open_authorize_page(&client, &second_request_uri).await;
+    let code = sign_in_and_accept(&client, &second_request_uri, &mut second).await;
+    exchange_code(&client, &key, &code, &second_nonce).await;
 
     // the OAuth sign-in also signed the device in to the account manager
     let response = get(&client, "/account/u/foo.rsky.com", Some(&session.cookie)).await;
@@ -414,9 +419,19 @@ async fn apps_page_details_and_revocation() {
     assert!(html.contains("<code>loopback</code>"));
     assert!(html.contains("Why is this time so recent?"));
     let marker = "/account/u/foo.rsky.com/apps/";
-    let start = html.find(marker).unwrap() + marker.len();
-    let token_id = html[start..start + html[start..].find('"').unwrap()].to_string();
-    assert!(token_id.starts_with("tok-"), "{token_id}");
+    let token_ids: Vec<String> = html
+        .match_indices(marker)
+        .map(|(at, _)| {
+            let start = at + marker.len();
+            html[start..start + html[start..].find('"').unwrap()].to_string()
+        })
+        .collect();
+    assert_eq!(token_ids.len(), 2, "{html}");
+    assert!(
+        token_ids.iter().all(|id| id.starts_with("tok-")),
+        "{token_ids:?}"
+    );
+    let token_id = token_ids[0].clone();
 
     let response = get(
         &client,
@@ -449,15 +464,17 @@ async fn apps_page_details_and_revocation() {
     .await;
     assert_eq!(response.status(), Status::NotFound);
 
-    let response = post(
-        &client,
-        "/account/u/foo.rsky.com/apps/revoke",
-        &session.cookie,
-        &[("csrf", &csrf), ("token_id", &token_id)],
-    )
-    .await;
-    assert_eq!(response.status(), Status::SeeOther);
-    assert_eq!(location(&response), "/account/u/foo.rsky.com/apps");
+    for token_id in &token_ids {
+        let response = post(
+            &client,
+            "/account/u/foo.rsky.com/apps/revoke",
+            &session.cookie,
+            &[("csrf", &csrf), ("token_id", token_id)],
+        )
+        .await;
+        assert_eq!(response.status(), Status::SeeOther);
+        assert_eq!(location(&response), "/account/u/foo.rsky.com/apps");
+    }
     let response = get(
         &client,
         "/account/u/foo.rsky.com/apps",
@@ -499,6 +516,26 @@ async fn apps_page_details_and_revocation() {
     )
     .await;
     assert_eq!(response.status(), Status::BadRequest);
+}
+
+#[tokio::test]
+async fn a_failing_store_answers_with_the_error_page() {
+    let (dir, client) = get_oauth_client().await;
+    create_active_account(&client).await;
+    let manager = sign_in(&client).await;
+
+    drop_table(dir.path(), "account_device");
+    let response = get(&client, "/account", Some(&manager.cookie)).await;
+    assert_eq!(response.status(), Status::InternalServerError);
+    let html = response.into_string().await.unwrap();
+    assert!(html.contains("An error occurred"), "{html}");
+    let response = get(&client, "/account/u/foo.rsky.com", Some(&manager.cookie)).await;
+    assert_eq!(response.status(), Status::InternalServerError);
+    assert!(response
+        .into_string()
+        .await
+        .unwrap()
+        .contains("An error occurred"));
 }
 
 #[tokio::test]

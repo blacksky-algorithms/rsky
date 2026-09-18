@@ -597,9 +597,7 @@ pub async fn delete_confirm(
             }
         }
     }
-    if let Err(error) = rotate_session(shared, jar, &mut session).await {
-        tracing::warn!(%error, "device secret not rotated after account deletion");
-    }
+    rotate_session(shared, jar, &mut session).await;
     redirect("/account".to_string())
 }
 
