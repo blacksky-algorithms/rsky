@@ -140,8 +140,68 @@ Mount a volume at `PDS_DATA_DIRECTORY` to persist data.
 
 | Variable | Description |
 |---|---|
-| `PDS_OAUTH_SIGNUP_URL` | Signup URL shown on the authorization page |
-| `PDS_OAUTH_TRUSTED_CLIENTS` | Comma-separated client IDs shown by name on the consent page |
+| `PDS_OAUTH_SIGNUP_URL` | External sign-up page linked from the authorization and account pages; when unset, the server's own sign-up is offered instead |
+| `PDS_OAUTH_TRUSTED_CLIENTS` | Comma-separated client IDs shown by name and logo on the consent page and allowed to keep their `prompt` |
+| `PDS_OAUTH_FIRST_PARTY_CLIENTS` | Comma-separated client IDs operated by this deployment; the identity-takeover warning on consent is not shown for one that is also trusted |
+| `PDS_DPOP_SECRET` | 32 hex bytes keying DPoP nonces; random per process when unset |
+
+### Browser pages
+
+The authorization screens and the account manager under `/account` are
+server-rendered with the layout, copy and styling of the reference PDS, and
+read the same branding variables. Nothing in the pages names a particular
+app or organisation unless these are set.
+
+| Variable | Description |
+|---|---|
+| `PDS_SERVICE_NAME` | The name in the header and footer (default `{hostname} PDS`) |
+| `PDS_LOGO_URL` | Logo shown next to the service name |
+| `PDS_PRIMARY_COLOR`, `PDS_ERROR_COLOR`, `PDS_WARNING_COLOR`, `PDS_INFO_COLOR`, `PDS_SUCCESS_COLOR` | Brand colours as `#rgb`, `#rrggbb` or `rgb(r, g, b)`; no alpha. A bad value stops startup |
+| `PDS_BACKGROUND_LIGHT_URL`, `PDS_BACKGROUND_DARK_URL` | Background images behind the authorization card |
+| `PDS_HOME_URL`, `PDS_TERMS_OF_SERVICE_URL`, `PDS_PRIVACY_POLICY_URL`, `PDS_SUPPORT_URL` | Footer links, in that order; unset ones are omitted |
+| `PDS_APP_NAME`, `PDS_APP_URL` | The client app the deployment is built around, named in the consent cards ("Access your {app} account"), the deactivate, reactivate and delete copy, and the About page; the wording stays generic when unset |
+| `PDS_ORG_NAME` | The operator, linked to `PDS_HOME_URL` under "Learn more" on the About page |
+| `PDS_ACCOUNT_UI_ENABLED` | Serve the account manager under `/account` (default true). With it off, only the authorization screens are served |
+| `PDS_ACCOUNT_SIGNUP_ENABLED` | Offer this server's own sign-up when `PDS_OAUTH_SIGNUP_URL` is unset and handle domains are configured (default true) |
+| `PDS_ACCOUNT_UI_SESSIONS_SINCE` | RFC 3339 instant; device authentications older than it must sign in again before they count for the account pages or for silent consent |
+
+What the pages do, and where they differ from the reference:
+
+- The authorization flow shows the picker of accounts already signed in on
+  the device, a plain sign-in form, or the welcome view when sign-up is
+  offered; consent lists the requested permissions the way the reference
+  does and is skipped when a trusted client already holds a covering grant.
+  A sign-in with "Remember this account on this device" unchecked leaves no
+  session on the device and carries a short-lived proof through the consent
+  form instead. A deactivated account is offered reactivation before consent.
+- Accepting or denying sends the browser straight to the client; there is
+  no redirect interstitial page.
+- A second-factor gate in front of `/oauth/authorize/sign-in` and
+  `/account/sign-in` (the Blacksky gatekeeper does this) sends the browser
+  back with `otp_hint`, `otp_error`, `auth_error` and `remember`, which the
+  pages render. The `csrf` field is `base64url(sha256(device cookie))`.
+- The device cookie (`device-id`) is persistent, site-wide, `HttpOnly`,
+  `SameSite=Lax` and `Secure` on https. Its secret rotates on sign-in,
+  sign-up, sign-out and denial, without a grace period: a tab holding the
+  old secret is told the session changed and shown the form again.
+- iOS browsers get a cookie probe before the request is bound to a device;
+  a browser that never returns it sends the client `invalid_request` with
+  `ERR_COOKIES_UNSUPPORTED`. The probe needs one click on "Continue"; the
+  reference auto-submits it with JavaScript.
+- The account manager offers Home, Account (email, username, password,
+  deactivate, reactivate, delete), Devices, Apps and About. Signing in there
+  always remembers the account on the device. Deactivation from the pages
+  asks for the password and revokes every OAuth session, authorized client
+  and app password; the XRPC method keeps them. The password change asks
+  for the current password as well as the mailed code. Deletion asks for
+  the mailed code and the password, then a final confirmation that carries
+  a five-minute signed attestation instead of the password.
+- Sign-up has no captcha step; deployments that need one keep
+  `PDS_OAUTH_SIGNUP_URL` pointing at a page that provides it.
+- `/.well-known/change-password` redirects to `/account/reset-password`.
+- English only; permission-set titles in other languages are ignored.
+- `cargo run -p rsky-pds --example render_ui -- <dir>` writes every screen
+  with sample branding for visual comparison.
 
 ## Sharing a data directory
 
@@ -312,11 +372,12 @@ whatever reappeared. Outcomes are counted in
 
 The reference PDS serves account mutations to its own authorization UI
 under `/@atproto/oauth-provider/~api/*`, authenticated by device-session
-cookies. This server has no equivalent of that API; after a cutover those
-paths answer 410 at the edge, an authorization page already open in a
-browser restarts its flow, and existing sessions and tokens are untouched.
-Every operation the UI API offered is served here through XRPC, which is
-how the Blacksky client performs them:
+cookies. This server has no equivalent of that API: its account manager
+under `/account` is server-rendered and posts forms (see "Browser pages"),
+so after a cutover those paths answer 410 at the edge, an authorization
+page already open in a browser restarts its flow, and existing sessions and
+tokens are untouched. Every operation the UI API offered is also served
+through XRPC, which is how the Blacksky client performs them:
 
 | UI API endpoint | XRPC equivalent |
 |---|---|
@@ -330,6 +391,19 @@ how the Blacksky client performs them:
 | `revoke-account-session`, `sign-out` | `com.atproto.server.deleteSession` |
 | `revoke-oauth-session` | `POST /oauth/revoke` |
 | `sign-in`, `sign-up` | `com.atproto.server.createSession`, `com.atproto.server.createAccount` (the gatekeeper's 2FA interception moves to `/oauth/authorize/sign-in`) |
+
+## Testing and coverage
+
+`cargo test -p rsky-pds` runs the unit and integration suites. The
+TypeScript-compatibility fixtures under `tests/fixtures/ts-pds-0.5.27/` are
+tracked in git (the `data/` directory is exempt from the workspace's
+`**/data/` ignore rule) so the compat, read-only, and import-policy suites run
+unchanged in CI.
+
+Coverage is enforced by `scripts/coverage-gate.sh <base-ref>` from the
+workspace root: every `rsky-pds` or `rsky-oauth` source file changed since the
+base must report 100% line and function coverage. CI runs the same script
+against the pushed range, next to its crate-wide 95% line floor.
 
 ## Upgrading to 1.0
 

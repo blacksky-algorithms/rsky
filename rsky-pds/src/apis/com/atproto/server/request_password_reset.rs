@@ -10,11 +10,12 @@ use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::server::RequestPasswordResetInput;
 
-async fn inner_request_password_reset(
-    body: Json<RequestPasswordResetInput>,
-    account_manager: AccountManager,
+/// Mails a reset token to the account registered under `email`, for the
+/// XRPC method and the browser pages alike.
+pub(crate) async fn request_password_reset_for(
+    email: &str,
+    account_manager: &AccountManager,
 ) -> Result<()> {
-    let RequestPasswordResetInput { email } = body.into_inner();
     let email = email.to_lowercase();
 
     let account = account_manager
@@ -69,7 +70,8 @@ pub async fn request_password_reset(
             caller.bypass,
         )
         .await?;
-    match inner_request_password_reset(body, account_manager).await {
+    let RequestPasswordResetInput { email } = body.into_inner();
+    match request_password_reset_for(&email, &account_manager).await {
         Ok(_) => Ok(()),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

@@ -10,14 +10,14 @@ use crate::rate_limits::{Caller, RateLimits};
 use anyhow::{bail, Result};
 use rocket::State;
 
-async fn inner_request_email_confirmation(
-    auth: Scoped<AccountEmail, AccessStandardIncludeChecks>,
-    account_manager: AccountManager,
+/// Mails a confirmation token to the account's address.
+pub(crate) async fn request_email_confirmation_for(
+    did: &str,
+    account_manager: &AccountManager,
 ) -> Result<()> {
-    let did = auth.did().await?;
     let account = account_manager
         .get_account(
-            &did,
+            did,
             Some(AvailabilityFlags {
                 include_deactivated: Some(true),
                 include_taken_down: Some(true),
@@ -27,7 +27,7 @@ async fn inner_request_email_confirmation(
     if let Some(account) = account {
         if let Some(email) = account.email {
             let token = account_manager
-                .create_email_token(&did, EmailTokenPurpose::ConfirmEmail)
+                .create_email_token(did, EmailTokenPurpose::ConfirmEmail)
                 .await?;
             mailer::send_confirm_email(email, TokenParam { token }).await?;
             Ok(())
@@ -56,7 +56,7 @@ pub async fn request_email_confirmation(
             caller.bypass,
         )
         .await?;
-    match inner_request_email_confirmation(auth, account_manager).await {
+    match request_email_confirmation_for(&did, &account_manager).await {
         Ok(_) => Ok(()),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

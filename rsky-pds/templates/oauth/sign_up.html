@@ -1,0 +1,71 @@
+{% extends "layouts/auth_shell.html" %}
+{% import "components/macros.html" as ui %}
+{% block title %}Sign up{% endblock %}
+{% block card_title %}Sign up{% endblock %}
+{% block card_subtitle %}<p class="card-description">We're so excited to have you join us!</p>{% endblock %}
+{% block content %}
+<form method="post" action="{{ submit_action }}" class="form" autocomplete="on">
+  {% call ui::csrf_fields(csrf) %}
+  {% call ui::request_fields(client_id, request_uri) %}
+  {% match step %}
+  {% when SignUpStep::Handle %}
+  <input type="hidden" name="step" value="handle">
+  <p class="text-sm muted">Step 1 of 2</p>
+  <div class="progress"><div class="progress-bar half"></div></div>
+  <h2 class="step-title">Choose a username</h2>
+  {% if let Some(message) = error %}{% call ui::error_notice(message) %}{% endif %}
+  <div class="field">
+    <label class="label" for="handle">Username</label>
+    <div class="input-wrap">
+      <span class="input-icon">{% include "icons/at-sign.svg.html" %}</span>
+      <input class="input" type="text" id="handle" name="handle" value="{{ segment }}" title="Type your username" placeholder="yourname" minlength="3" maxlength="18" autocapitalize="none" autocomplete="off" autocorrect="off" spellcheck="false" required>
+    </div>
+    <p class="hint">Use 3–18 letters, numbers or hyphens</p>
+  </div>
+  {% if domains.len() > 1 %}
+  <fieldset class="field">
+    <legend class="label">Select domain</legend>
+    {% for domain in domains %}
+    <label class="radio-row"><input type="radio" name="domain" value="{{ domain }}"{% if domain.as_str() == selected_domain.as_str() %} checked{% endif %}> <span>{{ domain }}</span></label>
+    {% endfor %}
+  </fieldset>
+  {% else %}
+  <input type="hidden" name="domain" value="{{ selected_domain }}">
+  <p class="text-sm muted">Your full username will be <b>@{{ segment }}{{ selected_domain }}</b></p>
+  {% endif %}
+  <p class="text-sm muted">You can change this username to any domain name you control after your account is set up.</p>
+  <div class="action-column">
+    <button type="submit" class="btn btn-default">Next</button>
+    <a class="btn btn-secondary" href="{{ back_href }}">Back</a>
+  </div>
+  {% when SignUpStep::Credentials %}
+  <input type="hidden" name="step" value="credentials">
+  <input type="hidden" name="handle" value="{{ segment }}">
+  <input type="hidden" name="domain" value="{{ selected_domain }}">
+  <p class="text-sm muted">Step 2 of 2</p>
+  <div class="progress"><div class="progress-bar full"></div></div>
+  <h2 class="step-title">Your account</h2>
+  {% if let Some(message) = error %}{% call ui::error_notice(message) %}{% endif %}
+  {% if invite_required %}
+  <div class="field">
+    <label class="label" for="invite_code">Invite code</label>
+    <input class="input" type="text" id="invite_code" name="invite_code" value="{{ invite_code }}" title="Invite code" placeholder="example-com-xxxxx-xxxxx" autocapitalize="none" autocomplete="off" required>
+  </div>
+  {% endif %}
+  <div class="field">
+    <label class="label" for="email">Email</label>
+    <input class="input" type="email" id="email" name="email" value="{{ email }}" autocomplete="email" required>
+  </div>
+  <div class="field">
+    <label class="label" for="password">Password</label>
+    <input class="input" type="password" id="password" name="password" autocomplete="new-password" placeholder="Enter a password" minlength="8" required>
+    <p class="hint">Password with at least 8 characters</p>
+  </div>
+  <p class="text-sm muted">By creating an account you agree to the {% if let Some(tos) = tos_href %}<a class="underline" href="{{ tos }}">Terms of Service</a>{% else %}Terms of Service{% endif %} and the {% if let Some(privacy) = privacy_href %}<a class="underline" href="{{ privacy }}">Privacy Policy</a>{% else %}Privacy Policy{% endif %} of this service.</p>
+  <div class="action-column">
+    <button type="submit" class="btn btn-default">Sign up</button>
+    <a class="btn btn-secondary" href="{{ back_href }}">Back</a>
+  </div>
+  {% endmatch %}
+</form>
+{% endblock %}

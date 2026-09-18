@@ -221,6 +221,22 @@ pub struct CoreConfig {
     pub shutdown_grace_secs: u32,
     /// Where uploads are spooled while they are hashed and stored.
     pub upload_spool_dir: String,
+    /// Device authentications (unix seconds) older than this must sign in
+    /// again before they count for the account pages or silent consent.
+    pub account_ui_sessions_since: Option<u64>,
+    /// Whether the browser account pages under `/account` are served.
+    pub account_ui_enabled: bool,
+}
+
+/// `PDS_ACCOUNT_UI_SESSIONS_SINCE` as unix seconds; the value is RFC 3339.
+fn sessions_since_from(value: Option<String>) -> Option<u64> {
+    value.map(|value| {
+        chrono::DateTime::parse_from_rfc3339(value.trim())
+            .map(|instant| instant.timestamp().max(0) as u64)
+            .unwrap_or_else(|error| {
+                panic!("PDS_ACCOUNT_UI_SESSIONS_SINCE must be an RFC 3339 timestamp: {error}")
+            })
+    })
 }
 
 pub fn env_to_cfg() -> ServerConfig {
@@ -248,6 +264,8 @@ pub fn env_to_cfg() -> ServerConfig {
         write_allowlist_file: env_str("PDS_WRITE_ALLOWLIST_FILE"),
         read_only: env_bool("PDS_READ_ONLY").unwrap_or(false),
         shutdown_grace_secs: env_int("PDS_SHUTDOWN_GRACE_SECS").unwrap_or(100) as u32,
+        account_ui_sessions_since: sessions_since_from(env_str("PDS_ACCOUNT_UI_SESSIONS_SINCE")),
+        account_ui_enabled: env_bool("PDS_ACCOUNT_UI_ENABLED").unwrap_or(true),
         upload_spool_dir: env_str("PDS_UPLOAD_SPOOL_DIR").unwrap_or_else(|| {
             std::env::temp_dir()
                 .join("rsky-pds-spool")
@@ -396,6 +414,29 @@ impl ServerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sessions_since_parses_rfc3339_into_unix_seconds() {
+        assert_eq!(sessions_since_from(None), None);
+        assert_eq!(
+            sessions_since_from(Some("2023-11-14T22:13:20Z".to_string())),
+            Some(1_700_000_000)
+        );
+        assert_eq!(
+            sessions_since_from(Some(" 2023-11-14T17:13:20-05:00 ".to_string())),
+            Some(1_700_000_000)
+        );
+        assert_eq!(
+            sessions_since_from(Some("1900-01-01T00:00:00Z".to_string())),
+            Some(0)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "RFC 3339")]
+    fn sessions_since_rejects_other_formats() {
+        sessions_since_from(Some("yesterday".to_string()));
+    }
 
     #[test]
     fn env_to_cfg_builds_default_and_configured_config() {

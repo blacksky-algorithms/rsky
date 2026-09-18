@@ -8,6 +8,7 @@ use crate::sequencer::Sequencer;
 use atrium_xrpc_client::reqwest::ReqwestClient;
 use rsky_common::env::{env_bool, env_int};
 
+pub mod account;
 pub mod account_manager;
 pub mod actor_store;
 pub mod admission;
@@ -54,6 +55,7 @@ pub mod space_auth;
 pub mod space_scope;
 pub mod spool;
 pub mod telemetry;
+pub mod ui;
 pub mod well_known;
 pub mod xrpc_server;
 use crate::account_manager::AccountManager;
@@ -532,9 +534,18 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         account_db.clone(),
         cfg.service.public_url.clone(),
         cfg.service.did.clone(),
+        cfg.service.account_ui_sessions_since,
     )
     .await;
     let account_manager = AccountManager::new(account_db);
+    let branding = ui::branding::Branding::from_env(&cfg.service.hostname)
+        .expect("the branding environment must parse");
+    let ui_state = ui::UiState::new(
+        &branding,
+        &cfg.service.public_url,
+        &cfg.service.hostname,
+        &cfg.identity.service_handle_domains,
+    );
 
     let sequencer = SharedSequencer {
         sequencer: RwLock::new(Sequencer::with_broadcast_capacity(
@@ -712,9 +723,15 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
     .collect();
 
     let shield = Shield::default().enable(NoSniff::Enable);
+    let account_pages: Vec<rocket::Route> = if cfg.service.account_ui_enabled {
+        account::routes::routes()
+    } else {
+        Vec::new()
+    };
 
     rocket::custom(figment)
         .mount("/", read_only_gate)
+        .mount("/", account_pages)
         .mount(
             "/",
             routes![
@@ -854,6 +871,9 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 oauth::routes::oauth_authorize_select,
                 oauth::routes::oauth_authorize_accept,
                 oauth::routes::oauth_authorize_reject,
+                oauth::routes::oauth_authorize_reactivate,
+                oauth::routes::oauth_authorize_sign_up,
+                ui::assets::ui_asset,
                 all_options
             ],
         )
@@ -871,6 +891,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(app_view_agent)
         .manage(account_manager)
         .manage(shared_oauth_provider)
+        .manage(ui_state)
         .manage(crate::space_auth::SharedSpaceDpop::default())
         .manage(crate::permission_set::SharedPermissionSets::default())
         .manage(actor_store)

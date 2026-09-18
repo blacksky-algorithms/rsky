@@ -1,0 +1,42 @@
+<div class="description-card permission-group" role="listitem">
+  <span class="avatar avatar-sm">{% if group.icon == "mail" %}{% include "icons/mail.svg.html" %}{% else if group.icon == "id-card" %}{% include "icons/id-card.svg.html" %}{% else if group.icon == "user" %}{% include "icons/user.svg.html" %}{% else if group.icon == "layout-grid" %}{% include "icons/layout-grid.svg.html" %}{% else if group.icon == "message-circle-more" %}{% include "icons/message-circle-more.svg.html" %}{% else if group.icon == "badge-check" %}{% include "icons/badge-check.svg.html" %}{% else if group.icon == "book-open" %}{% include "icons/book-open.svg.html" %}{% else %}{% include "icons/atom.svg.html" %}{% endif %}</span>
+  <div class="description-body">
+    <div class="row between top">
+      <div>
+        <div class="description-title">{{ group.title|safe }}</div>
+        <div class="description-text">{{ group.description|safe }}</div>
+      </div>
+      {% if group.email_checkbox %}<label class="checkbox-row" aria-label="Allow email access"><input type="checkbox" name="allow_email" value="on" checked></label>{% endif %}
+    </div>
+    {% if let Some(intro) = group.intro %}<p class="permission-intro">{{ intro|safe }}</p>{% endif %}
+    {% if let Some(table) = group.rpc_table %}
+    <div class="table-wrap"><table class="table">
+      <thead><tr><th>Call</th><th>Towards</th></tr></thead>
+      <tbody>
+      {% for row in table.rows %}{% for lxm in row.lxms %}
+        <tr>
+          <td>{% if lxm == "*" %}Any method{% else %}<code>{{ lxm }}</code>{% endif %}</td>
+          {% if loop.first %}<td rowspan="{{ row.lxms.len() }}" title="{{ row.aud }}">{% if row.aud_is_prose %}{{ row.aud_label|safe }}{% else %}<code>{{ row.aud_label|safe }}</code>{% endif %}</td>{% endif %}
+        </tr>
+      {% endfor %}{% endfor %}
+      </tbody>
+    </table></div>
+    {% endif %}
+    {% if let Some(table) = group.repo_table %}
+    <div class="table-wrap"><table class="table">
+      <thead><tr><th>Data</th><th class="check">Create</th><th class="check">Update</th><th class="check">Delete</th></tr></thead>
+      <tbody>
+      {% for row in table.rows %}
+        <tr>
+          <td>{% if row.collection == "*" %}Any collection{% else %}<code>{{ row.collection }}</code>{% endif %}</td>
+          <td class="check">{% if row.create %}{% include "icons/check.svg.html" %}{% endif %}</td>
+          <td class="check">{% if row.update %}{% include "icons/check.svg.html" %}{% endif %}</td>
+          <td class="check">{% if row.delete %}{% include "icons/check.svg.html" %}{% endif %}</td>
+        </tr>
+      {% endfor %}
+      {% if table.blobs %}<tr><td>Blob storage</td><td class="check" colspan="3">Upload files</td></tr>{% endif %}
+      </tbody>
+    </table></div>
+    {% endif %}
+  </div>
+</div>

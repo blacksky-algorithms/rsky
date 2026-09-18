@@ -1,4 +1,6 @@
 use http_auth_basic::Credentials;
+pub mod oauth;
+
 use rocket::http::{ContentType, Header};
 use rocket::local::asynchronous::Client;
 use rocket::serde::json::json;
@@ -49,7 +51,32 @@ fn start_mock_plc_directory() -> u16 {
             // notification fan-out resolve and deliver hermetically.
             // `/{did}/data` is the PLC document-data shape an account's own
             // DID document is validated against.
-            let body = if let Some(did) = did.strip_suffix("/log/audit") {
+            let body = if let Some(did) = did.strip_suffix("/log/last") {
+                // The last operation of any did, in the shape the PLC client
+                // builds the next one from; a POST of that next one lands in
+                // the branch below and is acknowledged.
+                let hostname =
+                    std::env::var("PDS_HOSTNAME").unwrap_or_else(|_| "localhost".to_string());
+                let rotation_key = rsky_crypto::utils::encode_did_key(
+                    &rsky_pds::apis::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR.public_key(),
+                );
+                let signing_key = PUBLISHED_SIGNING_KEY
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| rotation_key.clone());
+                format!(
+                    "{{\"type\":\"plc_operation\",\"rotationKeys\":[\"{rotation_key}\"],\
+                     \"verificationMethods\":{{\"atproto\":\"{signing_key}\"}},\
+                     \"alsoKnownAs\":[\"at://foo{domain}\"],\
+                     \"services\":{{\"atproto_pds\":{{\"type\":\"AtprotoPersonalDataServer\",\
+                     \"endpoint\":\"https://{hostname}\"}}}},\"prev\":null,\
+                     \"sig\":\"c2ln\"}}"
+                )
+                .replace("{did}", did)
+            } else if req.starts_with("POST ") {
+                "{}".to_string()
+            } else if let Some(did) = did.strip_suffix("/log/audit") {
                 let hostname =
                     std::env::var("PDS_HOSTNAME").unwrap_or_else(|_| "localhost".to_string());
                 format!(

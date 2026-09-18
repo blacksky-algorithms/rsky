@@ -12,14 +12,15 @@ use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::server::RequestEmailUpdateOutput;
 
-async fn inner_request_email_update(
-    auth: Scoped<OAuthForbiddenEmail, AccessStandardIncludeChecks>,
-    account_manager: AccountManager,
-) -> Result<RequestEmailUpdateOutput> {
-    let did = auth.did().await?;
+/// Mails an update token when the account's address is confirmed; returns
+/// whether one is required to change the address.
+pub(crate) async fn request_email_update_for(
+    did: &str,
+    account_manager: &AccountManager,
+) -> Result<bool> {
     let account = account_manager
         .get_account(
-            &did,
+            did,
             Some(AvailabilityFlags {
                 include_deactivated: Some(true),
                 include_taken_down: Some(true),
@@ -31,12 +32,12 @@ async fn inner_request_email_update(
             let token_required = account.email_confirmed_at.is_some();
             if token_required {
                 let token = account_manager
-                    .create_email_token(&did, EmailTokenPurpose::UpdateEmail)
+                    .create_email_token(did, EmailTokenPurpose::UpdateEmail)
                     .await?;
                 mailer::send_update_email(email, TokenParam { token }).await?;
             }
 
-            Ok(RequestEmailUpdateOutput { token_required })
+            Ok(token_required)
         } else {
             bail!("Account does not have an email address")
         }
@@ -62,8 +63,8 @@ pub async fn request_email_update(
             caller.bypass,
         )
         .await?;
-    match inner_request_email_update(auth, account_manager).await {
-        Ok(res) => Ok(Json(res)),
+    match request_email_update_for(&did, &account_manager).await {
+        Ok(token_required) => Ok(Json(RequestEmailUpdateOutput { token_required })),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)

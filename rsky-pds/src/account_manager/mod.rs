@@ -251,6 +251,31 @@ impl AccountManager {
         account::deactivate_account(did, delete_after, &self.db).await
     }
 
+    /// Deactivates the account and, in the same transaction, revokes every
+    /// way back in that does not go through a sign-in: OAuth sessions, the
+    /// clients they had authorized, and app passwords.
+    pub async fn deactivate_account_and_credentials(
+        &self,
+        did: &str,
+        delete_after: Option<String>,
+    ) -> Result<()> {
+        self.admit(did)?;
+        let did = did.to_string();
+        let deactivated_at = rsky_common::now();
+        self.db
+            .tx(move |tx| {
+                tx.execute("DELETE FROM token WHERE did = ?1", [&did])?;
+                tx.execute("DELETE FROM authorized_client WHERE did = ?1", [&did])?;
+                tx.execute("DELETE FROM app_password WHERE did = ?1", [&did])?;
+                tx.execute(
+                    "UPDATE actor SET \"deactivatedAt\" = ?1, \"deleteAfter\" = ?2 WHERE did = ?3",
+                    rusqlite::params![deactivated_at, delete_after, did],
+                )?;
+                Ok(())
+            })
+            .await
+    }
+
     pub async fn activate_account(&self, did: &str) -> Result<()> {
         self.admit(did)?;
         account::activate_account(did, &self.db).await

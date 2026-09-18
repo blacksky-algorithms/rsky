@@ -199,9 +199,17 @@ impl BunnyClient {
         self.dir_url_at(video_id, "playlist.m3u8", self.token_expiry())
     }
 
+    pub fn get_playlist_url_until(&self, video_id: &str, expires: i64) -> String {
+        self.dir_url_at(video_id, "playlist.m3u8", self.token_expiry().min(expires))
+    }
+
     /// Thumbnail URL (same /{guid}/ directory token).
     pub fn get_thumbnail_url(&self, video_id: &str) -> String {
         self.dir_url_at(video_id, "thumbnail.jpg", self.token_expiry())
+    }
+
+    pub fn get_thumbnail_url_until(&self, video_id: &str, expires: i64) -> String {
+        self.dir_url_at(video_id, "thumbnail.jpg", self.token_expiry().min(expires))
     }
 
     /// Token TTL: the longest redirect cache lifetime (a cached 307 must never

@@ -16,6 +16,8 @@ pub enum OAuthError {
     #[error("{0}")]
     InvalidGrant(String),
     #[error("{0}")]
+    InvalidScope(String),
+    #[error("{0}")]
     ServerError(String),
 }
 
@@ -32,6 +34,7 @@ impl OAuthError {
             Self::UseDpopNonce(_) => "use_dpop_nonce",
             Self::InvalidClient(_) => "invalid_client",
             Self::InvalidGrant(_) => "invalid_grant",
+            Self::InvalidScope(_) => "invalid_scope",
             Self::ServerError(_) => "server_error",
         }
     }
@@ -44,6 +47,7 @@ impl OAuthError {
             | Self::UseDpopNonce(description)
             | Self::InvalidClient(description)
             | Self::InvalidGrant(description)
+            | Self::InvalidScope(description)
             | Self::ServerError(description) => description,
         }
     }
@@ -76,7 +80,7 @@ mod tests {
 
     #[test]
     fn error_codes_and_statuses() {
-        let cases: [(OAuthError, &str, &str, u16); 7] = [
+        let cases: [(OAuthError, &str, &str, u16); 8] = [
             (
                 OAuthError::InvalidRequest("a".into()),
                 "invalid_request",
@@ -111,6 +115,12 @@ mod tests {
                 OAuthError::InvalidGrant("f".into()),
                 "invalid_grant",
                 "f",
+                400,
+            ),
+            (
+                OAuthError::InvalidScope("h".into()),
+                "invalid_scope",
+                "h",
                 400,
             ),
             (

@@ -5,7 +5,7 @@ use anyhow::Result;
 use rsky_common::time::from_str_to_micros;
 use rsky_common::RFC3339_VARIANT;
 use rsky_oauth::request::RequestData;
-use rsky_oauth::store::{AccountInfo, DeviceData, OAuthStore};
+use rsky_oauth::store::{AccountInfo, DeviceAccount, DeviceData, OAuthStore};
 use rsky_oauth::token::{TokenData, TokenInfo};
 use rsky_oauth::types::{AuthorizationRequestParameters, ClientAuth};
 use rsky_oauth::OAuthError;
@@ -38,6 +38,10 @@ fn iso_to_secs(iso: &str) -> Result<u64, OAuthError> {
     Ok(from_str_to_micros(iso).map_err(server_error)? as u64 / 1_000_000)
 }
 
+const UPSERT_ACCOUNT_DEVICE: &str = "INSERT INTO account_device \
+    (did, \"deviceId\", \"createdAt\", \"updatedAt\") VALUES (?1, ?2, ?3, ?3) \
+    ON CONFLICT (\"deviceId\", did) DO UPDATE SET \"updatedAt\" = excluded.\"updatedAt\"";
+
 fn to_json<T: serde::Serialize>(value: &T) -> Result<String, OAuthError> {
     serde_json::to_string(value).map_err(server_error)
 }
@@ -51,7 +55,57 @@ fn actor_to_account_info(actor: account::ActorAccount) -> AccountInfo {
         did: actor.did,
         handle: actor.handle,
         email: actor.email,
+        email_verified: actor.email_confirmed_at.is_some(),
         deactivated: actor.deactivated_at.is_some(),
+    }
+}
+
+fn device_session_changed() -> OAuthError {
+    OAuthError::InvalidRequest("device session changed".to_string())
+}
+
+struct DeviceAccountRow {
+    did: String,
+    device_id: String,
+    created_at: String,
+    updated_at: String,
+    session_id: String,
+    user_agent: Option<String>,
+    ip_address: String,
+    last_seen_at: String,
+}
+
+impl DeviceAccountRow {
+    const SELECT: &'static str = "SELECT ad.did, ad.\"deviceId\", ad.\"createdAt\", \
+        ad.\"updatedAt\", d.\"sessionId\", d.\"userAgent\", d.\"ipAddress\", d.\"lastSeenAt\" \
+        FROM account_device ad JOIN device d ON d.id = ad.\"deviceId\"";
+
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            did: row.get("did")?,
+            device_id: row.get("deviceId")?,
+            created_at: row.get("createdAt")?,
+            updated_at: row.get("updatedAt")?,
+            session_id: row.get("sessionId")?,
+            user_agent: row.get("userAgent")?,
+            ip_address: row.get("ipAddress")?,
+            last_seen_at: row.get("lastSeenAt")?,
+        })
+    }
+
+    fn into_device_account(self, account: AccountInfo) -> Result<DeviceAccount, OAuthError> {
+        Ok(DeviceAccount {
+            device_id: self.device_id,
+            account,
+            device: DeviceData {
+                session_id: self.session_id,
+                user_agent: self.user_agent,
+                ip_address: self.ip_address,
+                last_seen_at: iso_to_secs(&self.last_seen_at)?,
+            },
+            created_at: iso_to_secs(&self.created_at)?,
+            updated_at: iso_to_secs(&self.updated_at)?,
+        })
     }
 }
 
@@ -148,6 +202,12 @@ impl TokenRow {
     }
 }
 
+async fn execute_where(db: &Db, sql: &'static str, value: String) -> Result<usize, OAuthError> {
+    db.run(move |conn| Ok(conn.execute(sql, params![value])?))
+        .await
+        .map_err(server_error)
+}
+
 async fn find_token_where(
     db: &Db,
     condition: &'static str,
@@ -166,6 +226,41 @@ async fn find_token_where(
         .await
         .map_err(server_error)?;
     row.map(TokenRow::into_token_info).transpose()
+}
+
+impl PdsOAuthStore {
+    /// Device memberships matching `condition` over the `account_device`
+    /// (`ad`) and `device` (`d`) join, most recently authenticated first.
+    async fn device_accounts_where(
+        &self,
+        condition: &'static str,
+        values: Vec<String>,
+    ) -> Result<Vec<DeviceAccount>, OAuthError> {
+        let rows: Vec<DeviceAccountRow> = self
+            .db
+            .run(move |conn| {
+                let mut stmt = conn.prepare(&format!(
+                    "{} WHERE {condition} ORDER BY ad.\"updatedAt\" DESC",
+                    DeviceAccountRow::SELECT
+                ))?;
+                let rows = stmt
+                    .query_map(
+                        rusqlite::params_from_iter(values.iter()),
+                        DeviceAccountRow::from_row,
+                    )?
+                    .collect::<Result<Vec<DeviceAccountRow>, rusqlite::Error>>()?;
+                Ok(rows)
+            })
+            .await
+            .map_err(server_error)?;
+        let mut found = Vec::with_capacity(rows.len());
+        for row in rows {
+            if let Some(account) = self.get_account(&row.did).await? {
+                found.push(row.into_device_account(account)?);
+            }
+        }
+        Ok(found)
+    }
 }
 
 #[async_trait::async_trait]
@@ -381,10 +476,12 @@ impl OAuthStore for PdsOAuthStore {
         new_refresh_token: &str,
         updated_at: u64,
         expires_at: u64,
+        scope: Option<&str>,
     ) -> Result<(), OAuthError> {
         let token_id = token_id.to_string();
         let new_token_id = new_token_id.to_string();
         let new_refresh_token = new_refresh_token.to_string();
+        let scope = scope.map(String::from);
         self.db
             .tx(move |tx| {
                 let row: Option<(i64, Option<String>)> = tx
@@ -414,13 +511,15 @@ impl OAuthStore for PdsOAuthStore {
                 }
                 tx.execute(
                     "UPDATE token SET \"tokenId\" = ?2, \"currentRefreshToken\" = ?3, \
-                     \"updatedAt\" = ?4, \"expiresAt\" = ?5 WHERE id = ?1",
+                     \"updatedAt\" = ?4, \"expiresAt\" = ?5, scope = COALESCE(?6, scope) \
+                     WHERE id = ?1",
                     params![
                         pk,
                         new_token_id,
                         new_refresh_token,
                         secs_to_iso(updated_at),
                         secs_to_iso(expires_at),
+                        scope,
                     ],
                 )?;
                 Ok(())
@@ -430,17 +529,42 @@ impl OAuthStore for PdsOAuthStore {
     }
 
     async fn delete_token(&self, token_id: &str) -> Result<(), OAuthError> {
-        let token_id = token_id.to_string();
-        self.db
+        execute_where(
+            &self.db,
+            "DELETE FROM token WHERE \"tokenId\" = ?1",
+            token_id.to_string(),
+        )
+        .await
+        .map(drop)
+    }
+
+    async fn list_account_tokens(&self, did: &str) -> Result<Vec<TokenInfo>, OAuthError> {
+        let did = did.to_string();
+        let rows: Vec<TokenRow> = self
+            .db
             .run(move |conn| {
-                conn.execute(
-                    "DELETE FROM token WHERE \"tokenId\" = ?1",
-                    params![token_id],
-                )?;
-                Ok(())
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {} FROM token WHERE did = ?1 ORDER BY \"createdAt\" DESC, id DESC",
+                    TokenRow::COLUMNS
+                ))?;
+                let rows = stmt
+                    .query_map(params![did], TokenRow::from_row)?
+                    .collect::<Result<Vec<TokenRow>, rusqlite::Error>>()?;
+                Ok(rows)
             })
             .await
-            .map_err(server_error)
+            .map_err(server_error)?;
+        rows.into_iter().map(TokenRow::into_token_info).collect()
+    }
+
+    async fn remove_tokens_by_did(&self, did: &str) -> Result<(), OAuthError> {
+        execute_where(
+            &self.db,
+            "DELETE FROM token WHERE did = ?1",
+            did.to_string(),
+        )
+        .await
+        .map(drop)
     }
 
     async fn authenticate_account(
@@ -560,73 +684,156 @@ impl OAuthStore for PdsOAuthStore {
         Ok(())
     }
 
-    async fn upsert_device_account(&self, device_id: &str, did: &str) -> Result<(), OAuthError> {
+    async fn touch_device(
+        &self,
+        device_id: &str,
+        user_agent: Option<&str>,
+        ip_address: &str,
+        last_seen_at: u64,
+    ) -> Result<(), OAuthError> {
+        let device_id = device_id.to_string();
+        let user_agent = user_agent.map(String::from);
+        let ip_address = ip_address.to_string();
+        let updated = self
+            .db
+            .run(move |conn| {
+                Ok(conn.execute(
+                    "UPDATE device SET \"userAgent\" = ?2, \"ipAddress\" = ?3, \
+                     \"lastSeenAt\" = ?4 WHERE id = ?1",
+                    params![device_id, user_agent, ip_address, secs_to_iso(last_seen_at)],
+                )?)
+            })
+            .await
+            .map_err(server_error)?;
+        if updated == 0 {
+            return Err(OAuthError::ServerError("unknown device".to_string()));
+        }
+        Ok(())
+    }
+
+    async fn rotate_device_session(
+        &self,
+        device_id: &str,
+        expected_session_id: &str,
+        new_session_id: &str,
+    ) -> Result<(), OAuthError> {
+        let device_id = device_id.to_string();
+        let expected_session_id = expected_session_id.to_string();
+        let new_session_id = new_session_id.to_string();
+        let updated = self
+            .db
+            .run(move |conn| {
+                Ok(conn.execute(
+                    "UPDATE device SET \"sessionId\" = ?3 WHERE id = ?1 AND \"sessionId\" = ?2",
+                    params![device_id, expected_session_id, new_session_id],
+                )?)
+            })
+            .await
+            .map_err(server_error)?;
+        if updated == 0 {
+            return Err(device_session_changed());
+        }
+        Ok(())
+    }
+
+    async fn upsert_device_account(
+        &self,
+        device_id: &str,
+        did: &str,
+        now: u64,
+    ) -> Result<(), OAuthError> {
         let device_id = device_id.to_string();
         let did = did.to_string();
-        let now = rsky_common::now();
+        let now = secs_to_iso(now);
         self.db
             .run(move |conn| {
-                conn.execute(
-                    "INSERT INTO account_device (did, \"deviceId\", \"createdAt\", \"updatedAt\") \
-                     VALUES (?1, ?2, ?3, ?3) \
-                     ON CONFLICT (\"deviceId\", did) DO UPDATE SET \"updatedAt\" = ?3",
-                    params![did, device_id, now],
-                )?;
+                conn.execute(UPSERT_ACCOUNT_DEVICE, params![did, device_id, now])?;
                 Ok(())
             })
             .await
             .map_err(server_error)
     }
 
+    async fn authenticate_device_account(
+        &self,
+        device_id: &str,
+        expected_session_id: &str,
+        new_session_id: &str,
+        did: &str,
+        now: u64,
+    ) -> Result<(), OAuthError> {
+        let device_id = device_id.to_string();
+        let expected_session_id = expected_session_id.to_string();
+        let new_session_id = new_session_id.to_string();
+        let did = did.to_string();
+        let now = secs_to_iso(now);
+        let rotated = self
+            .db
+            .tx(move |tx| {
+                let rotated = tx.execute(
+                    "UPDATE device SET \"sessionId\" = ?3 WHERE id = ?1 AND \"sessionId\" = ?2",
+                    params![device_id, expected_session_id, new_session_id],
+                )?;
+                if rotated == 0 {
+                    return Ok(false);
+                }
+                tx.execute(UPSERT_ACCOUNT_DEVICE, params![did, device_id, now])?;
+                Ok(true)
+            })
+            .await
+            .map_err(server_error)?;
+        if !rotated {
+            return Err(device_session_changed());
+        }
+        Ok(())
+    }
+
     async fn get_device_account(
         &self,
         device_id: &str,
         did: &str,
-    ) -> Result<Option<AccountInfo>, OAuthError> {
-        let device_id = device_id.to_string();
-        let did = did.to_string();
-        let linked: Option<String> = self
-            .db
-            .run(move |conn| {
-                Ok(conn
-                    .query_row(
-                        "SELECT did FROM account_device WHERE \"deviceId\" = ?1 AND did = ?2",
-                        params![device_id, did],
-                        |row| row.get(0),
-                    )
-                    .optional()?)
-            })
-            .await
-            .map_err(server_error)?;
-        match linked {
-            Some(did) => self.get_account(&did).await,
-            None => Ok(None),
-        }
+    ) -> Result<Option<DeviceAccount>, OAuthError> {
+        Ok(self
+            .device_accounts_where(
+                "ad.\"deviceId\" = ?1 AND ad.did = ?2",
+                vec![device_id.to_string(), did.to_string()],
+            )
+            .await?
+            .into_iter()
+            .next())
     }
 
-    async fn list_device_accounts(&self, device_id: &str) -> Result<Vec<AccountInfo>, OAuthError> {
-        let device_id = device_id.to_string();
-        let dids: Vec<String> = self
-            .db
-            .run(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT did FROM account_device WHERE \"deviceId\" = ?1 \
-                     ORDER BY \"updatedAt\" DESC",
-                )?;
-                let dids = stmt
-                    .query_map(params![device_id], |row| row.get::<_, String>(0))?
-                    .collect::<Result<Vec<String>, rusqlite::Error>>()?;
-                Ok(dids)
-            })
+    async fn get_device_account_for_session(
+        &self,
+        device_id: &str,
+        session_id: &str,
+        did: &str,
+    ) -> Result<Option<DeviceAccount>, OAuthError> {
+        Ok(self
+            .device_accounts_where(
+                "ad.\"deviceId\" = ?1 AND ad.did = ?2 AND d.\"sessionId\" = ?3",
+                vec![
+                    device_id.to_string(),
+                    did.to_string(),
+                    session_id.to_string(),
+                ],
+            )
+            .await?
+            .into_iter()
+            .next())
+    }
+
+    async fn list_device_accounts(
+        &self,
+        device_id: &str,
+    ) -> Result<Vec<DeviceAccount>, OAuthError> {
+        self.device_accounts_where("ad.\"deviceId\" = ?1", vec![device_id.to_string()])
             .await
-            .map_err(server_error)?;
-        let mut accounts = Vec::with_capacity(dids.len());
-        for did in dids {
-            if let Some(account) = self.get_account(&did).await? {
-                accounts.push(account);
-            }
-        }
-        Ok(accounts)
+    }
+
+    async fn list_account_devices(&self, did: &str) -> Result<Vec<DeviceAccount>, OAuthError> {
+        self.device_accounts_where("ad.did = ?1", vec![did.to_string()])
+            .await
     }
 
     async fn remove_device_account(&self, device_id: &str, did: &str) -> Result<(), OAuthError> {
@@ -706,6 +913,16 @@ impl OAuthStore for PdsOAuthStore {
             Ok(scopes)
         })
         .transpose()
+    }
+
+    async fn delete_authorized_clients(&self, did: &str) -> Result<(), OAuthError> {
+        execute_where(
+            &self.db,
+            "DELETE FROM authorized_client WHERE did = ?1",
+            did.to_string(),
+        )
+        .await
+        .map(drop)
     }
 }
 
@@ -877,13 +1094,14 @@ mod tests {
         assert_eq!(by_refresh.token_id, "tok-1");
 
         store
-            .rotate_token("tok-1", "tok-2", "ref-2", NOW + 100, NOW + 100 + 3600)
+            .rotate_token("tok-1", "tok-2", "ref-2", NOW + 100, NOW + 100 + 3600, None)
             .await
             .unwrap();
         assert!(store.read_token("tok-1").await.unwrap().is_none());
         let rotated = store.read_token("tok-2").await.unwrap().unwrap();
         assert_eq!(rotated.data.updated_at, NOW + 100);
         assert_eq!(rotated.data.created_at, NOW);
+        assert_eq!(rotated.data.scope.as_deref(), Some("atproto"));
         assert_eq!(rotated.current_refresh_token.as_deref(), Some("ref-2"));
 
         // the rotated-out refresh token still resolves (replay detection)
@@ -902,13 +1120,47 @@ mod tests {
             .is_err());
         // rotating onto a used refresh token is rejected
         assert!(store
-            .rotate_token("tok-2", "tok-4", "ref-1", NOW + 200, NOW + 200 + 3600)
+            .rotate_token("tok-2", "tok-4", "ref-1", NOW + 200, NOW + 200 + 3600, None)
             .await
             .is_err());
         assert!(store
-            .rotate_token("tok-missing", "tok-5", "ref-5", NOW, NOW)
+            .rotate_token("tok-missing", "tok-5", "ref-5", NOW, NOW, None)
             .await
             .is_err());
+        // a recompiled scope replaces the stored one
+        store
+            .rotate_token(
+                "tok-2",
+                "tok-6",
+                "ref-6",
+                NOW + 300,
+                NOW + 300 + 3600,
+                Some("atproto repo:app.example.record"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .read_token("tok-6")
+                .await
+                .unwrap()
+                .unwrap()
+                .data
+                .scope
+                .as_deref(),
+            Some("atproto repo:app.example.record")
+        );
+        store
+            .rotate_token(
+                "tok-6",
+                "tok-2",
+                "ref-2b",
+                NOW + 400,
+                NOW + 400 + 3600,
+                None,
+            )
+            .await
+            .unwrap();
 
         // deleting the token cascades used_refresh_token rows
         store.delete_token("tok-2").await.unwrap();
@@ -939,34 +1191,252 @@ mod tests {
         updated.last_seen_at = NOW + 60;
         updated.user_agent = None;
         store.update_device("dev-1", &updated).await.unwrap();
-        assert_eq!(store.read_device("dev-1").await.unwrap(), Some(updated));
+        assert_eq!(
+            store.read_device("dev-1").await.unwrap().as_ref(),
+            Some(&updated)
+        );
 
         assert!(store
             .get_device_account("dev-1", DID)
             .await
             .unwrap()
             .is_none());
-        store.upsert_device_account("dev-1", DID).await.unwrap();
-        store.upsert_device_account("dev-1", DID).await.unwrap();
-        let account = store
+        store
+            .upsert_device_account("dev-1", DID, NOW)
+            .await
+            .unwrap();
+        store
+            .upsert_device_account("dev-1", DID, NOW + 5)
+            .await
+            .unwrap();
+        let linked = store
             .get_device_account("dev-1", DID)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(account.did, DID);
-        assert_eq!(account.handle.as_deref(), Some(HANDLE));
+        assert_eq!(linked.account.did, DID);
+        assert_eq!(linked.account.handle.as_deref(), Some(HANDLE));
+        assert!(!linked.account.email_verified);
+        assert_eq!(linked.device_id, "dev-1");
+        assert_eq!(linked.device, updated);
+        assert_eq!(linked.created_at, NOW);
+        assert_eq!(linked.updated_at, NOW + 5);
         assert_eq!(store.list_device_accounts("dev-1").await.unwrap().len(), 1);
+        assert_eq!(store.list_account_devices(DID).await.unwrap().len(), 1);
         assert!(store
             .list_device_accounts("dev-2")
             .await
             .unwrap()
             .is_empty());
+        // a taken-down account's memberships are invisible
+        store
+            .upsert_device_account("dev-1", DID, NOW)
+            .await
+            .unwrap();
+        store
+            .db
+            .run(|conn| {
+                conn.execute(
+                    "UPDATE actor SET \"takedownRef\" = 'ref' WHERE did = ?1",
+                    params![DID],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(store
+            .list_device_accounts("dev-1")
+            .await
+            .unwrap()
+            .is_empty());
+        store
+            .db
+            .run(|conn| {
+                conn.execute(
+                    "UPDATE actor SET \"takedownRef\" = NULL WHERE did = ?1",
+                    params![DID],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(store.list_device_accounts("dev-1").await.unwrap().len(), 1);
+
         store.remove_device_account("dev-1", DID).await.unwrap();
         assert!(store
             .list_device_accounts("dev-1")
             .await
             .unwrap()
             .is_empty());
+        assert!(store.list_account_devices(DID).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn touch_and_rotate_device_session() {
+        let (_dir, store) = test_store().await;
+        assert!(store
+            .touch_device("dev-1", None, "10.0.0.1", NOW)
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .rotate_device_session("dev-1", "ses-1", "ses-2")
+                .await
+                .unwrap_err(),
+            device_session_changed()
+        );
+        store.create_device("dev-1", &device_data()).await.unwrap();
+        store
+            .touch_device("dev-1", Some("other-agent"), "10.0.0.1", NOW + 60)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.read_device("dev-1").await.unwrap(),
+            Some(DeviceData {
+                session_id: "ses-1".to_string(),
+                user_agent: Some("other-agent".to_string()),
+                ip_address: "10.0.0.1".to_string(),
+                last_seen_at: NOW + 60,
+            })
+        );
+        assert_eq!(
+            store
+                .rotate_device_session("dev-1", "ses-stale", "ses-2")
+                .await
+                .unwrap_err(),
+            device_session_changed()
+        );
+        store
+            .rotate_device_session("dev-1", "ses-1", "ses-2")
+            .await
+            .unwrap();
+        // a touch carrying a pre-rotation snapshot leaves the new secret alone
+        store
+            .touch_device("dev-1", Some("test-agent"), "127.0.0.1", NOW + 120)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .read_device("dev-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .session_id,
+            "ses-2"
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticate_device_account_is_one_transaction() {
+        let (_dir, store) = test_store().await;
+        store.create_device("dev-1", &device_data()).await.unwrap();
+
+        // a failed compare-and-set writes nothing
+        assert_eq!(
+            store
+                .authenticate_device_account("dev-1", "ses-stale", "ses-2", DID, NOW)
+                .await
+                .unwrap_err(),
+            device_session_changed()
+        );
+        assert!(store
+            .get_device_account("dev-1", DID)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store
+                .read_device("dev-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .session_id,
+            "ses-1"
+        );
+
+        store
+            .authenticate_device_account("dev-1", "ses-1", "ses-2", DID, NOW)
+            .await
+            .unwrap();
+        assert!(store
+            .get_device_account_for_session("dev-1", "ses-1", DID)
+            .await
+            .unwrap()
+            .is_none());
+        let linked = store
+            .get_device_account_for_session("dev-1", "ses-2", DID)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(linked.device.session_id, "ses-2");
+        assert_eq!(linked.created_at, NOW);
+        assert_eq!(linked.updated_at, NOW);
+        assert!(store
+            .get_device_account_for_session("dev-1", "ses-2", "did:plc:other")
+            .await
+            .unwrap()
+            .is_none());
+
+        // re-authentication advances updated_at only; a later failed CAS
+        // leaves it alone
+        store
+            .authenticate_device_account("dev-1", "ses-2", "ses-3", DID, NOW + 50)
+            .await
+            .unwrap();
+        assert!(store
+            .authenticate_device_account("dev-1", "ses-2", "ses-4", DID, NOW + 90)
+            .await
+            .is_err());
+        let linked = store
+            .get_device_account("dev-1", DID)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(linked.created_at, NOW);
+        assert_eq!(linked.updated_at, NOW + 50);
+        assert_eq!(linked.device.session_id, "ses-3");
+    }
+
+    #[tokio::test]
+    async fn account_token_listing_and_removal() {
+        let (_dir, store) = test_store().await;
+        assert!(store.list_account_tokens(DID).await.unwrap().is_empty());
+        let mut older = token_data();
+        older.created_at = NOW - 10;
+        older.code = Some("cod-older".to_string());
+        store
+            .create_token("tok-older", &older, Some("ref-older"))
+            .await
+            .unwrap();
+        store
+            .create_token("tok-newer", &token_data(), Some("ref-newer"))
+            .await
+            .unwrap();
+        let mut other = token_data();
+        other.did = "did:plc:other".to_string();
+        other.code = None;
+        store
+            .create_token("tok-other", &other, Some("ref-other"))
+            .await
+            .unwrap();
+
+        let ids: Vec<String> = store
+            .list_account_tokens(DID)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|token| token.token_id)
+            .collect();
+        assert_eq!(ids, vec!["tok-newer", "tok-older"]);
+
+        store.remove_tokens_by_did(DID).await.unwrap();
+        assert!(store.list_account_tokens(DID).await.unwrap().is_empty());
+        assert!(store.read_token("tok-other").await.unwrap().is_some());
+        assert!(store
+            .find_token_by_refresh_token("ref-newer")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -979,6 +1449,7 @@ mod tests {
             .unwrap();
         assert_eq!(by_handle.did, DID);
         assert!(!by_handle.deactivated);
+        assert!(!by_handle.email_verified);
         let by_email = store
             .authenticate_account("ALICE@example.com", "password123")
             .await
@@ -1040,6 +1511,50 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("atproto transition:generic")
+        );
+        store
+            .set_authorized_client(DID, "client-2", "atproto")
+            .await
+            .unwrap();
+        store.delete_authorized_clients(DID).await.unwrap();
+        for client_id in ["client-1", "client-2"] {
+            assert!(store
+                .get_authorized_client_scope(DID, client_id)
+                .await
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn email_verification_is_reported() {
+        let (_dir, store) = test_store().await;
+        assert!(
+            !store
+                .get_account(DID)
+                .await
+                .unwrap()
+                .unwrap()
+                .email_verified
+        );
+        store
+            .db
+            .run(|conn| {
+                conn.execute(
+                    "UPDATE account SET \"emailConfirmedAt\" = ?1 WHERE did = ?2",
+                    params![secs_to_iso(NOW), DID],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(
+            store
+                .get_account(DID)
+                .await
+                .unwrap()
+                .unwrap()
+                .email_verified
         );
     }
 }
