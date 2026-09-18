@@ -621,19 +621,29 @@ async fn sync_get_blocks_returns_a_car_of_exactly_the_requested_blocks() {
 async fn sync_endpoints_reject_a_request_missing_a_required_parameter() {
     let (_dir, client) = common::get_client().await;
 
-    for path in [
-        "/xrpc/com.atproto.sync.getBlocks".to_string(),
-        "/xrpc/com.atproto.sync.getRecord".to_string(),
-        format!("/xrpc/com.atproto.sync.getRecord?did={DID}"),
-        format!("/xrpc/com.atproto.sync.getRecord?did={DID}&collection=com.example.record"),
+    for (path, message) in [
+        (
+            "/xrpc/com.atproto.sync.getBlocks".to_string(),
+            "Params must have the property \"did\"",
+        ),
+        (
+            "/xrpc/com.atproto.sync.getRecord".to_string(),
+            "Params must have the property \"did\"",
+        ),
+        (
+            format!("/xrpc/com.atproto.sync.getRecord?did={DID}"),
+            "Params must have the property \"collection\"",
+        ),
+        (
+            format!("/xrpc/com.atproto.sync.getRecord?did={DID}&collection=com.example.record"),
+            "Params must have the property \"rkey\"",
+        ),
     ] {
         let response = client.get(path.clone()).dispatch().await;
         assert_eq!(response.status(), Status::BadRequest, "{path}");
-        assert_eq!(
-            json_body(response).await["error"],
-            "InvalidRequest",
-            "{path}"
-        );
+        let body = json_body(response).await;
+        assert_eq!(body["error"], "InvalidRequest", "{path}");
+        assert_eq!(body["message"], message, "{path}");
     }
 }
 

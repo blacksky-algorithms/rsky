@@ -484,6 +484,31 @@ async fn test_unregister_push() {
     assert_eq!(response.status(), Status::BadRequest);
 }
 
+/// A query this server does not implement is handed to the proxy with the
+/// caller's credentials, where the outbound network policy applies: the
+/// mock appview is plain http on loopback, which it refuses.
+#[tokio::test]
+async fn unknown_queries_reach_the_proxy_and_its_network_policy() {
+    let (_dir, client) = common::get_client().await;
+    let token = get_access_token(&client).await;
+    let response = client
+        .get("/xrpc/app.bsky.notification.listNotifications?limit=5")
+        .header(Header::new("Authorization", format!("Bearer {token}")))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::BadRequest);
+    let body: serde_json::Value =
+        serde_json::from_str(&response.into_string().await.unwrap()).unwrap();
+    assert_eq!(body["error"], "InvalidRequest");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Invalid service url"),
+        "{body}"
+    );
+}
+
 #[tokio::test]
 async fn test_identity_resolution() {
     let (_dir, client) = common::get_client().await;

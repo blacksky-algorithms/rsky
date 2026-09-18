@@ -215,6 +215,56 @@ pub fn assert_account_scope(
     )
 }
 
+/// Subscriptions have no HTTP route in the reference, so a plain request for
+/// one falls through to its catch-all like any unknown method.
+const SUBSCRIPTIONS: [&str; 1] = ["/xrpc/com.atproto.sync.subscribeRepos"];
+
+/// Passes only requests for methods this server does not serve over HTTP.
+/// When it does, its own route has already turned the request down over the
+/// query parameters, so the request is a client error and is not proxied on:
+/// the reference validates parameters before anything else, authentication
+/// included.
+pub struct NotServedLocally;
+
+#[rocket::async_trait]
+impl<'r> rocket::request::FromRequest<'r> for NotServedLocally {
+    type Error = ApiError;
+
+    async fn from_request(req: &'r Request<'_>) -> rocket::request::Outcome<Self, Self::Error> {
+        let path = req.uri().path();
+        let mut declared = req
+            .rocket()
+            .routes()
+            .filter(|route| route.method == req.method() && route.uri.path() == path.as_str())
+            .flat_map(|route| {
+                route
+                    .uri
+                    .as_str()
+                    .split_once('?')
+                    .map_or("", |(_, q)| q)
+                    .split('&')
+            })
+            .filter_map(|segment| segment.strip_prefix('<')?.strip_suffix('>'))
+            .filter(|name| !name.ends_with(".."))
+            .peekable();
+        if SUBSCRIPTIONS.contains(&path.as_str()) || declared.peek().is_none() {
+            return rocket::request::Outcome::Success(Self);
+        }
+        let present: Vec<&str> = req
+            .uri()
+            .query()
+            .map(|query| query.segments().map(|(name, _)| name).collect())
+            .unwrap_or_default();
+        let message = match declared.find(|name| !present.contains(name)) {
+            Some(name) => format!("Params must have the property \"{name}\""),
+            None => "Invalid request parameters".to_string(),
+        };
+        let error = ApiError::InvalidRequest(message);
+        req.local_cache(|| Some(error.clone()));
+        rocket::request::Outcome::Error((Status::BadRequest, error))
+    }
+}
+
 // Lower ranks have higher presidence
 #[tracing::instrument(skip_all)]
 #[allow(unused_variables)]
@@ -222,6 +272,7 @@ pub fn assert_account_scope(
 pub async fn bsky_api_get_forwarder(
     nsid: Nsid,
     query: Option<&str>,
+    _local: NotServedLocally,
     auth: Scoped<RpcProxy>,
     req: ProxyRequest<'_>,
 ) -> Result<ProxyResponder, ApiError> {
@@ -1121,5 +1172,46 @@ mod tests {
     #[test]
     fn a_session_without_granted_scopes_is_unaffected() {
         assert_eq!(denials(&None), [false; 5]);
+    }
+
+    #[rocket::get("/xrpc/com.example.thing?<count>")]
+    fn thing(count: u8) -> String {
+        count.to_string()
+    }
+
+    #[rocket::get("/xrpc/<_nsid>?<_query..>", rank = 2)]
+    fn proxied(_nsid: &str, _query: Option<&str>, _local: NotServedLocally) -> &'static str {
+        "proxied"
+    }
+
+    async fn answer(client: &rocket::local::asynchronous::Client, path: &str) -> (Status, String) {
+        let response = client.get(path).dispatch().await;
+        let status = response.status();
+        (status, response.into_string().await.unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn only_methods_served_elsewhere_reach_the_proxy() {
+        let rocket = rocket::build()
+            .mount("/", rocket::routes![thing, proxied])
+            .register("/", rocket::catchers![crate::default_catcher]);
+        let client = rocket::local::asynchronous::Client::untracked(rocket)
+            .await
+            .unwrap();
+
+        let (status, text) = answer(&client, "/xrpc/com.example.other?x=1").await;
+        assert_eq!((status, text.as_str()), (Status::Ok, "proxied"));
+        let (status, text) = answer(&client, "/xrpc/com.example.thing?count=7").await;
+        assert_eq!((status, text.as_str()), (Status::Ok, "7"));
+
+        let (status, text) = answer(&client, "/xrpc/com.example.thing").await;
+        assert_eq!(status, Status::BadRequest);
+        assert!(
+            text.contains("Params must have the property \\\"count\\\""),
+            "{text}"
+        );
+        let (status, text) = answer(&client, "/xrpc/com.example.thing?count=many").await;
+        assert_eq!(status, Status::BadRequest);
+        assert!(text.contains("Invalid request parameters"), "{text}");
     }
 }
