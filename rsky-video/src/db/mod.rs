@@ -435,7 +435,7 @@ pub async fn get_bunny_video_id(
 
     // A retried upload leaves several video_jobs rows at one (did, video_cid);
     // aggregate so the lookup stays single-row, treating the video as private
-    // if any of those jobs was.
+    // if any job was private, even after a later public upload.
     let row = client
         .query_opt(
             "SELECT m.bunny_video_id, COALESCE(bool_or(j.private), FALSE) FROM videos.video_mappings m LEFT JOIN videos.video_jobs j ON j.did = m.did AND j.video_cid = m.cid WHERE m.did = $1 AND m.cid = $2 GROUP BY m.bunny_video_id",
@@ -473,13 +473,19 @@ mod tests {
     use deadpool_postgres::{Config as PgConfig, Runtime};
     use tokio_postgres::NoTls;
 
-    fn test_pool() -> Pool {
+    static MIGRATIONS: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+    async fn test_pool() -> Pool {
         let mut pg_config = PgConfig::new();
         pg_config.url =
             Some(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
-        pg_config
+        let pool = pg_config
             .create_pool(Some(Runtime::Tokio1), NoTls)
-            .expect("failed to create test pool")
+            .expect("failed to create test pool");
+        MIGRATIONS
+            .get_or_init(|| async { run_migrations(&pool).await.unwrap() })
+            .await;
+        pool
     }
 
     async fn insert_job(pool: &Pool, did: &str, video_cid: &str, private: bool) {
@@ -498,8 +504,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Postgres; run with TEST_DATABASE_URL set"]
     async fn lookup_tolerates_multiple_jobs_at_one_cid() {
-        let pool = test_pool();
-        run_migrations(&pool).await.unwrap();
+        let pool = test_pool().await;
 
         let did = format!("did:plc:test{}", Uuid::new_v4().simple());
         let cid = "bafkreihdupejzitesting1";
@@ -518,8 +523,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Postgres; run with TEST_DATABASE_URL set"]
     async fn mixed_privacy_jobs_resolve_private() {
-        let pool = test_pool();
-        run_migrations(&pool).await.unwrap();
+        let pool = test_pool().await;
 
         let did = format!("did:plc:test{}", Uuid::new_v4().simple());
         let cid = "bafkreihdupejzitesting2";
@@ -537,8 +541,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Postgres; run with TEST_DATABASE_URL set"]
     async fn mapping_without_job_resolves_public() {
-        let pool = test_pool();
-        run_migrations(&pool).await.unwrap();
+        let pool = test_pool().await;
 
         let did = format!("did:plc:test{}", Uuid::new_v4().simple());
         let cid = "bafkreihdupejzitesting3";
