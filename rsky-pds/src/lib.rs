@@ -469,8 +469,26 @@ pub struct RocketConfig {
     pub actor_store_directory: Option<String>,
 }
 
+/// Lifts the soft open-file limit to the hard one. A container's default
+/// soft limit is 1024, which a PDS holding a hundred actor stores and a
+/// few hundred connections exceeds, and the client then sees the raw
+/// "Too many open files" error.
+fn raise_open_file_limit() {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `limit` is plain data that outlives both calls.
+    let read = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0;
+    let before = limit.rlim_cur;
+    limit.rlim_cur = limit.rlim_max;
+    let raised = read && unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } == 0;
+    tracing::info!(before, hard = limit.rlim_max, raised, "open file limit");
+}
+
 pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
     dotenv().ok();
+    raise_open_file_limit();
 
     let mut cfg = env_to_cfg();
     // the reference PDS listens on PDS_PORT on every interface
@@ -900,4 +918,31 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
         .manage(lifecycle)
         .manage(admission)
         .manage(repairs)
+}
+
+#[cfg(test)]
+mod open_file_limit_tests {
+    use super::raise_open_file_limit;
+
+    fn current() -> libc::rlimit {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `limit` is plain data that outlives the call.
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+            0
+        );
+        limit
+    }
+
+    #[test]
+    fn the_soft_open_file_limit_is_lifted_to_the_hard_one() {
+        let before = current();
+        raise_open_file_limit();
+        let after = current();
+        assert!(after.rlim_cur >= before.rlim_cur);
+        assert_eq!(after.rlim_max, before.rlim_max);
+    }
 }
