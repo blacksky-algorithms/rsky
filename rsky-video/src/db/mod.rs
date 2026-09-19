@@ -126,6 +126,13 @@ pub async fn run_migrations(pool: &Pool) -> Result<()> {
 
     client
         .execute(
+            "CREATE INDEX IF NOT EXISTS idx_video_jobs_did_video_cid ON videos.video_jobs (did, video_cid)",
+            &[],
+        )
+        .await?;
+
+    client
+        .execute(
             r#"
             CREATE TABLE IF NOT EXISTS videos.upload_quotas (
                 did TEXT PRIMARY KEY,
@@ -426,9 +433,12 @@ pub async fn get_bunny_video_id(
 ) -> Result<Option<(String, bool)>> {
     let client = pool.get().await?;
 
+    // A retried upload leaves several video_jobs rows at one (did, video_cid);
+    // aggregate so the lookup stays single-row, treating the video as private
+    // if any of those jobs was.
     let row = client
         .query_opt(
-            "SELECT m.bunny_video_id, COALESCE(j.private, FALSE) FROM videos.video_mappings m LEFT JOIN videos.video_jobs j ON j.did = m.did AND j.video_cid = m.cid WHERE m.did = $1 AND m.cid = $2",
+            "SELECT m.bunny_video_id, COALESCE(bool_or(j.private), FALSE) FROM videos.video_mappings m LEFT JOIN videos.video_jobs j ON j.did = m.did AND j.video_cid = m.cid WHERE m.did = $1 AND m.cid = $2 GROUP BY m.bunny_video_id",
             &[&did, &cid],
         )
         .await?;
@@ -454,5 +464,89 @@ fn row_to_job(row: &tokio_postgres::Row) -> VideoJob {
         file_size: row.get(13),
         created_at: row.get(14),
         updated_at: row.get(15),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use deadpool_postgres::{Config as PgConfig, Runtime};
+    use tokio_postgres::NoTls;
+
+    fn test_pool() -> Pool {
+        let mut pg_config = PgConfig::new();
+        pg_config.url =
+            Some(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
+        pg_config
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .expect("failed to create test pool")
+    }
+
+    async fn insert_job(pool: &Pool, did: &str, video_cid: &str, private: bool) {
+        let client = pool.get().await.unwrap();
+        client
+            .execute(
+                "INSERT INTO videos.video_jobs (job_id, did, video_cid, private, state) VALUES ($1, $2, $3, $4, 'JOB_STATE_COMPLETED')",
+                &[&Uuid::new_v4(), &did, &video_cid, &private],
+            )
+            .await
+            .unwrap();
+    }
+
+    /// A DID that retries an upload gets multiple video_jobs rows at the same
+    /// video_cid; the playlist/thumbnail lookup must still return one row.
+    #[tokio::test]
+    #[ignore = "requires Postgres; run with TEST_DATABASE_URL set"]
+    async fn lookup_tolerates_multiple_jobs_at_one_cid() {
+        let pool = test_pool();
+        run_migrations(&pool).await.unwrap();
+
+        let did = format!("did:plc:test{}", Uuid::new_v4().simple());
+        let cid = "bafkreihdupejzitesting1";
+        save_video_mapping(&pool, &did, cid, "bunny-guid-1")
+            .await
+            .unwrap();
+        insert_job(&pool, &did, cid, false).await;
+        insert_job(&pool, &did, cid, false).await;
+
+        let got = get_bunny_video_id(&pool, &did, cid).await.unwrap();
+        assert_eq!(got, Some(("bunny-guid-1".to_string(), false)));
+    }
+
+    /// Fail closed: if ANY job at this (did, cid) marked the video private,
+    /// the lookup reports it private.
+    #[tokio::test]
+    #[ignore = "requires Postgres; run with TEST_DATABASE_URL set"]
+    async fn mixed_privacy_jobs_resolve_private() {
+        let pool = test_pool();
+        run_migrations(&pool).await.unwrap();
+
+        let did = format!("did:plc:test{}", Uuid::new_v4().simple());
+        let cid = "bafkreihdupejzitesting2";
+        save_video_mapping(&pool, &did, cid, "bunny-guid-2")
+            .await
+            .unwrap();
+        insert_job(&pool, &did, cid, false).await;
+        insert_job(&pool, &did, cid, true).await;
+
+        let got = get_bunny_video_id(&pool, &did, cid).await.unwrap();
+        assert_eq!(got, Some(("bunny-guid-2".to_string(), true)));
+    }
+
+    /// Mappings that predate job tracking have no video_jobs row at all.
+    #[tokio::test]
+    #[ignore = "requires Postgres; run with TEST_DATABASE_URL set"]
+    async fn mapping_without_job_resolves_public() {
+        let pool = test_pool();
+        run_migrations(&pool).await.unwrap();
+
+        let did = format!("did:plc:test{}", Uuid::new_v4().simple());
+        let cid = "bafkreihdupejzitesting3";
+        save_video_mapping(&pool, &did, cid, "bunny-guid-3")
+            .await
+            .unwrap();
+
+        let got = get_bunny_video_id(&pool, &did, cid).await.unwrap();
+        assert_eq!(got, Some(("bunny-guid-3".to_string(), false)));
     }
 }
