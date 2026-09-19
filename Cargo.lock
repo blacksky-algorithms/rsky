@@ -8468,7 +8468,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-lexicon"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
