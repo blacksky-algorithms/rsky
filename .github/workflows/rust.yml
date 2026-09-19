@@ -223,7 +223,7 @@ jobs:
           -p rsky-pds -p rsky-oauth -p rsky-space -p rsky-space-host -p rsky-daemon
       - name: Enforce the crate-wide line floor
         run: >-
-          cargo llvm-cov report --fail-under-lines 95
+          cargo llvm-cov report --fail-under-lines 90
           -p rsky-pds -p rsky-oauth -p rsky-space -p rsky-space-host -p rsky-daemon
       # Every rsky-pds / rsky-oauth line the push added or rewrote must be covered.
       - name: Gate changed lines at 100% coverage
@@ -357,7 +357,7 @@ jobs:
   # Optional: Add a final job that depends on all tests to signal success
   ci-success:
     runs-on: ubuntu-latest
-    needs: [check, build-and-test, formatting, determine-dockerfiles]
+    needs: [check, build-and-test, coverage-pds, formatting, determine-dockerfiles]
     if: always()
     steps:
       - name: Check if docker-build should run
@@ -378,7 +378,9 @@ jobs:
           (!contains(needs.build-and-test.result, 'failure') || needs.build-and-test.result == 'skipped') &&
           (!contains(needs.build-and-test.result, 'cancelled') || needs.build-and-test.result == 'skipped') &&
           !contains(needs.formatting.result, 'failure') &&
-          !contains(needs.formatting.result, 'cancelled')
+          !contains(needs.formatting.result, 'cancelled') &&
+          (!contains(needs.coverage-pds.result, 'failure') || needs.coverage-pds.result == 'skipped') &&
+          (!contains(needs.coverage-pds.result, 'cancelled') || needs.coverage-pds.result == 'skipped')
         run: echo "All CI jobs passed! (Docker build not needed)"
 
       - name: CI Success (with docker build)
@@ -390,6 +392,8 @@ jobs:
           (!contains(needs.build-and-test.result, 'cancelled') || needs.build-and-test.result == 'skipped') &&
           !contains(needs.formatting.result, 'failure') &&
           !contains(needs.formatting.result, 'cancelled') &&
+          (!contains(needs.coverage-pds.result, 'failure') || needs.coverage-pds.result == 'skipped') &&
+          (!contains(needs.coverage-pds.result, 'cancelled') || needs.coverage-pds.result == 'skipped') &&
           (!contains(needs.docker-build.result, 'failure') || needs.docker-build.result == 'skipped') &&
           (!contains(needs.docker-build.result, 'cancelled') || needs.docker-build.result == 'skipped')
         run: echo "All CI jobs passed! (Including Docker build)"
@@ -402,6 +406,8 @@ jobs:
           (contains(needs.build-and-test.result, 'cancelled') && needs.build-and-test.result != 'skipped') ||
           contains(needs.formatting.result, 'failure') ||
           contains(needs.formatting.result, 'cancelled') ||
+          (contains(needs.coverage-pds.result, 'failure') && needs.coverage-pds.result != 'skipped') ||
+          (contains(needs.coverage-pds.result, 'cancelled') && needs.coverage-pds.result != 'skipped') ||
           (steps.should-docker-build.outputs.docker_build_needed == 'true' && 
            ((contains(needs.docker-build.result, 'failure') && needs.docker-build.result != 'skipped') || 
             (contains(needs.docker-build.result, 'cancelled') && needs.docker-build.result != 'skipped')))

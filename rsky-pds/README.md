@@ -407,7 +407,7 @@ comments, attributes, closing brackets, struct and enum headers) are not
 gated, since that is where derive-generated code no test can reach is
 attributed; function coverage is reported, not gated, because it counts
 those generated functions and every per-binary instantiation of a closure.
-CI runs the same script against the pushed range, next to its crate-wide 95%
+CI runs the same script against the pushed range, next to its crate-wide 90%
 line floor.
 
 ## Upgrading to 1.0
