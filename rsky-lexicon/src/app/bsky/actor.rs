@@ -349,6 +349,8 @@ pub struct MutedWord {
     pub value: String,
     // The intended targets of the muted word.
     pub targets: Vec<MutedWordTarget>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -381,6 +383,8 @@ pub struct BskyAppStatePref {
     pub queued_nudges: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nuxs: Option<Vec<Nux>>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -399,6 +403,8 @@ pub struct Nux {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct BskyAppProgressGuide {
     pub guide: String,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -422,6 +428,13 @@ mod tests {
             serde_json::json!({"nuxs": []}),
             serde_json::json!({
                 "queuedNudges": ["existing-nudge"],
+                "isBetaUser": true,
+                "activeProgressGuide": {
+                    "guide": "test-guide",
+                    "completedSteps": ["profile"],
+                    "progress": {"step": 2, "done": false}
+                },
+                "futureField": {"values": [null, 7, "preserved"]},
                 "nuxs": [
                     {"id": "GroupChatsAnnouncement", "completed": true},
                     {
@@ -447,6 +460,27 @@ mod tests {
             };
             assert_eq!(serde_json::to_value(output).unwrap(), input);
         }
+    }
+
+    #[test]
+    fn muted_word_extra_fields_roundtrip() {
+        let value = serde_json::json!({
+            "$type": "app.bsky.actor.defs#mutedWordsPref",
+            "items": [
+                {
+                    "value": "spoiler",
+                    "targets": ["content", "tag"],
+                    "id": "mute-1",
+                    "actorTarget": "exclude-following",
+                    "expiresAt": "2026-10-01T00:00:00.000Z",
+                    "futureField": {"enabled": true}
+                },
+                {"value": "legacy", "targets": ["content"]}
+            ]
+        });
+        let pref: RefPreferences = serde_json::from_value(value.clone()).unwrap();
+        assert!(matches!(pref, RefPreferences::MutedWordsPref(_)));
+        assert_eq!(serde_json::to_value(pref).unwrap(), value);
     }
 
     #[test]

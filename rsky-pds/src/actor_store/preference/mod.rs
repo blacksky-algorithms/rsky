@@ -201,6 +201,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preserves_app_state_and_muted_word_fields() {
+        let (_dir, reader) = test_reader().await;
+        for nuxs in [
+            None,
+            Some(serde_json::json!([])),
+            Some(serde_json::json!([
+                {"id": "GroupChatsAnnouncement", "completed": true},
+                {
+                    "id": "ExampleTour",
+                    "completed": false,
+                    "data": "{\"step\":2}",
+                    "expiresAt": "2026-10-01T00:00:00.000Z"
+                }
+            ])),
+        ] {
+            let mut state = serde_json::json!({
+                "$type": "app.bsky.actor.defs#bskyAppStatePref",
+                "isBetaUser": true,
+                "queuedNudges": ["existing-nudge"],
+                "activeProgressGuide": {
+                    "guide": "test-guide",
+                    "completedSteps": ["profile"],
+                    "progress": {"step": 2, "done": false}
+                },
+                "futureField": {"values": [null, 7, "preserved"]}
+            });
+            if let Some(nuxs) = nuxs {
+                state["nuxs"] = nuxs;
+            }
+            let expected = serde_json::json!([
+                state,
+                {
+                    "$type": "app.bsky.actor.defs#mutedWordsPref",
+                    "items": [
+                        {
+                            "value": "spoiler",
+                            "targets": ["content", "tag"],
+                            "id": "mute-1",
+                            "actorTarget": "exclude-following",
+                            "expiresAt": "2026-10-01T00:00:00.000Z",
+                            "futureField": {"enabled": true}
+                        },
+                        {"value": "legacy", "targets": ["content"]}
+                    ]
+                }
+            ]);
+            let values = serde_json::from_value(expected.clone()).unwrap();
+            reader
+                .put_preferences(values, "app.bsky".to_owned(), AuthScope::Access)
+                .await
+                .unwrap();
+            let stored = reader
+                .db
+                .run(|conn| {
+                    let mut stmt =
+                        conn.prepare("SELECT \"valueJson\" FROM account_pref ORDER BY id ASC")?;
+                    let rows = stmt
+                        .query_map([], |row| row.get::<_, String>(0))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(rows)
+                })
+                .await
+                .unwrap();
+            let stored: Vec<serde_json::Value> = stored
+                .iter()
+                .map(|value| serde_json::from_str(value).unwrap())
+                .collect();
+            assert_eq!(serde_json::to_value(stored).unwrap(), expected);
+            let actual = reader
+                .get_preferences(Some("app.bsky".to_owned()), AuthScope::Access)
+                .await
+                .unwrap();
+            assert_eq!(serde_json::to_value(actual).unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
     async fn app_pass_scope_preserves_full_access_prefs() {
         let (_dir, reader) = test_reader().await;
         reader
