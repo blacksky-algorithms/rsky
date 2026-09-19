@@ -53,7 +53,13 @@ for line in open(report):
     if in_missing:
         m = re.match(r"^(\S+): (.*)$", line.strip())
         if m:
-            uncovered[m.group(1)] = {int(n) for n in m.group(2).split(", ") if n}
+            uncovered[m.group(1)] = set()
+            # newer cargo-llvm-cov prints runs of lines as ranges
+            for item in m.group(2).split(", "):
+                if not item:
+                    continue
+                first, _, last = item.partition("-")
+                uncovered[m.group(1)].update(range(int(first), int(last or first) + 1))
         continue
     cols = line.split()
     if len(cols) >= 10 and cols[0].endswith(".rs"):
