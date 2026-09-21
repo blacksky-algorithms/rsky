@@ -1561,7 +1561,10 @@ mod tests {
     async fn include_sets_resolve_once_per_set_and_fail_closed() {
         let sets = SharedPermissionSets::default();
         sets.resolver
-            .prime("app.example.set", vec!["repo:app.example.record".into()])
+            .prime(
+                "app.example.set",
+                vec![crate::permission_set::repo_permission("app.example.record")],
+            )
             .await;
         let views = include_sets(
             &sets,
@@ -1569,12 +1572,20 @@ mod tests {
                 "atproto".into(),
                 "include:app.example.set".into(),
                 "include:app.example.set".into(),
+                "include:app.example.set?aud=did:web:x%23y".into(),
             ],
         )
         .await
         .unwrap();
-        assert_eq!(views.len(), 1);
-        assert_eq!(views["app.example.set"].scopes, ["repo:app.example.record"]);
+        assert_eq!(views.len(), 2);
+        assert_eq!(
+            views["app.example.set"].scopes,
+            ["repo:?collection=app.example.record"]
+        );
+        assert_eq!(
+            views["app.example.set?aud=did:web:x%23y"].scopes,
+            ["repo:?collection=app.example.record"]
+        );
         assert!(views["app.example.set"].title.is_none());
         let error = include_sets(&sets, &["include:invalid.example.nothing".into()])
             .await

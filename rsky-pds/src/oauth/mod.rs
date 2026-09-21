@@ -326,7 +326,7 @@ mod configuration_tests {
             .resolver
             .prime(
                 "app.example.set",
-                vec!["repo:app.example.record".to_string()],
+                vec![crate::permission_set::repo_permission("app.example.record")],
             )
             .await;
         assert_eq!(
@@ -334,7 +334,15 @@ mod configuration_tests {
                 .expand("atproto include:app.example.set transition:generic")
                 .await
                 .unwrap(),
-            "atproto repo:app.example.record transition:generic"
+            "atproto repo:?collection=app.example.record transition:generic"
+        );
+        // an audience on the include is not part of the set's name
+        assert_eq!(
+            expander
+                .expand("include:app.example.set?aud=did:web:x%23y")
+                .await
+                .unwrap(),
+            "repo:?collection=app.example.record"
         );
         // `.invalid` never resolves, so the set cannot be established
         let err = expander

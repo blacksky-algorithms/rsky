@@ -265,7 +265,7 @@ fn mime_matches(accepted: &[String], mime: &str) -> bool {
 
 /// A query value as the client wrote it: a `did:` or `#fragment` survives
 /// percent-encoding, and a value that does not decode is kept as is.
-fn percent_decoded(value: &str) -> String {
+pub(crate) fn percent_decoded(value: &str) -> String {
     urlencoding::decode(value).map_or_else(|_| value.to_string(), |v| v.into_owned())
 }
 

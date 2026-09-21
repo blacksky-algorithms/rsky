@@ -134,11 +134,18 @@ impl Permission {
     /// parser an inline scope goes through, closes that gap.
     #[must_use]
     pub fn to_scope_string(&self) -> Option<String> {
+        self.to_scope_string_with(None)
+    }
+
+    /// [`Self::to_scope_string`] for a set included with an audience: an
+    /// `rpc` permission that inherits its audience takes that one.
+    #[must_use]
+    pub fn to_scope_string_with(&self, inherited_aud: Option<&str>) -> Option<String> {
         match self.resource.as_str() {
             "space" => self.to_space_scope(),
             "repo" => self.to_repo_scope(),
             "blob" => self.to_blob_scope(),
-            "rpc" => self.to_rpc_scope(),
+            "rpc" => self.to_rpc_scope(inherited_aud),
             "identity" => self.to_identity_scope(),
             "account" => self.to_account_scope(),
             _ => None,
@@ -174,12 +181,12 @@ impl Permission {
         ))
     }
 
-    fn to_rpc_scope(&self) -> Option<String> {
+    fn to_rpc_scope(&self, inherited_aud: Option<&str>) -> Option<String> {
         if self.lxm.is_empty() {
             return None;
         }
         let aud = if self.inherit_aud {
-            Some("*".to_string())
+            Some(inherited_aud.unwrap_or("*").to_string())
         } else {
             self.aud.clone()
         };
@@ -231,21 +238,67 @@ struct GetRecordOutput {
     value: SchemaRecord,
 }
 
-/// The scope strings a permission set confers -- across all five proposal
-/// 0011 resource kinds, not just `space:` -- extracted from a fetched
-/// `com.atproto.lexicon.schema` record.
-fn resource_scopes_from_record(record: &SchemaRecord) -> Vec<String> {
+/// The permissions a fetched `com.atproto.lexicon.schema` record publishes.
+fn permissions_from_record(record: &SchemaRecord) -> Vec<Permission> {
     record
         .defs
         .values()
         .filter(|def| def.def_type == "permission-set")
-        .flat_map(|def| def.permissions.iter())
-        .filter_map(Permission::to_scope_string)
+        .flat_map(|def| def.permissions.iter().cloned())
         .collect()
 }
 
+/// The scope strings a permission set confers -- across all five proposal
+/// 0011 resource kinds, not just `space:` -- for the audience it was
+/// included with.
+fn render_scopes(permissions: &[Permission], inherited_aud: Option<&str>) -> Vec<String> {
+    permissions
+        .iter()
+        .filter_map(|permission| permission.to_scope_string_with(inherited_aud))
+        .collect()
+}
+
+#[cfg(test)]
+fn resource_scopes_from_record(record: &SchemaRecord) -> Vec<String> {
+    render_scopes(&permissions_from_record(record), None)
+}
+
+/// What follows `include:` in a scope: the set's NSID and, optionally, the
+/// audience its inherited-audience `rpc` permissions apply to, as
+/// `include:<nsid>?aud=<did%23service>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncludeScope {
+    pub nsid: String,
+    pub aud: Option<String>,
+}
+
+impl IncludeScope {
+    pub fn parse(token: &str) -> Result<Self, PermissionSetError> {
+        let (nsid, params) = token.split_once('?').unwrap_or((token, ""));
+        let unresolved = |reason: String| PermissionSetError {
+            nsid: nsid.to_string(),
+            reason,
+        };
+        Nsid::parse(nsid).map_err(|error| unresolved(format!("invalid nsid: {error}")))?;
+        let mut aud = None;
+        for pair in params.split('&').filter(|pair| !pair.is_empty()) {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            match key {
+                "aud" if !value.is_empty() && aud.is_none() => {
+                    aud = Some(crate::oauth_scope::percent_decoded(value));
+                }
+                _ => return Err(unresolved(format!("unexpected include parameter: {pair}"))),
+            }
+        }
+        Ok(Self {
+            nsid: nsid.to_string(),
+            aud,
+        })
+    }
+}
+
 struct CacheEntry {
-    scopes: Vec<String>,
+    permissions: Vec<Permission>,
     expires: Instant,
     /// Set when the entry records a failed fetch rather than a resolved set.
     failed: bool,
@@ -286,14 +339,24 @@ impl PermissionSetResolver {
     /// proposal-0011 resource kind the set names. Empty when the set names no
     /// grants, and also when it could not be resolved -- the two are the same
     /// denial from a caller's point of view.
-    pub async fn resolved_scopes(&self, nsid: &str) -> Vec<String> {
-        self.try_resolved_scopes(nsid).await.unwrap_or_default()
+    pub async fn resolved_scopes(&self, include: &str) -> Vec<String> {
+        self.try_resolved_scopes(include).await.unwrap_or_default()
     }
 
     /// Like [`Self::resolved_scopes`], but tells a set that confers nothing
     /// apart from one that could not be resolved. A remembered failure is
     /// reported as such until it expires.
-    pub async fn try_resolved_scopes(&self, nsid: &str) -> Result<Vec<String>, PermissionSetError> {
+    pub async fn try_resolved_scopes(
+        &self,
+        include: &str,
+    ) -> Result<Vec<String>, PermissionSetError> {
+        let include = IncludeScope::parse(include)?;
+        let permissions = self.permissions(&include.nsid).await?;
+        Ok(render_scopes(&permissions, include.aud.as_deref()))
+    }
+
+    /// The set's published permissions, from the cache or fetched.
+    async fn permissions(&self, nsid: &str) -> Result<Vec<Permission>, PermissionSetError> {
         if let Some(entry) = self.cache.read().await.get(nsid) {
             if entry.expires > Instant::now() {
                 return if entry.failed {
@@ -302,7 +365,7 @@ impl PermissionSetResolver {
                         reason: "recent fetch failed".to_string(),
                     })
                 } else {
-                    Ok(entry.scopes.clone())
+                    Ok(entry.permissions.clone())
                 };
             }
         }
@@ -317,7 +380,7 @@ impl PermissionSetResolver {
         self.cache.write().await.insert(
             nsid.to_string(),
             CacheEntry {
-                scopes: result.clone().unwrap_or_default(),
+                permissions: result.clone().unwrap_or_default(),
                 expires: Instant::now() + ttl,
                 failed: result.is_err(),
             },
@@ -326,18 +389,18 @@ impl PermissionSetResolver {
     }
 
     #[cfg(test)]
-    pub(crate) async fn prime(&self, nsid: &str, scopes: Vec<String>) {
+    pub(crate) async fn prime(&self, nsid: &str, permissions: Vec<Permission>) {
         self.cache.write().await.insert(
             nsid.to_string(),
             CacheEntry {
-                scopes,
+                permissions,
                 expires: Instant::now() + OK_TTL,
                 failed: false,
             },
         );
     }
 
-    async fn fetch(&self, nsid: &str) -> anyhow::Result<Vec<String>> {
+    async fn fetch(&self, nsid: &str) -> anyhow::Result<Vec<Permission>> {
         let parsed = Nsid::parse(nsid).map_err(|e| anyhow::anyhow!("invalid nsid: {e}"))?;
         let authority = parsed.authority();
         let did = resolve_lexicon_authority(&authority).await?;
@@ -363,7 +426,7 @@ impl PermissionSetResolver {
             anyhow::bail!("{url} returned {}", response.status());
         }
         let output: GetRecordOutput = response.json().await?;
-        Ok(resource_scopes_from_record(&output.value))
+        Ok(permissions_from_record(&output.value))
     }
 }
 
@@ -431,6 +494,15 @@ pub async fn expand_includes(resolver: &PermissionSetResolver, granted: &[String
         }
     }
     expanded
+}
+
+#[cfg(test)]
+pub(crate) fn repo_permission(collection: &str) -> Permission {
+    Permission {
+        resource: "repo".into(),
+        collection: vec![collection.into()],
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]
@@ -671,7 +743,7 @@ mod tests {
         resolver
             .prime(
                 "app.example.cached",
-                vec!["repo:app.example.record".to_string()],
+                vec![repo_permission("app.example.record")],
             )
             .await;
         assert_eq!(
@@ -679,13 +751,13 @@ mod tests {
                 .try_resolved_scopes("app.example.cached")
                 .await
                 .unwrap(),
-            vec!["repo:app.example.record".to_string()]
+            vec!["repo:?collection=app.example.record".to_string()]
         );
         // an expired entry is fetched again
         resolver.cache.write().await.insert(
             "invalid.example.expired".to_string(),
             CacheEntry {
-                scopes: vec!["repo:app.example.record".to_string()],
+                permissions: vec![repo_permission("app.example.record")],
                 expires: Instant::now() - Duration::from_secs(1),
                 failed: false,
             },
@@ -712,6 +784,81 @@ mod tests {
             bulleted_scopes(),
             "the published set no longer matches the vendored fixture"
         );
+    }
+
+    #[test]
+    fn include_scopes_carry_an_optional_audience() {
+        assert_eq!(
+            IncludeScope::parse("app.bsky.authViewAll").unwrap(),
+            IncludeScope {
+                nsid: "app.bsky.authViewAll".into(),
+                aud: None
+            }
+        );
+        assert_eq!(
+            IncludeScope::parse("app.bsky.authViewAll?aud=did:web:api.bsky.app%23bsky_appview")
+                .unwrap(),
+            IncludeScope {
+                nsid: "app.bsky.authViewAll".into(),
+                aud: Some("did:web:api.bsky.app#bsky_appview".into())
+            }
+        );
+        let error = IncludeScope::parse("app.bsky.authViewAll?aud=").unwrap_err();
+        assert_eq!(error.reason, "unexpected include parameter: aud=");
+        let error = IncludeScope::parse("app.bsky.authViewAll?lxm=x").unwrap_err();
+        assert_eq!(error.reason, "unexpected include parameter: lxm=x");
+        let error = IncludeScope::parse("app.bsky.authViewAll?aud=a&aud=b").unwrap_err();
+        assert!(error.reason.contains("aud=b"));
+        let error = IncludeScope::parse("not an nsid").unwrap_err();
+        assert!(error.reason.starts_with("invalid nsid"), "{error}");
+    }
+
+    /// The reference's rule: an `rpc` permission that inherits its audience
+    /// takes the one the `include:` names; without one it keeps this
+    /// server's any-audience stand-in.
+    #[tokio::test]
+    async fn an_inherited_audience_comes_from_the_include() {
+        let resolver = PermissionSetResolver::new();
+        resolver
+            .prime(
+                "app.example.viewAll",
+                vec![
+                    Permission {
+                        resource: "rpc".into(),
+                        lxm: vec!["app.example.getThing".into()],
+                        inherit_aud: true,
+                        ..Default::default()
+                    },
+                    Permission {
+                        resource: "rpc".into(),
+                        lxm: vec!["app.example.getOther".into()],
+                        aud: Some("*".into()),
+                        ..Default::default()
+                    },
+                ],
+            )
+            .await;
+        assert_eq!(
+            resolver
+                .try_resolved_scopes("app.example.viewAll?aud=did:web:api.example.com%23svc")
+                .await
+                .unwrap(),
+            [
+                "rpc:?lxm=app.example.getThing&aud=did:web:api.example.com#svc",
+                "rpc:?lxm=app.example.getOther&aud=*",
+            ]
+        );
+        assert_eq!(
+            resolver.resolved_scopes("app.example.viewAll").await,
+            [
+                "rpc:?lxm=app.example.getThing&aud=*",
+                "rpc:?lxm=app.example.getOther&aud=*",
+            ]
+        );
+        assert!(resolver
+            .resolved_scopes("app.example.viewAll?nope=1")
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
