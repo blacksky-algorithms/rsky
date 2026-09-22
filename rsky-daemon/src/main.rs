@@ -6,8 +6,8 @@ use rsky_daemon::config::Config;
 use rsky_daemon::engine::CommitKeyResolver;
 use rsky_daemon::{
     notify_router, run, CredentialProvider, CredentialSource, DaemonError, HttpRepoHost,
-    HttpSpaceHost, InMemoryIndex, NotifyState, PdsDelegationSource, Result, RunnerOptions,
-    SpaceIndex, SqliteIndex, StaticCredential,
+    HttpSpaceHost, IdentityPdsResolver, InMemoryIndex, NotifyState, PdsDelegationSource,
+    ResolvingRepoHost, Result, RunnerOptions, SpaceIndex, SqliteIndex, StaticCredential,
 };
 use rsky_identity::did::atproto_data::{get_did_key_from_multibase, VerificationMaterial};
 use rsky_identity::types::{IdentityResolverOpts, MemoryCache};
@@ -130,23 +130,35 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     });
 
     let repo_host_base = cfg.repo_host_url().to_string();
+    let repo_host_pinned = !cfg.repo_host_url.is_empty();
+    let pds_resolver = Arc::new(IdentityPdsResolver::new());
     let opts = RunnerOptions {
         space_uri: cfg.space_uri.clone(),
         sweep_interval_secs: cfg.sweep_interval_secs,
         notify_endpoint: cfg.notify_endpoint(),
         service_identity: cfg.service_identity.clone(),
         now_fn: rsky_daemon::unix_now,
+        blob_fetch_enabled: cfg.blob_fetch_enabled,
     };
     let runner = tokio::spawn(run(
         opts,
         host,
         creds,
         Box::new(move |credential| {
-            Arc::new(HttpRepoHost::new(
-                repo_host_base.clone(),
-                credential,
-                dpop.clone(),
-            ))
+            if repo_host_pinned {
+                Arc::new(HttpRepoHost::new(
+                    repo_host_base.clone(),
+                    credential,
+                    dpop.clone(),
+                ))
+            } else {
+                Arc::new(ResolvingRepoHost::new(
+                    credential,
+                    dpop.clone(),
+                    pds_resolver.clone(),
+                    std::time::Duration::from_secs(300),
+                ))
+            }
         }),
         index,
         keys,

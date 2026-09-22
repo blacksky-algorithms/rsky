@@ -16,7 +16,9 @@ use base64::Engine as _;
 use rsky_oauth::jwk::{EcCurve, Jwk};
 use rsky_oauth::jwt::{sign, JwtClaims, JwtHeader};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{DaemonError, Result};
@@ -27,6 +29,7 @@ pub const DPOP_TYP: &str = "dpop+jwt";
 pub struct DpopSigner {
     key: Jwk,
     counter: AtomicU64,
+    nonces: Mutex<HashMap<String, String>>,
 }
 
 impl DpopSigner {
@@ -39,6 +42,7 @@ impl DpopSigner {
                 return Ok(Self {
                     key,
                     counter: AtomicU64::new(0),
+                    nonces: Mutex::new(HashMap::new()),
                 });
             }
         }
@@ -79,8 +83,32 @@ impl DpopSigner {
             let ath = URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()));
             claims.extra.insert("ath".to_string(), ath.into());
         }
+        if let Some(nonce) = self
+            .nonces
+            .lock()
+            .expect("DPoP nonce state is not poisoned")
+            .get(&host_key(url))
+        {
+            claims
+                .extra
+                .insert("nonce".to_string(), nonce.clone().into());
+        }
         sign(&header, &claims, &self.key).map_err(|e| DaemonError::Xrpc(e.to_string()))
     }
+
+    pub(crate) fn set_nonce(&self, url: &str, nonce: String) {
+        self.nonces
+            .lock()
+            .expect("DPoP nonce state is not poisoned")
+            .insert(host_key(url), nonce);
+    }
+}
+
+fn host_key(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_owned))
+        .unwrap_or_else(|| url.to_owned())
 }
 
 #[cfg(test)]
@@ -131,5 +159,18 @@ mod tests {
         let first = decode(&signer.proof("GET", "https://h/x", None).unwrap()).unwrap();
         let second = decode(&signer.proof("GET", "https://h/x", None).unwrap()).unwrap();
         assert_ne!(first.claims.jti, second.claims.jti);
+    }
+
+    #[test]
+    fn nonce_is_shared_by_urls_on_one_host() {
+        let signer = DpopSigner::generate().unwrap();
+        signer.set_nonce("https://host.example/one", "nonce".to_string());
+        let decoded = decode(
+            &signer
+                .proof("GET", "https://host.example/two", None)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decoded.claims.extra.get("nonce").unwrap(), "nonce");
     }
 }

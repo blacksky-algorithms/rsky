@@ -17,6 +17,16 @@ pub struct IndexedRecord {
     pub value: Option<Vec<u8>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlobLedgerEntry {
+    pub space: String,
+    pub repo: String,
+    pub cid: String,
+    pub collection: String,
+    pub rkey: String,
+    pub state: String,
+}
+
 /// Per-author sync state + records the daemon holds for a space.
 #[async_trait]
 pub trait SpaceIndex: Send + Sync {
@@ -46,6 +56,20 @@ pub trait SpaceIndex: Send + Sync {
     /// Drop every record and sync head this index holds. A syncer MUST delete
     /// all data for a deleted space (proposal §Space deletion).
     async fn purge_space(&self) -> Result<()>;
+
+    async fn update_blob_ledger(
+        &self,
+        _did: &str,
+        _collection: &str,
+        _rkey: &str,
+        _cids: &[String],
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn reconcile_blob_ledger(&self, _did: &str, _remote_cids: &[String]) -> Result<()> {
+        Ok(())
+    }
 }
 
 fn key(collection: &str, rkey: &str) -> String {

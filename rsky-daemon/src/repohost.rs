@@ -9,8 +9,10 @@ use serde_bytes::ByteBuf;
 
 use crate::dpop::DpopSigner;
 use crate::error::Result;
-use crate::xrpc::{check, http_client, net_err};
-use std::sync::Arc;
+use crate::xrpc::{http_client, net_err, send_with_dpop_retry};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// A page of the operation log, plus the current signed commit when the page
 /// reaches the repo head (proposal §Incremental sync).
@@ -39,6 +41,142 @@ pub trait RepoHostClient: Send + Sync {
     async fn get_repo_car(&self, space: &str, did: &str) -> Result<Vec<u8>>;
     /// The repo's current signed commit (`getLatestCommit`).
     async fn get_latest_commit(&self, space: &str, did: &str) -> Result<SignedCommit>;
+    async fn list_blobs(
+        &self,
+        space: &str,
+        did: &str,
+        cursor: Option<&str>,
+    ) -> Result<wire::ListBlobsOutput> {
+        let _ = (space, did, cursor);
+        Err(crate::error::DaemonError::Xrpc(
+            "listBlobs is not implemented by this repo host".to_string(),
+        ))
+    }
+}
+
+#[async_trait]
+pub trait PdsResolver: Send + Sync {
+    async fn pds_url(&self, did: &str) -> Result<String>;
+}
+
+pub struct ResolvingRepoHost<R> {
+    credential: String,
+    http: reqwest::Client,
+    dpop: Arc<DpopSigner>,
+    resolver: Arc<R>,
+    ttl: Duration,
+    cache: Mutex<HashMap<String, (Instant, String)>>,
+}
+
+impl<R> ResolvingRepoHost<R> {
+    pub fn new(
+        credential: impl Into<String>,
+        dpop: Arc<DpopSigner>,
+        resolver: Arc<R>,
+        ttl: Duration,
+    ) -> Self {
+        Self {
+            credential: credential.into(),
+            http: http_client(),
+            dpop,
+            resolver,
+            ttl,
+            cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn base_url(&self, did: &str) -> Result<String>
+    where
+        R: PdsResolver,
+    {
+        if let Some((_, url)) = self
+            .cache
+            .lock()
+            .expect("repo host cache is not poisoned")
+            .get(did)
+            .filter(|(expires, _)| *expires > Instant::now())
+        {
+            return Ok(url.clone());
+        }
+        let url = self
+            .resolver
+            .pds_url(did)
+            .await?
+            .trim_end_matches('/')
+            .to_string();
+        self.cache
+            .lock()
+            .expect("repo host cache is not poisoned")
+            .insert(did.to_string(), (Instant::now() + self.ttl, url.clone()));
+        Ok(url)
+    }
+
+    async fn get(&self, did: &str, nsid: &str, query: &[(&str, &str)]) -> Result<reqwest::Response>
+    where
+        R: PdsResolver,
+    {
+        let url = format!("{}/xrpc/{nsid}", self.base_url(did).await?);
+        send_with_dpop_retry(&self.dpop, "GET", &url, Some(&self.credential), |proof| {
+            Ok(self
+                .http
+                .get(&url)
+                .header("Authorization", format!("DPoP {}", self.credential))
+                .header("DPoP", proof)
+                .query(query))
+        })
+        .await
+    }
+}
+
+pub struct IdentityPdsResolver {
+    pub resolver: tokio::sync::Mutex<rsky_identity::IdResolver>,
+}
+
+impl IdentityPdsResolver {
+    pub fn new() -> Self {
+        Self {
+            resolver: tokio::sync::Mutex::new(rsky_identity::IdResolver::new(
+                rsky_identity::types::IdentityResolverOpts {
+                    timeout: None,
+                    plc_url: None,
+                    did_cache: Some(Arc::new(rsky_identity::types::MemoryCache::new(None, None))),
+                    backup_nameservers: None,
+                },
+            )),
+        }
+    }
+}
+
+impl Default for IdentityPdsResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl PdsResolver for IdentityPdsResolver {
+    async fn pds_url(&self, did: &str) -> Result<String> {
+        let doc = self
+            .resolver
+            .lock()
+            .await
+            .did
+            .ensure_resolve(&did.to_string(), None)
+            .await
+            .map_err(|e| crate::error::DaemonError::KeyResolution(e.to_string()))?;
+        doc.service
+            .unwrap_or_default()
+            .into_iter()
+            .find(|service| {
+                service.id.rsplit_once('#').map(|(_, fragment)| fragment) == Some("atproto_pds")
+            })
+            .map(|service| service.service_endpoint)
+            .ok_or_else(|| {
+                crate::error::DaemonError::KeyResolution(format!(
+                    "no #atproto_pds service in the DID document for {did}"
+                ))
+            })
+    }
 }
 
 // The wire types (rsky-lexicon, `$bytes`/JSON values) and the internal types
@@ -97,19 +235,15 @@ impl HttpRepoHost {
 
     async fn get(&self, nsid: &str, query: &[(&str, &str)]) -> Result<reqwest::Response> {
         let url = self.url(nsid);
-        let resp = self
-            .http
-            .get(&url)
-            .header("Authorization", format!("DPoP {}", self.credential))
-            .header(
-                "DPoP",
-                self.dpop.proof("GET", &url, Some(&self.credential))?,
-            )
-            .query(query)
-            .send()
-            .await
-            .map_err(net_err)?;
-        check(resp).await
+        send_with_dpop_retry(&self.dpop, "GET", &url, Some(&self.credential), |proof| {
+            Ok(self
+                .http
+                .get(&url)
+                .header("Authorization", format!("DPoP {}", self.credential))
+                .header("DPoP", proof)
+                .query(query))
+        })
+        .await
     }
 }
 
@@ -163,6 +297,101 @@ impl RepoHostClient for HttpRepoHost {
             .await
             .map_err(net_err)?;
         Ok(commit_from_wire(out.commit))
+    }
+
+    async fn list_blobs(
+        &self,
+        space: &str,
+        did: &str,
+        cursor: Option<&str>,
+    ) -> Result<wire::ListBlobsOutput> {
+        let mut query = vec![("space", space), ("repo", did)];
+        if let Some(cursor) = cursor {
+            query.push(("cursor", cursor));
+        }
+        self.get("com.atproto.space.listBlobs", &query)
+            .await?
+            .json()
+            .await
+            .map_err(net_err)
+    }
+}
+
+#[async_trait]
+impl<R> RepoHostClient for ResolvingRepoHost<R>
+where
+    R: PdsResolver + 'static,
+{
+    async fn list_repo_ops(
+        &self,
+        space: &str,
+        did: &str,
+        since: Option<&str>,
+        cursor: Option<&str>,
+    ) -> Result<OplogPage> {
+        let mut query = vec![("space", space), ("did", did)];
+        if let Some(since) = since {
+            query.push(("since", since));
+        }
+        if let Some(cursor) = cursor {
+            query.push(("cursor", cursor));
+        }
+        let out: wire::ListRepoOpsOutput = self
+            .get(did, "com.atproto.space.listRepoOps", &query)
+            .await?
+            .json()
+            .await
+            .map_err(net_err)?;
+        Ok(OplogPage {
+            ops: out.ops.into_iter().map(op_from_wire).collect(),
+            commit: out.commit.map(commit_from_wire),
+            cursor: out.cursor,
+        })
+    }
+
+    async fn get_repo_car(&self, space: &str, did: &str) -> Result<Vec<u8>> {
+        Ok(self
+            .get(
+                did,
+                "com.atproto.space.getRepo",
+                &[("space", space), ("did", did)],
+            )
+            .await?
+            .bytes()
+            .await
+            .map_err(net_err)?
+            .to_vec())
+    }
+
+    async fn get_latest_commit(&self, space: &str, did: &str) -> Result<SignedCommit> {
+        let out: wire::GetLatestCommitOutput = self
+            .get(
+                did,
+                "com.atproto.space.getLatestCommit",
+                &[("space", space), ("did", did)],
+            )
+            .await?
+            .json()
+            .await
+            .map_err(net_err)?;
+        Ok(commit_from_wire(out.commit))
+    }
+
+    async fn list_blobs(
+        &self,
+        space: &str,
+        did: &str,
+        cursor: Option<&str>,
+    ) -> Result<wire::ListBlobsOutput> {
+        let mut query = vec![("space", space), ("repo", did)];
+        if let Some(cursor) = cursor {
+            query.push(("cursor", cursor));
+        }
+        self.get(did, "com.atproto.space.listBlobs", &query)
+            .await?
+            .json()
+            .await
+            .map_err(net_err)
     }
 }
 
@@ -356,5 +585,47 @@ mod tests {
         let host = HttpRepoHost::new(server.uri(), "sc.jwt", test_dpop());
         let err = host.get_latest_commit(SPACE, AUTHOR).await.unwrap_err();
         assert!(matches!(err, DaemonError::Xrpc(_)));
+    }
+
+    struct CountingResolver {
+        url: String,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl PdsResolver for CountingResolver {
+        async fn pds_url(&self, _did: &str) -> Result<String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.url.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn resolving_repo_host_caches_pds_endpoint_until_ttl() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.space.listRepoOps"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ops": []
+            })))
+            .mount(&server)
+            .await;
+        let resolver = Arc::new(CountingResolver {
+            url: server.uri(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let host = ResolvingRepoHost::new(
+            "sc.jwt",
+            test_dpop(),
+            resolver.clone(),
+            Duration::from_secs(60),
+        );
+        host.list_repo_ops(AUTHOR, AUTHOR, None, None)
+            .await
+            .unwrap();
+        host.list_repo_ops(AUTHOR, AUTHOR, None, None)
+            .await
+            .unwrap();
+        assert_eq!(resolver.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

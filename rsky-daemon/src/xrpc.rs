@@ -52,6 +52,48 @@ pub(crate) async fn check(resp: reqwest::Response) -> Result<reqwest::Response> 
     Err(DaemonError::Xrpc(format!("{status}: {body}")))
 }
 
+pub(crate) async fn send_with_dpop_retry<F>(
+    dpop: &DpopSigner,
+    method: &str,
+    url: &str,
+    access_token: Option<&str>,
+    build: F,
+) -> Result<reqwest::Response>
+where
+    F: Fn(&str) -> Result<reqwest::RequestBuilder>,
+{
+    for attempt in 0..=1 {
+        let proof = dpop.proof(method, url, access_token)?;
+        let response = build(&proof)?.send().await.map_err(net_err)?;
+        if response.status().is_success() {
+            return Ok(response);
+        }
+        let status = response.status();
+        let nonce = response
+            .headers()
+            .get("DPoP-Nonce")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let body = response.text().await.unwrap_or_default();
+        let parsed: XrpcErrorBody = serde_json::from_str(&body).unwrap_or_default();
+        if attempt == 0 && parsed.error.as_deref() == Some("use_dpop_nonce") {
+            if let Some(nonce) = nonce {
+                dpop.set_nonce(url, nonce);
+                continue;
+            }
+        }
+        if parsed.error.as_deref() == Some("HistoryUnavailable") {
+            return Err(DaemonError::HistoryUnavailable(
+                parsed.message.unwrap_or_else(|| {
+                    "since revision outside the host's oplog window".to_string()
+                }),
+            ));
+        }
+        return Err(DaemonError::Xrpc(format!("{status}: {body}")));
+    }
+    unreachable!("the DPoP retry loop always returns")
+}
+
 /// Space-host methods the daemon consumes, abstracted for tests.
 #[async_trait]
 pub trait SpaceHostClient: Send + Sync {
@@ -118,16 +160,19 @@ impl SpaceHostClient for HttpSpaceHost {
         // beside it carries the key the minted credential binds to, and no
         // `ath`, because a grant is not a bound token.
         let url = self.url("com.atproto.space.getSpaceCredential");
-        let resp = self
-            .http
-            .post(&url)
-            .bearer_auth(delegation_token)
-            .header("DPoP", self.dpop.proof("POST", &url, None)?)
-            .json(&input)
-            .send()
+        let out: GetSpaceCredentialOutput =
+            send_with_dpop_retry(&self.dpop, "POST", &url, None, |proof| {
+                Ok(self
+                    .http
+                    .post(&url)
+                    .bearer_auth(delegation_token)
+                    .header("DPoP", proof)
+                    .json(&input))
+            })
+            .await?
+            .json()
             .await
             .map_err(net_err)?;
-        let out: GetSpaceCredentialOutput = check(resp).await?.json().await.map_err(net_err)?;
         Ok(out.credential)
     }
 
@@ -146,16 +191,18 @@ impl SpaceHostClient for HttpSpaceHost {
             query.push(("cursor", cursor.to_string()));
         }
         let url = self.url("com.atproto.space.listRepos");
-        let resp = self
-            .http
-            .get(&url)
-            .header("Authorization", format!("DPoP {credential}"))
-            .header("DPoP", self.dpop.proof("GET", &url, Some(credential))?)
-            .query(&query)
-            .send()
-            .await
-            .map_err(net_err)?;
-        check(resp).await?.json().await.map_err(net_err)
+        send_with_dpop_retry(&self.dpop, "GET", &url, Some(credential), |proof| {
+            Ok(self
+                .http
+                .get(&url)
+                .header("Authorization", format!("DPoP {credential}"))
+                .header("DPoP", proof)
+                .query(&query))
+        })
+        .await?
+        .json()
+        .await
+        .map_err(net_err)
     }
 
     async fn register_notify(
@@ -175,16 +222,19 @@ impl SpaceHostClient for HttpSpaceHost {
             repo: None,
         };
         let url = self.url("com.atproto.space.registerNotify");
-        let resp = self
-            .http
-            .post(&url)
-            .header("Authorization", format!("DPoP {credential}"))
-            .header("DPoP", self.dpop.proof("POST", &url, Some(credential))?)
-            .json(&input)
-            .send()
+        let out: RegisterNotifyOutput =
+            send_with_dpop_retry(&self.dpop, "POST", &url, Some(credential), |proof| {
+                Ok(self
+                    .http
+                    .post(&url)
+                    .header("Authorization", format!("DPoP {credential}"))
+                    .header("DPoP", proof)
+                    .json(&input))
+            })
+            .await?
+            .json()
             .await
             .map_err(net_err)?;
-        let out: RegisterNotifyOutput = check(resp).await?.json().await.map_err(net_err)?;
         Ok(out.expires_at)
     }
 }
@@ -197,9 +247,23 @@ mod tests {
         Arc::new(DpopSigner::generate().unwrap())
     }
     use wiremock::matchers::{body_json_string, header, header_exists, method, path, query_param};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
     const SPACE: &str = "at://did:plc:authority/space/community.blacksky.feed/main";
+
+    struct NonceResponder(std::sync::atomic::AtomicUsize);
+
+    impl Respond for NonceResponder {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(400)
+                    .insert_header("DPoP-Nonce", "nonce-1")
+                    .set_body_json(serde_json::json!({"error": "use_dpop_nonce"}))
+            } else {
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"repos": []}))
+            }
+        }
+    }
 
     #[tokio::test]
     async fn get_space_credential_posts_input_and_returns_jwt() {
@@ -345,5 +409,18 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, DaemonError::Xrpc(_)));
+    }
+
+    #[tokio::test]
+    async fn retries_once_after_server_nonce_challenge() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.space.listRepos"))
+            .respond_with(NonceResponder(std::sync::atomic::AtomicUsize::new(0)))
+            .mount(&server)
+            .await;
+
+        let host = HttpSpaceHost::new(server.uri(), test_dpop());
+        assert!(host.list_repos(SPACE, "sc.jwt", None, None).await.is_ok());
     }
 }

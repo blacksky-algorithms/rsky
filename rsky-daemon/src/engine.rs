@@ -13,6 +13,7 @@ use rsky_space::lthash::element;
 use crate::error::{DaemonError, Result};
 use crate::index::SpaceIndex;
 use crate::repohost::RepoHostClient;
+use crate::sqlite_index::extract_blob_cids;
 
 /// Resolves an author's atproto signing `did:key` to verify their commit.
 #[async_trait]
@@ -80,10 +81,21 @@ pub async fn sync_repo(
                             op.value.as_ref().map(|v| v.to_vec()),
                         )
                         .await?;
+                    let cids = op
+                        .value
+                        .as_ref()
+                        .map(|value| extract_blob_cids(value.as_ref()))
+                        .unwrap_or_default();
+                    index
+                        .update_blob_ledger(did, &op.collection, &op.rkey, &cids)
+                        .await?;
                     lth.add(&element(&op.collection, &op.rkey, cid));
                 }
                 None => {
                     index.delete(did, &op.collection, &op.rkey).await?;
+                    index
+                        .update_blob_ledger(did, &op.collection, &op.rkey, &[])
+                        .await?;
                 }
             }
             ops_applied += 1;

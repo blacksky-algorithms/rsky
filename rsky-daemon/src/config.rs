@@ -64,6 +64,9 @@ pub struct Config {
     /// Seconds between writer-set sweeps (self-healing when notifications drop).
     #[arg(long, env = "DAEMON_SWEEP_INTERVAL_SECS", default_value_t = 300)]
     pub sweep_interval_secs: u64,
+
+    #[arg(long, env = "DAEMON_BLOB_FETCH_ENABLED", default_value_t = false)]
+    pub blob_fetch_enabled: bool,
 }
 
 impl Config {
@@ -108,6 +111,7 @@ mod tests {
 
         let cfg = Config::try_parse_from(REQUIRED).unwrap();
         assert_eq!(cfg.sweep_interval_secs, 300);
+        assert!(!cfg.blob_fetch_enabled);
         assert_eq!(cfg.index_db_path, "");
         assert_eq!(cfg.notify_bind, "127.0.0.1:8055");
         assert_eq!(cfg.repo_host_url(), "https://host.example");

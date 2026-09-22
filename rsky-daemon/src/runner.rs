@@ -103,6 +103,47 @@ pub async fn sync_space_once(
     Ok(report)
 }
 
+pub async fn reconcile_blobs_once(
+    host: &dyn SpaceHostClient,
+    client: &dyn RepoHostClient,
+    index: &dyn SpaceIndex,
+    space_uri: &str,
+    credential: &str,
+    blob_fetch_enabled: bool,
+) -> Result<usize> {
+    let mut repos_cursor = None;
+    let mut repos_seen = 0;
+    loop {
+        let page = host
+            .list_repos(space_uri, credential, repos_cursor.as_deref(), None)
+            .await?;
+        for repo in page.repos {
+            let mut blobs_cursor = None;
+            let mut remote_cids = Vec::new();
+            loop {
+                let page = client
+                    .list_blobs(space_uri, &repo.did, blobs_cursor.as_deref())
+                    .await?;
+                remote_cids.extend(page.cids);
+                match page.cursor {
+                    Some(next) => blobs_cursor = Some(next),
+                    None => break,
+                }
+            }
+            index.reconcile_blob_ledger(&repo.did, &remote_cids).await?;
+            if blob_fetch_enabled {
+                tracing::debug!(did = %repo.did, "blob fetch is not implemented");
+            }
+            repos_seen += 1;
+        }
+        match page.cursor {
+            Some(next) => repos_cursor = Some(next),
+            None => break,
+        }
+    }
+    Ok(repos_seen)
+}
+
 pub struct RunnerOptions {
     pub space_uri: String,
     pub sweep_interval_secs: u64,
@@ -111,6 +152,7 @@ pub struct RunnerOptions {
     /// deliveries to it.
     pub service_identity: String,
     pub now_fn: fn() -> u64,
+    pub blob_fetch_enabled: bool,
 }
 
 async fn register(
@@ -155,7 +197,7 @@ async fn sweep(
     let attempt = async {
         let credential = creds.credential((opts.now_fn)()).await?;
         let client = make_repo_host(credential.clone());
-        sync_space_once(
+        let report = sync_space_once(
             host,
             client.as_ref(),
             index,
@@ -163,7 +205,17 @@ async fn sweep(
             &opts.space_uri,
             &credential,
         )
-        .await
+        .await?;
+        reconcile_blobs_once(
+            host,
+            client.as_ref(),
+            index,
+            &opts.space_uri,
+            &credential,
+            opts.blob_fetch_enabled,
+        )
+        .await?;
+        Ok::<SweepReport, DaemonError>(report)
     };
     match attempt.await {
         Ok(r) => tracing::info!(synced = %r.synced, recovered = %r.recovered, "sweep complete"),
@@ -729,6 +781,7 @@ mod tests {
             notify_endpoint: "https://syncer.example/notify".to_string(),
             service_identity: "did:web:syncer.example".to_string(),
             now_fn: fixed_now,
+            blob_fetch_enabled: false,
         }
     }
 

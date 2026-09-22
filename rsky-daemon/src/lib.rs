@@ -37,10 +37,14 @@ pub use credentials::{
 };
 pub use engine::{sync_repo, CommitKeyResolver, SyncOutcome};
 pub use error::{DaemonError, Result};
-pub use index::{InMemoryIndex, SpaceIndex};
+pub use index::{BlobLedgerEntry, InMemoryIndex, SpaceIndex};
 pub use notify::{router as notify_router, NotifyState, WriteNotice};
 pub use recovery::recover_repo;
-pub use repohost::{HttpRepoHost, OplogPage, RepoHostClient};
-pub use runner::{run, sync_repo_healing, sync_space_once, RunnerOptions, SweepReport};
+pub use repohost::{
+    HttpRepoHost, IdentityPdsResolver, OplogPage, RepoHostClient, ResolvingRepoHost,
+};
+pub use runner::{
+    reconcile_blobs_once, run, sync_repo_healing, sync_space_once, RunnerOptions, SweepReport,
+};
 pub use sqlite_index::{SpaceScopedIndex, SqliteIndex};
 pub use xrpc::{HttpSpaceHost, SpaceHostClient};
