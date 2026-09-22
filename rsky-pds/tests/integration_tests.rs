@@ -224,6 +224,64 @@ async fn get_access_token(client: &rocket::local::asynchronous::Client) -> Strin
 /// a cursor on every non-empty page including the final one. Consumers treat
 /// a nested `{uri, cid, value}` as a failed write, and clients paginate
 /// until a page comes back empty.
+/// A record posted without a `$type` is written under its collection's, as
+/// the reference does; one naming another collection is a client error.
+#[tokio::test]
+async fn create_record_defaults_the_type_to_the_collection() {
+    let (_dir, client) = common::get_client().await;
+    let token = get_access_token(&client).await;
+    let did = "did:plc:khvyd3oiw46vif5gm7hijslk";
+    client
+        .rocket()
+        .state::<rsky_pds::account_manager::AccountManager>()
+        .unwrap()
+        .activate_account(did)
+        .await
+        .unwrap();
+    let create = |body: serde_json::Value| {
+        client
+            .post("/xrpc/com.atproto.repo.createRecord")
+            .header(ContentType::JSON)
+            .header(Header::new("Authorization", format!("Bearer {token}")))
+            .body(body.to_string())
+            .dispatch()
+    };
+
+    let response = create(json!({
+        "repo": did,
+        "collection": "app.bsky.feed.post",
+        "rkey": "untyped",
+        "record": {"text": "hello postman", "createdAt": "2026-09-22T15:20:14.000Z", "langs": ["en"]}
+    }))
+    .await;
+    assert_eq!(response.status(), Status::Ok);
+    let response = client
+        .get(format!(
+            "/xrpc/com.atproto.repo.getRecord?repo={did}&collection=app.bsky.feed.post&rkey=untyped"
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let record: serde_json::Value = response.into_json().await.unwrap();
+    assert_eq!(record["value"]["$type"], "app.bsky.feed.post");
+    assert_eq!(record["value"]["text"], "hello postman");
+
+    let response = create(json!({
+        "repo": did,
+        "collection": "app.bsky.feed.post",
+        "rkey": "mistyped",
+        "record": {"$type": "app.bsky.feed.like", "text": "x", "createdAt": "2026-09-22T15:20:14.000Z"}
+    }))
+    .await;
+    assert_eq!(response.status(), Status::BadRequest);
+    let body: serde_json::Value = response.into_json().await.unwrap();
+    assert_eq!(body["error"], "InvalidRequest");
+    assert_eq!(
+        body["message"],
+        "Invalid $type: expected app.bsky.feed.post, got app.bsky.feed.like"
+    );
+}
+
 #[tokio::test]
 async fn test_list_records_has_direct_values_and_reference_cursors() {
     let (_dir, client) = common::get_client().await;

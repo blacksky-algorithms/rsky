@@ -812,6 +812,9 @@ impl From<Error> for ApiError {
         if let Some(mismatch) = value.downcast_ref::<crate::actor_store::blob::BlobMismatch>() {
             return ApiError::InvalidRequest(mismatch.to_string());
         }
+        if let Some(invalid) = value.downcast_ref::<crate::repo::prepare::InvalidRecord>() {
+            return ApiError::InvalidRequest(invalid.to_string());
+        }
         if let Some(AccountHelperError::UserAlreadyExistsError) = value.downcast_ref() {
             return ApiError::InvalidRequest(
                 "This email address is already in use, please use a different email.".to_string(),
