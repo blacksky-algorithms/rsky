@@ -76,7 +76,7 @@ impl Connection {
     // true: polled
     pub fn poll(&mut self) -> Result<bool, ConnectionError> {
         for _ in 0..128 {
-            if self.message_tx.remaining() < 16
+            if self.message_tx.remaining() < crate::crawler::worker::RING_HEADROOM
                 || crate::types::intake_bytes() > crate::config::INTAKE_BYTE_BUDGET
             {
                 return Ok(false);
