@@ -1048,13 +1048,13 @@ pub fn validate_bearer_token(
 /// is app-password-equivalent access and `transition:chat.bsky` raises it
 /// to privileged app-password access.
 ///
-/// A session granted permission-set scopes (`repo:`, `blob:`, `rpc:`,
-/// `include:`, `space:`) carries no `transition:` grant, so it maps to the
-/// same app-password level rather than being refused. That level is a
-/// ceiling, not the grant itself: what those scopes actually permit is
-/// decided at the resource, which is where the collection, blob and space
-/// constraints live. Refusing here would reject every client built against
-/// the permission-set model before it ever reached that check.
+/// Every other session maps to the same app-password level. That level is
+/// a ceiling, not the grant itself: what a session may do is decided by
+/// each route's scope declaration against the granted scopes, which is
+/// where the collection, blob, rpc and space constraints live. The
+/// reference admits any OAuth session this way and lets the route decide;
+/// refusing here turned away sessions holding only `transition:email` or
+/// an `account:`/`identity:` grant before `getSession` could answer them.
 pub fn oauth_scopes_to_auth_scope(scopes: &[String]) -> Result<AuthScope> {
     let granted = crate::oauth_scope::GrantedScopes::parse(scopes);
     if !granted.has_atproto() {
@@ -1062,10 +1062,8 @@ pub fn oauth_scopes_to_auth_scope(scopes: &[String]) -> Result<AuthScope> {
     }
     if granted.has_transition("chat.bsky") {
         Ok(AuthScope::AppPassPrivileged)
-    } else if granted.has_transition("generic") || granted.has_permission_grant() {
-        Ok(AuthScope::AppPass)
     } else {
-        bail!("Bad token scope")
+        Ok(AuthScope::AppPass)
     }
 }
 
@@ -1511,8 +1509,16 @@ mod tests {
             oauth_scopes_to_auth_scope(&scopes(&["atproto", "transition:chat.bsky"])).unwrap(),
             AuthScope::AppPassPrivileged
         );
-        // atproto alone grants no legacy access level
-        assert!(oauth_scopes_to_auth_scope(&scopes(&["atproto"])).is_err());
+        // any session with the mandatory scope is admitted at the ceiling;
+        // the route's declaration decides what it may do
+        assert_eq!(
+            oauth_scopes_to_auth_scope(&scopes(&["atproto"])).unwrap(),
+            AuthScope::AppPass
+        );
+        assert_eq!(
+            oauth_scopes_to_auth_scope(&scopes(&["atproto", "transition:email"])).unwrap(),
+            AuthScope::AppPass
+        );
         // missing the mandatory atproto scope is rejected outright
         assert!(oauth_scopes_to_auth_scope(&scopes(&["transition:generic"])).is_err());
         assert!(oauth_scopes_to_auth_scope(&[]).is_err());
@@ -1558,7 +1564,12 @@ mod tests {
             AuthScope::AppPassPrivileged
         );
         // an unrecognised token is not a permission grant
-        assert!(oauth_scopes_to_auth_scope(&scopes(&["atproto", "nonsense"])).is_err());
+        // an unrecognised scope confers nothing at the resource; the session
+        // itself is still admitted at the ceiling
+        assert_eq!(
+            oauth_scopes_to_auth_scope(&scopes(&["atproto", "nonsense"])).unwrap(),
+            AuthScope::AppPass
+        );
     }
 
     fn assert_admin(parsed: Option<BasicAuth>) {

@@ -1150,6 +1150,70 @@ async fn no_scope_required_declaration_permits_a_narrowly_scoped_session() {
     assert!(body["did"].as_str().is_some(), "body was {body}");
 }
 
+/// A session holding only `transition:email` (an OIDC bridge's grant) is
+/// admitted like the reference admits it: `getSession` answers with the
+/// address, and a PDS-local method scoped by `rpc:` refuses it while a
+/// `transition:generic` session passes.
+#[tokio::test]
+async fn an_email_only_session_reaches_get_session_but_not_rpc_scoped_methods() {
+    let (_dir, client) = get_oauth_client().await;
+    create_active_account(&client).await;
+    activate_test_account(&client).await;
+
+    let (access_token, key) = granular_access_token(&client, "atproto transition:email").await;
+    let (status, body) = dispatch_scoped_get(
+        &client,
+        "/xrpc/com.atproto.server.getSession",
+        &access_token,
+        &key,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "body was {body}");
+    assert_eq!(body["email"], "foo@example.com", "body was {body}");
+    let (status, body) = dispatch_scoped_get(
+        &client,
+        "/xrpc/app.bsky.actor.getPreferences",
+        &access_token,
+        &key,
+    )
+    .await;
+    assert_eq!(status, Status::Forbidden, "body was {body}");
+    assert_eq!(body["error"], "InsufficientScope", "body was {body}");
+    let put = json!({"preferences": []}).to_string().into_bytes();
+    let (status, body) = dispatch_scoped_post(
+        &client,
+        "/xrpc/app.bsky.actor.putPreferences",
+        &access_token,
+        &key,
+        ContentType::JSON,
+        put.clone(),
+    )
+    .await;
+    assert_eq!(status, Status::Forbidden, "body was {body}");
+    assert_eq!(body["error"], "InsufficientScope", "body was {body}");
+
+    let (access_token, key) = granular_access_token(&client, "atproto transition:generic").await;
+    let (status, body) = dispatch_scoped_get(
+        &client,
+        "/xrpc/app.bsky.actor.getPreferences",
+        &access_token,
+        &key,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "body was {body}");
+    assert!(body["preferences"].is_array(), "body was {body}");
+    let (status, body) = dispatch_scoped_post(
+        &client,
+        "/xrpc/app.bsky.actor.putPreferences",
+        &access_token,
+        &key,
+        ContentType::JSON,
+        put,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "body was {body}");
+}
+
 /// `com.atproto.server.listAppPasswords` declares `Scoped<OAuthForbidden, ...>`.
 /// The declaration must not disturb the legacy sessions that are the only
 /// callers it admits.

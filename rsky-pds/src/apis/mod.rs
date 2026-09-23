@@ -171,6 +171,35 @@ pub fn assert_rpc_target(
     )
 }
 
+/// The audience a PDS-local method is scoped against, as the reference's
+/// `computeProxyTo`: the `atproto-proxy` header when the client sent one,
+/// else the service the method reaches by default.
+pub fn rpc_audience(req: &crate::pipethrough::ProxyRequest<'_>, lxm: &str) -> Option<String> {
+    service_audience(
+        req.headers.get("atproto-proxy").map(String::as_str),
+        crate::pipethrough::default_service_for(req.cfg, lxm)
+            .as_ref()
+            .map(|service| service.did.as_str()),
+        lxm,
+    )
+}
+
+fn service_audience(
+    proxy_to: Option<&str>,
+    service_did: Option<&str>,
+    lxm: &str,
+) -> Option<String> {
+    if let Some(aud) = proxy_to {
+        return Some(aud.to_string());
+    }
+    let service_id = if lxm.starts_with("tools.ozone.") {
+        "atproto_labeler"
+    } else {
+        "bsky_appview"
+    };
+    Some(format!("{}#{service_id}", service_did?))
+}
+
 /// Whether a session may see the account's email address on
 /// `com.atproto.server.getSession`.
 ///
@@ -932,6 +961,41 @@ pub mod community;
 mod tests {
     use super::*;
     use crate::oauth_scope::{AccountAction, RepoAction};
+
+    #[test]
+    fn the_rpc_audience_is_the_proxy_header_or_the_default_service() {
+        assert_eq!(
+            service_audience(
+                Some("did:web:api.example#bsky_appview"),
+                Some("did:web:other"),
+                "app.bsky.actor.getPreferences"
+            )
+            .as_deref(),
+            Some("did:web:api.example#bsky_appview")
+        );
+        assert_eq!(
+            service_audience(
+                None,
+                Some("did:web:api.example"),
+                "app.bsky.actor.getPreferences"
+            )
+            .as_deref(),
+            Some("did:web:api.example#bsky_appview")
+        );
+        assert_eq!(
+            service_audience(
+                None,
+                Some("did:web:mod.example"),
+                "tools.ozone.team.listMembers"
+            )
+            .as_deref(),
+            Some("did:web:mod.example#atproto_labeler")
+        );
+        assert_eq!(
+            service_audience(None, None, "app.bsky.actor.getPreferences"),
+            None
+        );
+    }
 
     const POST: &str = "app.bsky.feed.post";
 
