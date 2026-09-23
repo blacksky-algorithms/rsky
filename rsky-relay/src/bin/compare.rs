@@ -16,7 +16,7 @@ struct Args {
     /// Reference relay hostname (bsky.network by default)
     #[clap(long, default_value = "bsky.network")]
     reference: String,
-    /// Candidate relay hostnames
+    /// Candidate relay hostnames, or full ws:// / wss:// origins
     #[clap(long, required = true)]
     relay: Vec<String>,
     /// Window length in seconds
@@ -34,7 +34,11 @@ struct Args {
 fn subscribe(host: String, tx: mpsc::Sender<(String, Vec<u8>, Instant)>) {
     thread::spawn(move || {
         loop {
-            let url = format!("wss://{host}/xrpc/com.atproto.sync.subscribeRepos");
+            let url = if host.contains("://") {
+                format!("{host}/xrpc/com.atproto.sync.subscribeRepos")
+            } else {
+                format!("wss://{host}/xrpc/com.atproto.sync.subscribeRepos")
+            };
             match tungstenite::connect(&url) {
                 Ok((mut socket, _)) => loop {
                     match socket.read() {
