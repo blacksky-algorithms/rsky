@@ -52,9 +52,15 @@ pub const CAPACITY_CACHE: usize = 1 << 18;
 // validator
 pub const HOSTS_WRITE_INTERVAL: Duration = Duration::from_secs(10);
 
-// validator queue
+// validator queue (legacy partition policy; queue_v2 expiry is enforced by the validator)
 pub const QUEUE_DISK_SIZE: u64 = 10 * 1024 * 1024 * 1024; // 10 GiB max queue size
 pub const QUEUE_TTL_SECONDS: Option<u64> = Some(6 * 60 * 60); // 6 hours
+pub const QUEUE_MAX_AGE: Duration = Duration::from_secs(6 * 60 * 60);
+
+// published index: ~100 B per commit, ~3.5 GB/day at network rate, so about a week
+pub const PUBLISHED_DISK_SIZE: u64 = 32 * 1024 * 1024 * 1024; // 32 GiB
+// how long the health endpoint tolerates no head progress on a non-empty ring
+pub const HEAD_STALL_SECONDS: u64 = 60;
 
 // firehose
 pub const DISK_SIZE: u64 = 320 * 1024 * 1024 * 1024; // 320 GiB

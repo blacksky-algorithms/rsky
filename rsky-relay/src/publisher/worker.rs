@@ -1,5 +1,5 @@
 use std::os::fd::AsRawFd;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 use std::{io, thread};
 
@@ -9,12 +9,17 @@ use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token};
 use thiserror::Error;
 
-use crate::SHUTDOWN;
 use crate::publisher::connection::{Connection, ConnectionError};
 use crate::publisher::types::{Command, CommandReceiver};
 use crate::types::{Cursor, DB};
+use crate::validator::event::SubscribeReposEvent;
+use crate::{SHUTDOWN, metrics};
 
-const INTEREST: Interest = Interest::WRITABLE;
+const INTEREST: Interest = Interest::READABLE.add(Interest::WRITABLE);
+const TIME_LAG_SAMPLE: u64 = 64;
+
+/// Live subscriber count across all publisher workers.
+pub static SUBSCRIBERS: AtomicI64 = AtomicI64::new(0);
 
 #[derive(Debug, Error)]
 pub enum WorkerError {
@@ -34,6 +39,7 @@ pub struct Worker {
     firehose: PartitionHandle,
     poll: Poll,
     events: Events,
+    frames: u64,
 }
 
 impl Worker {
@@ -47,7 +53,16 @@ impl Worker {
         let firehose = db.open_partition("firehose", PartitionCreateOptions::default())?;
         let poll = Poll::new()?;
         let events = Events::with_capacity(1024);
-        Ok(Self { id, connections: Vec::new(), next_idx: 0, command_rx, firehose, poll, events })
+        Ok(Self {
+            id,
+            connections: Vec::new(),
+            next_idx: 0,
+            command_rx,
+            firehose,
+            poll,
+            events,
+            frames: 0,
+        })
     }
 
     pub fn run(mut self) -> Result<(), WorkerError> {
@@ -92,6 +107,9 @@ impl Worker {
                             .register(&mut SourceFd(&conn.as_raw_fd()), Token(idx), INTEREST)
                             .expect("unable to register");
                         self.connections[idx] = Some(conn);
+                        metrics::record_subscriber_count(
+                            SUBSCRIBERS.fetch_add(1, Ordering::Relaxed) + 1,
+                        );
                     }
                     Err(err) => {
                         tracing::warn!(addr = %config.addr, cursor = ?config.cursor, %err, "unable to subscribeRepos");
@@ -124,7 +142,13 @@ impl Worker {
                     .poll(&mut events, Some(Duration::from_millis(1)))
                     .expect("failed to poll");
                 for ev in &events {
-                    if !self.poll(*seq, ev.token().0) {
+                    let idx = ev.token().0;
+                    if ev.is_readable() {
+                        if let Some(conn) = &mut self.connections[idx] {
+                            conn.readable = true;
+                        }
+                    }
+                    if !self.poll(*seq, idx) {
                         break 'outer;
                     }
                 }
@@ -142,23 +166,42 @@ impl Worker {
         Ok(true)
     }
 
+    fn frame_time(&mut self, data: &Bytes) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.frames += 1;
+        if self.frames % TIME_LAG_SAMPLE != 0 {
+            return None;
+        }
+        SubscribeReposEvent::parse(data).ok().flatten().map(|event| event.time())
+    }
+
+    fn drop_connection(&mut self, idx: usize) {
+        if let Some(conn) = self.connections[idx].take() {
+            #[expect(clippy::expect_used)]
+            self.poll
+                .registry()
+                .deregister(&mut SourceFd(&conn.as_raw_fd()))
+                .expect("failed to deregister");
+            metrics::record_subscriber_count(SUBSCRIBERS.fetch_sub(1, Ordering::Relaxed) - 1);
+        }
+    }
+
     fn send(&mut self, seq: Cursor, data: &Bytes) -> bool {
-        for conn in &mut self.connections {
-            let Some(inner) = conn.as_mut() else { continue };
+        let time = self.frame_time(data);
+        for idx in 0..self.connections.len() {
+            let Some(inner) = self.connections[idx].as_mut() else { continue };
             // Lagging connection: drain the gap via firehose range read instead of dropping the live event.
             let result = if inner.cursor == seq {
-                inner.send(seq, data.clone()).map(|_| ())
+                let sent = inner.send(seq, data.clone());
+                if let (Ok(true), Some(time)) = (&sent, time) {
+                    inner.last_time = Some(time);
+                }
+                sent.map(|_| ())
             } else {
                 inner.poll(seq, &self.firehose).map(|_| ())
             };
             if let Err(err) = result {
                 tracing::info!(addr = %inner.addr, cursor = %inner.cursor, %err, "disconnected");
-                #[expect(clippy::expect_used)]
-                self.poll
-                    .registry()
-                    .deregister(&mut SourceFd(&inner.as_raw_fd()))
-                    .expect("failed to deregister");
-                *conn = None;
+                self.drop_connection(idx);
             }
         }
         true
@@ -166,21 +209,28 @@ impl Worker {
 
     fn poll(&mut self, seq: Cursor, idx: usize) -> bool {
         if let Some(conn) = &mut self.connections[idx] {
-            match conn.poll(seq, &self.firehose) {
-                Ok(true) => return true,
+            let outcome = conn
+                .read_pending()
+                .and_then(|open| if open { conn.poll(seq, &self.firehose) } else { Ok(false) });
+            match outcome {
+                Ok(true) => {
+                    let lag = seq.get().saturating_sub(conn.cursor.get().saturating_sub(1));
+                    let time_lag = conn.last_time.map_or(0.0, |t| {
+                        #[expect(clippy::cast_precision_loss)]
+                        let millis = (chrono::Utc::now() - t).num_milliseconds() as f64;
+                        millis / 1000.0
+                    });
+                    metrics::record_subscriber_lag(&conn.addr.to_string(), lag, time_lag);
+                    return true;
+                }
                 Ok(false) => {
-                    tracing::info!(addr = %conn.addr, cursor = %conn.cursor, "closed due to invalid cursor");
+                    tracing::info!(addr = %conn.addr, cursor = %conn.cursor, "closed");
                 }
                 Err(err) => {
                     tracing::info!(addr = %conn.addr, cursor = %conn.cursor, %err, "disconnected");
                 }
             }
-            #[expect(clippy::expect_used)]
-            self.poll
-                .registry()
-                .deregister(&mut SourceFd(&conn.as_raw_fd()))
-                .expect("failed to deregister");
-            self.connections[idx] = None;
+            self.drop_connection(idx);
         }
 
         true
@@ -203,13 +253,7 @@ mod tests {
 
     type WsClient = WebSocket<StdTcpStream>;
 
-    static SHUTDOWN_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// `SHUTDOWN` is process-global: tests that flip it must not overlap with tests that
-    /// depend on it being clear.
-    fn shutdown_guard() -> std::sync::MutexGuard<'static, ()> {
-        SHUTDOWN_GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
+    use crate::shutdown_guard;
 
     fn build_worker() -> (Worker, rtrb::Producer<Command>, tempfile::TempDir, Keyspace) {
         let (tx, rx) = rtrb::RingBuffer::<Command>::new(64);
@@ -477,5 +521,151 @@ mod tests {
         }
         // No assert on slot state; macOS close-handshake is racy. Path is exercised.
         let _alive = w.connections[0].is_some();
+    }
+}
+
+#[cfg(test)]
+mod ping_tests {
+    use super::*;
+    use std::net::{TcpListener, TcpStream as StdTcpStream};
+    use std::thread;
+    use std::time::Duration;
+
+    use tungstenite::client::IntoClientRequest;
+
+    use crate::publisher::types::{Command, MaybeTlsStream as PubMaybeTls, SubscribeRepos};
+    use crate::types::open_keyspace;
+
+    #[test]
+    fn worker_answers_pings_and_reports_closed_clients() {
+        let _g = crate::shutdown_guard();
+        let (_tx, rx) = rtrb::RingBuffer::<Command>::new(8);
+        let tmp = tempfile::tempdir().unwrap();
+        let ks = open_keyspace(tmp.path()).unwrap();
+        let mut w = Worker::with_keyspace(0, rx, &ks).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accept = thread::spawn(move || listener.accept().unwrap());
+        let raw = StdTcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (server_stream, addr) = accept.join().unwrap();
+        let client = thread::spawn(move || {
+            let req = format!("ws://127.0.0.1:{port}/").into_client_request().unwrap();
+            tungstenite::client(req, raw).unwrap().0
+        });
+        w.handle_command(
+            Command::Connect(SubscribeRepos {
+                addr,
+                stream: PubMaybeTls::Plain(server_stream),
+                cursor: Some(Cursor::from(1)),
+            }),
+            Cursor::from(0),
+        );
+        assert!(w.connections[0].is_some());
+        let mut client = client.join().unwrap();
+        client.send(tungstenite::Message::Ping(tungstenite::Bytes::from_static(b"k"))).unwrap();
+        thread::sleep(Duration::from_millis(20));
+        let mut seq = Cursor::from(0);
+        w.update(&mut seq).unwrap();
+        client.get_mut().set_nonblocking(true).unwrap();
+        let mut got_pong = false;
+        for _ in 0..200 {
+            match client.read() {
+                Ok(tungstenite::Message::Pong(_)) => {
+                    got_pong = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        assert!(got_pong, "a Ping through the worker loop must be answered");
+        // sampled frame timing parses real frames only
+        let frames = w.frames;
+        for _ in 0..TIME_LAG_SAMPLE {
+            let _ = w.frame_time(&Bytes::from_static(b"not cbor"));
+        }
+        assert_eq!(w.frames, frames + TIME_LAG_SAMPLE);
+        client.close(None).unwrap();
+        thread::sleep(Duration::from_millis(20));
+        w.update(&mut seq).unwrap();
+        assert!(w.connections[0].is_none(), "closed client is dropped");
+    }
+}
+
+#[cfg(all(test, not(feature = "labeler")))]
+mod lag_tests {
+    use super::*;
+    use std::net::{TcpListener, TcpStream as StdTcpStream};
+    use std::thread;
+
+    use tungstenite::client::IntoClientRequest;
+
+    use crate::publisher::types::{Command, MaybeTlsStream as PubMaybeTls, SubscribeRepos};
+    use crate::types::open_keyspace;
+    use crate::validator::testutil::identity_frame;
+
+    #[test]
+    fn sampled_frames_record_subscriber_time_lag_and_vanished_peers_drop() {
+        let _g = crate::shutdown_guard();
+        let (_tx, rx) = rtrb::RingBuffer::<Command>::new(8);
+        let tmp = tempfile::tempdir().unwrap();
+        let ks = open_keyspace(tmp.path()).unwrap();
+        let mut w = Worker::with_keyspace(0, rx, &ks).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accept = thread::spawn(move || listener.accept().unwrap());
+        let raw = StdTcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (server_stream, addr) = accept.join().unwrap();
+        let client = thread::spawn(move || {
+            let req = format!("ws://127.0.0.1:{port}/").into_client_request().unwrap();
+            tungstenite::client(req, raw).unwrap().0
+        });
+        w.handle_command(
+            Command::Connect(SubscribeRepos {
+                addr,
+                stream: PubMaybeTls::Plain(server_stream),
+                cursor: Some(Cursor::from(1)),
+            }),
+            Cursor::from(0),
+        );
+        let mut client = client.join().unwrap();
+        let firehose = ks.open_partition("firehose", PartitionCreateOptions::default()).unwrap();
+        for seq in 1..=TIME_LAG_SAMPLE {
+            firehose.insert(Cursor::from(seq), identity_frame("did:plc:x", seq, None)).unwrap();
+        }
+        let mut seq = Cursor::from(0);
+        w.update(&mut seq).unwrap();
+        w.update(&mut seq).unwrap();
+        assert!(
+            w.connections[0].as_ref().unwrap().last_time.is_some(),
+            "the 64th frame is sampled"
+        );
+        client.get_mut().set_nonblocking(true).unwrap();
+        let mut received = 0;
+        for _ in 0..500 {
+            match client.read() {
+                Ok(tungstenite::Message::Binary(_)) => received += 1,
+                Ok(_) => {}
+                Err(_) => {
+                    if received >= TIME_LAG_SAMPLE {
+                        break;
+                    }
+                    thread::sleep(std::time::Duration::from_millis(2));
+                }
+            }
+        }
+        assert_eq!(received, TIME_LAG_SAMPLE);
+        drop(client);
+        thread::sleep(std::time::Duration::from_millis(20));
+        for seq in (TIME_LAG_SAMPLE + 1)..=(TIME_LAG_SAMPLE + 64) {
+            firehose.insert(Cursor::from(seq), vec![0u8; 64 * 1024]).unwrap();
+        }
+        for _ in 0..20 {
+            w.update(&mut seq).unwrap();
+            if w.connections[0].is_none() {
+                break;
+            }
+        }
+        assert!(w.connections[0].is_none());
     }
 }

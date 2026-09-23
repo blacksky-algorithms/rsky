@@ -52,7 +52,15 @@ pub struct Connection {
     pub(crate) addr: SocketAddr,
     client: WebSocket<MaybeTlsStream<TcpStream>>,
     pub(crate) cursor: Cursor,
+    /// mio is edge-triggered: readiness is only re-signalled after a read hits
+    /// `WouldBlock`, so a read budget must carry pending readiness across ticks.
+    pub(crate) readable: bool,
+    pub(crate) needs_flush: bool,
+    pub(crate) last_time: Option<chrono::DateTime<chrono::Utc>>,
 }
+
+const READ_BUDGET: usize = 64;
+pub const REPLAY_BUDGET: usize = 256;
 
 impl AsRawFd for Connection {
     #[inline]
@@ -68,11 +76,20 @@ impl Connection {
     pub fn connect(
         addr: SocketAddr, stream: MaybeTlsStream<TcpStream>, cursor: Cursor,
     ) -> Result<Self, ConnectionError> {
+        Self::connect_with_buffer(addr, stream, cursor, crate::config::PUBLISHER_MAX_WRITE_BUFFER)
+    }
+
+    pub fn connect_with_buffer(
+        addr: SocketAddr, stream: MaybeTlsStream<TcpStream>, cursor: Cursor,
+        max_write_buffer: usize,
+    ) -> Result<Self, ConnectionError> {
         // Without a cap the write buffer default is unbounded, so one
         // subscriber catching up from an old cursor queues its whole backlog
         // in memory; WriteBufferFull backpressure only exists below a cap.
+        // tungstenite requires the cap to exceed its internal write buffer
         let config = tungstenite::protocol::WebSocketConfig::default()
-            .max_write_buffer_size(crate::config::PUBLISHER_MAX_WRITE_BUFFER);
+            .write_buffer_size((max_write_buffer / 2).min(128 * 1024))
+            .max_write_buffer_size(max_write_buffer);
         let client = tungstenite::accept_with_config(stream, Some(config))?;
         match client.get_ref() {
             MaybeTlsStream::Rustls(stream) => {
@@ -82,7 +99,7 @@ impl Connection {
                 stream.set_nonblocking(true)?;
             }
         }
-        Ok(Self { addr, client, cursor })
+        Ok(Self { addr, client, cursor, readable: true, needs_flush: false, last_time: None })
     }
 
     pub fn close(&mut self, code: CloseFrame) -> Result<(), ConnectionError> {
@@ -91,19 +108,73 @@ impl Connection {
         Ok(())
     }
 
-    /// `Ok(true)` = delivered, cursor advanced. `Ok(false)` = backpressured / cursor mismatch, no advance.
+    /// `Ok(true)` = queued (cursor advanced; bytes reach the wire on flush).
+    /// `Ok(false)` = not queued: cursor mismatch or the write buffer is full.
+    /// tungstenite queues the frame before attempting the socket write, so a
+    /// `WouldBlock` from `write` still means queued; only `WriteBufferFull`
+    /// leaves the frame with the caller. Retrying a queued frame duplicates it.
     pub fn send(&mut self, seq: Cursor, data: Bytes) -> Result<bool, ConnectionError> {
         if self.cursor != seq {
             return Ok(false);
         }
-        match self.client.send(Message::Binary(data)) {
+        match self.client.write(Message::Binary(data)) {
             Ok(()) => {
                 self.cursor = seq.successor();
+                self.flush()?;
                 Ok(true)
             }
-            Err(err) if is_backpressure(&err) => Ok(false),
+            Err(tungstenite::Error::Io(err)) if err.kind() == io::ErrorKind::WouldBlock => {
+                self.cursor = seq.successor();
+                self.needs_flush = true;
+                Ok(true)
+            }
+            Err(tungstenite::Error::WriteBufferFull(_)) => {
+                self.flush()?;
+                Ok(false)
+            }
             Err(err) => Err(err)?,
         }
+    }
+
+    /// Pushes queued bytes to the socket; `WouldBlock` leaves `needs_flush` set
+    /// for the next WRITABLE event instead of disconnecting.
+    pub fn flush(&mut self) -> Result<(), ConnectionError> {
+        match self.client.flush() {
+            Ok(()) => {
+                self.needs_flush = false;
+                Ok(())
+            }
+            Err(tungstenite::Error::Io(err)) if err.kind() == io::ErrorKind::WouldBlock => {
+                self.needs_flush = true;
+                Ok(())
+            }
+            Err(err) => Err(err)?,
+        }
+    }
+
+    /// Drains inbound frames so Pings get their Pongs and Close is honoured.
+    /// Subscribers send nothing else; data frames are discarded.
+    /// `Ok(false)` = the peer closed.
+    pub fn read_pending(&mut self) -> Result<bool, ConnectionError> {
+        if !self.readable {
+            return Ok(true);
+        }
+        for _ in 0..READ_BUDGET {
+            match self.client.read() {
+                Ok(Message::Close(_)) => return Ok(false),
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(err)) if err.kind() == io::ErrorKind::WouldBlock => {
+                    self.readable = false;
+                    break;
+                }
+                Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+                    return Ok(false);
+                }
+                Err(err) => Err(err)?,
+            }
+        }
+        self.flush()?;
+        Ok(true)
     }
 
     /// false: closed
@@ -116,7 +187,15 @@ impl Connection {
             self.close(FUTURE_CLOSE)?;
             return Ok(false);
         }
-        for msg in firehose.range(self.cursor..=seq) {
+        if self.needs_flush {
+            self.flush()?;
+            if self.needs_flush {
+                return Ok(true);
+            }
+        }
+        // One catching-up subscriber must not hold the worker: a per-tick budget
+        // leaves the rest of the range for the next tick.
+        for msg in firehose.range(self.cursor..=seq).take(REPLAY_BUDGET) {
             let (k, v) = msg?;
             seq = k.into();
             if self.cursor != seq {
@@ -139,13 +218,6 @@ impl Drop for Connection {
     }
 }
 
-/// True if `err` means "byte never reached the wire" (cursor must NOT advance).
-#[inline]
-fn is_backpressure(err: &tungstenite::Error) -> bool {
-    matches!(err, tungstenite::Error::Io(e) if e.kind() == io::ErrorKind::WouldBlock)
-        || matches!(err, tungstenite::Error::WriteBufferFull(_))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,7 +225,6 @@ mod tests {
     use std::thread;
     use std::time::Duration;
     use tungstenite::client::IntoClientRequest;
-    use tungstenite::error::CapacityError;
 
     use fjall::{Config, PartitionCreateOptions};
 
@@ -173,44 +244,6 @@ mod tests {
         let (client, _resp) = tungstenite::client(req, stream).unwrap();
         let server = server_handle.join().unwrap();
         (server, client)
-    }
-
-    #[test]
-    fn wouldblock_io_is_backpressure() {
-        let err = tungstenite::Error::Io(io::Error::new(io::ErrorKind::WouldBlock, "x"));
-        assert!(is_backpressure(&err));
-    }
-
-    #[test]
-    fn write_buffer_full_is_backpressure() {
-        let err = tungstenite::Error::WriteBufferFull(Message::Binary(Bytes::new()));
-        assert!(is_backpressure(&err));
-    }
-
-    #[test]
-    fn other_io_kinds_are_not_backpressure() {
-        for kind in [
-            io::ErrorKind::ConnectionReset,
-            io::ErrorKind::BrokenPipe,
-            io::ErrorKind::UnexpectedEof,
-            io::ErrorKind::TimedOut,
-        ] {
-            let err = tungstenite::Error::Io(io::Error::new(kind, "x"));
-            assert!(!is_backpressure(&err), "{kind:?} should not be backpressure");
-        }
-    }
-
-    #[test]
-    fn connection_closed_is_not_backpressure() {
-        assert!(!is_backpressure(&tungstenite::Error::ConnectionClosed));
-        assert!(!is_backpressure(&tungstenite::Error::AlreadyClosed));
-    }
-
-    #[test]
-    fn capacity_message_too_long_is_not_backpressure() {
-        let err =
-            tungstenite::Error::Capacity(CapacityError::MessageTooLong { size: 100, max_size: 50 });
-        assert!(!is_backpressure(&err));
     }
 
     #[test]
@@ -419,5 +452,171 @@ mod tests {
         }
         assert!(payloads.len() >= 3, "expected >=3 binary frames, got {}", payloads.len());
         client.close(None).ok();
+    }
+
+    /// A client whose socket receive buffer is tiny and that never reads: the
+    /// server's writes hit `WouldBlock` quickly, exercising partial-write paths.
+    fn stalled_pair() -> (Connection, tungstenite::WebSocket<StdTcpStream>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_handle = thread::spawn(move || {
+            let (s, addr) = listener.accept().unwrap();
+            Connection::connect_with_buffer(
+                addr,
+                MaybeTlsStream::Plain(s),
+                Cursor::from(0),
+                64 * 1024,
+            )
+            .unwrap()
+        });
+        let req = format!("ws://127.0.0.1:{port}/").into_client_request().unwrap();
+        let stream = StdTcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (client, _resp) = tungstenite::client(req, stream).unwrap();
+        let server = server_handle.join().unwrap();
+        let sock = socket2::SockRef::from(client.get_ref());
+        sock.set_recv_buffer_size(4096).unwrap();
+        let sock = socket2::SockRef::from(match server.client.get_ref() {
+            MaybeTlsStream::Plain(s) => s,
+            MaybeTlsStream::Rustls(s) => s.get_ref(),
+        });
+        sock.set_send_buffer_size(4096).unwrap();
+        (server, client)
+    }
+
+    #[test]
+    fn ping_is_answered_with_pong_on_read_pending() {
+        let (mut server, mut client) = ws_pair();
+        client.send(Message::Ping(Bytes::from_static(b"keepalive"))).unwrap();
+        thread::sleep(Duration::from_millis(20));
+        assert!(server.read_pending().unwrap());
+        assert!(!server.readable, "draining to WouldBlock clears readiness");
+        let msg = client.read().unwrap();
+        assert_eq!(msg, Message::Pong(Bytes::from_static(b"keepalive")));
+        client.close(None).ok();
+    }
+
+    #[test]
+    fn ping_behind_read_budget_is_still_answered_next_tick() {
+        let (mut server, mut client) = ws_pair();
+        for _ in 0..READ_BUDGET {
+            client.send(Message::Binary(Bytes::from_static(b"noise"))).unwrap();
+        }
+        client.send(Message::Ping(Bytes::from_static(b"late"))).unwrap();
+        thread::sleep(Duration::from_millis(50));
+        assert!(server.read_pending().unwrap());
+        assert!(server.readable, "budget exhausted before WouldBlock keeps readiness set");
+        assert!(server.read_pending().unwrap());
+        assert!(!server.readable);
+        let msg = client.read().unwrap();
+        assert_eq!(msg, Message::Pong(Bytes::from_static(b"late")));
+        client.close(None).ok();
+    }
+
+    #[test]
+    fn read_pending_reports_client_close() {
+        let (mut server, mut client) = ws_pair();
+        client.close(None).unwrap();
+        thread::sleep(Duration::from_millis(20));
+        assert!(!server.read_pending().unwrap(), "close frame must report closed");
+    }
+
+    #[test]
+    fn read_pending_is_noop_without_readiness() {
+        let (mut server, client) = ws_pair();
+        server.readable = false;
+        assert!(server.read_pending().unwrap());
+        drop(client);
+    }
+
+    #[test]
+    fn partial_writes_deliver_each_seq_exactly_once() {
+        let (mut server, mut client) = stalled_pair();
+        let payload = Bytes::from(vec![0xabu8; 8 * 1024]);
+        let mut queued = 0u64;
+        let mut refused = 0u64;
+        // Queue until the 64 KiB write buffer refuses; every accepted seq advanced the cursor.
+        for seq in 0..256u64 {
+            if server.send(Cursor::from(seq), payload.clone()).unwrap() {
+                queued += 1;
+            } else {
+                refused += 1;
+                assert_eq!(server.cursor, Cursor::from(seq), "refused frame keeps cursor");
+                break;
+            }
+        }
+        assert!(queued > 0);
+        assert_eq!(refused, 1, "the capped write buffer must refuse once the peer stalls");
+        assert!(server.needs_flush);
+        // Now let the client drain everything while the server flushes on demand.
+        client.get_mut().set_nonblocking(true).unwrap();
+        let mut received = 0u64;
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while received < queued && std::time::Instant::now() < deadline {
+            server.flush().unwrap();
+            match client.read() {
+                Ok(Message::Binary(b)) => {
+                    assert_eq!(b.len(), payload.len());
+                    received += 1;
+                }
+                Ok(_) => {}
+                Err(_) => thread::sleep(Duration::from_millis(2)),
+            }
+        }
+        assert_eq!(received, queued, "each queued seq must arrive exactly once");
+        // Nothing extra arrives afterwards.
+        server.flush().unwrap();
+        thread::sleep(Duration::from_millis(20));
+        let extra = client.read();
+        assert!(matches!(extra, Err(tungstenite::Error::Io(_))), "no duplicate frames: {extra:?}");
+    }
+
+    #[test]
+    fn poll_replay_is_budgeted_and_resumes() {
+        let (mut server, mut client) = ws_pair();
+        let (_tmp, ks) = open_test_keyspace();
+        let firehose = ks.open_partition("firehose", PartitionCreateOptions::default()).unwrap();
+        let total = (REPLAY_BUDGET + 10) as u64;
+        for i in 1..=total {
+            firehose.insert(Cursor::from(i), b"e".as_slice()).unwrap();
+        }
+        server.cursor = Cursor::from(1);
+        assert!(server.poll(Cursor::from(total), &firehose).unwrap());
+        assert_eq!(server.cursor, Cursor::from(REPLAY_BUDGET as u64 + 1), "one budget per tick");
+        assert!(server.poll(Cursor::from(total), &firehose).unwrap());
+        assert_eq!(server.cursor, Cursor::from(total + 1));
+        client.get_mut().set_nonblocking(true).unwrap();
+        let mut count = 0u64;
+        for _ in 0..2000 {
+            match client.read() {
+                Ok(Message::Binary(_)) => count += 1,
+                Ok(_) => {}
+                Err(_) => {
+                    if count >= total {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
+        assert_eq!(count, total);
+    }
+
+    #[test]
+    fn poll_flushes_pending_bytes_before_replaying() {
+        let (mut server, client) = stalled_pair();
+        let (_tmp, ks) = open_test_keyspace();
+        let firehose = ks.open_partition("firehose", PartitionCreateOptions::default()).unwrap();
+        firehose.insert(Cursor::from(1), b"e".as_slice()).unwrap();
+        let payload = Bytes::from(vec![0u8; 8 * 1024]);
+        let mut seq = 100u64;
+        server.cursor = Cursor::from(seq);
+        while !server.needs_flush {
+            assert!(server.send(Cursor::from(seq), payload.clone()).unwrap());
+            seq += 1;
+        }
+        let before = server.cursor;
+        assert!(server.poll(Cursor::from(seq), &firehose).unwrap());
+        assert_eq!(server.cursor, before, "replay waits while a flush is pending");
+        drop(client);
     }
 }

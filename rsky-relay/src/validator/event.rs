@@ -74,12 +74,27 @@ pub struct Commit {
     pub sig: Vec<u8>,
 }
 
+/// `com.atproto.sync.subscribeRepos#repoOp`: `cid` is required but null on deletes,
+/// `prev` is optional and must be omitted (not null) when the PDS did not send it.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "camelCase")]
 pub enum SubscribeReposCommitOperation {
-    Create { path: String, cid: Cid },
-    Update { path: String, cid: Cid, prev_data: Option<Cid> },
-    Delete { path: String, prev_data: Option<Cid> },
+    Create {
+        path: String,
+        cid: Cid,
+    },
+    Update {
+        path: String,
+        cid: Cid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prev: Option<Cid>,
+    },
+    Delete {
+        path: String,
+        cid: Option<Cid>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prev: Option<Cid>,
+    },
 }
 
 impl PartialEq for SubscribeReposCommitOperation {
@@ -118,7 +133,7 @@ impl SubscribeReposCommitOperation {
     pub const fn is_valid(&self) -> bool {
         match self {
             Self::Create { .. } => true,
-            Self::Update { prev_data, .. } | Self::Delete { prev_data, .. } => prev_data.is_some(),
+            Self::Update { prev, .. } | Self::Delete { prev, .. } => prev.is_some(),
         }
     }
 }
@@ -142,8 +157,12 @@ pub struct SubscribeReposCommit {
     pub blocks: Vec<u8>,
     pub ops: Vec<SubscribeReposCommitOperation>,
     pub blobs: Vec<String>, // NOTE: DEPRECATED
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prev_data: Option<Cid>,
-    pub time: DateTime<Utc>,
+    /// Kept verbatim: relays forward the PDS's timestamp string unchanged.
+    pub time: String,
+    #[serde(skip)]
+    pub time_dt: DateTime<Utc>,
 }
 
 /// Updates the repo to a new state, without necessarily including that state on the firehose.
@@ -157,7 +176,9 @@ pub struct SubscribeReposSync {
     #[serde(with = "serde_bytes")]
     pub blocks: Vec<u8>,
     pub rev: TID,
-    pub time: DateTime<Utc>,
+    pub time: String,
+    #[serde(skip)]
+    pub time_dt: DateTime<Utc>,
 }
 
 /// Represents a change to an account's identity. Could be an updated handle, signing key, or pds
@@ -166,7 +187,10 @@ pub struct SubscribeReposSync {
 pub struct SubscribeReposIdentity {
     pub seq: u64,
     pub did: String,
-    pub time: DateTime<Utc>,
+    pub time: String,
+    #[serde(skip)]
+    pub time_dt: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handle: Option<String>,
 }
 
@@ -178,8 +202,11 @@ pub struct SubscribeReposIdentity {
 pub struct SubscribeReposAccount {
     pub seq: u64,
     pub did: String,
-    pub time: DateTime<Utc>,
+    pub time: String,
+    #[serde(skip)]
+    pub time_dt: DateTime<Utc>,
     pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<AccountStatus>,
 }
 
@@ -187,6 +214,23 @@ pub struct SubscribeReposAccount {
 pub struct SubscribeReposInfo {
     pub name: String,
     pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SubscribeReposError {
+    pub error: String,
+    #[serde(default)]
+    pub message: String,
+}
+
+/// Everything a `subscribeRepos` frame can carry. Error and `#info` frames are
+/// upstream signals (bad cursor, throttling) that must be counted, not dropped.
+#[expect(clippy::large_enum_variant)]
+#[derive(Debug)]
+pub enum Frame {
+    Event(SubscribeReposEvent),
+    Info { name: String, message: String },
+    Error { name: String, message: String },
 }
 
 /// Subscribe to stream of labels (and negations). Public endpoint implemented by mod services.
@@ -245,8 +289,19 @@ pub struct Header<'a> {
     pub operation_: i8,
 }
 
+fn parse_time(time: &str) -> Result<DateTime<Utc>, ParseError> {
+    Ok(DateTime::parse_from_rfc3339(time)?.with_timezone(&Utc))
+}
+
 impl SubscribeReposEvent {
     pub fn parse(data: &[u8]) -> Result<Option<Self>, ParseError> {
+        match Self::parse_frame(data)? {
+            Frame::Event(event) => Ok(Some(event)),
+            Frame::Info { .. } | Frame::Error { .. } => Ok(None),
+        }
+    }
+
+    pub fn parse_frame(data: &[u8]) -> Result<Frame, ParseError> {
         let mut reader = io::Cursor::new(data);
 
         let header = match ciborium::de::from_reader::<Header<'static>, _>(&mut reader) {
@@ -256,13 +311,37 @@ impl SubscribeReposEvent {
             }
         };
         if header.operation_ == -1 {
-            return Ok(None);
+            let body = serde_ipld_dagcbor::from_reader::<SubscribeReposError, _>(&mut reader);
+            let (name, message) = body.map_or_else(
+                |_| ("unknown".to_owned(), String::new()),
+                |err| (err.error, err.message),
+            );
+            return Ok(Frame::Error { name, message });
         }
         let body = match header.type_.as_ref() {
-            "#commit" => Self::Commit(serde_ipld_dagcbor::from_reader(&mut reader)?),
-            "#sync" => Self::Sync(serde_ipld_dagcbor::from_reader(&mut reader)?),
-            "#identity" => Self::Identity(serde_ipld_dagcbor::from_reader(&mut reader)?),
-            "#account" => Self::Account(serde_ipld_dagcbor::from_reader(&mut reader)?),
+            "#commit" => {
+                let mut commit: SubscribeReposCommit =
+                    serde_ipld_dagcbor::from_reader(&mut reader)?;
+                commit.time_dt = parse_time(&commit.time)?;
+                Self::Commit(commit)
+            }
+            "#sync" => {
+                let mut sync: SubscribeReposSync = serde_ipld_dagcbor::from_reader(&mut reader)?;
+                sync.time_dt = parse_time(&sync.time)?;
+                Self::Sync(sync)
+            }
+            "#identity" => {
+                let mut identity: SubscribeReposIdentity =
+                    serde_ipld_dagcbor::from_reader(&mut reader)?;
+                identity.time_dt = parse_time(&identity.time)?;
+                Self::Identity(identity)
+            }
+            "#account" => {
+                let mut account: SubscribeReposAccount =
+                    serde_ipld_dagcbor::from_reader(&mut reader)?;
+                account.time_dt = parse_time(&account.time)?;
+                Self::Account(account)
+            }
             "#labels" => {
                 let mut labels: SubscribeLabels = serde_ipld_dagcbor::from_reader(&mut reader)?;
                 for label in &mut labels.labels {
@@ -273,14 +352,14 @@ impl SubscribeReposEvent {
             "#info" => {
                 let info = serde_ipld_dagcbor::from_reader::<SubscribeReposInfo, _>(&mut reader)?;
                 tracing::debug!(name = %info.name, message = %info.message, "received #info");
-                return Ok(None);
+                return Ok(Frame::Info { name: info.name, message: info.message });
             }
             _ => {
                 return Err(ParseError::UnknownType(header.type_.into_owned()));
             }
         };
 
-        Ok(Some(body))
+        Ok(Frame::Event(body))
     }
 
     pub fn serialize(self, capacity: usize, seq: Cursor) -> Result<Vec<u8>, SerializeError> {
@@ -338,10 +417,10 @@ impl SubscribeReposEvent {
 
     pub fn time(&self) -> DateTime<Utc> {
         match self {
-            Self::Commit(commit) => commit.time,
-            Self::Sync(sync) => sync.time,
-            Self::Identity(identity) => identity.time,
-            Self::Account(account) => account.time,
+            Self::Commit(commit) => commit.time_dt,
+            Self::Sync(sync) => sync.time_dt,
+            Self::Identity(identity) => identity.time_dt,
+            Self::Account(account) => account.time_dt,
             Self::Labels(labels) => labels.labels.last().cts_dt,
         }
     }
@@ -371,8 +450,10 @@ mod tests {
 
     fn fixed_time() -> DateTime<Utc> {
         // Deterministic timestamp with millisecond precision (matches AT spec).
-        DateTime::parse_from_rfc3339("2026-01-12T19:45:23.307Z").unwrap().with_timezone(&Utc)
+        DateTime::parse_from_rfc3339(FIXED_TIME).unwrap().with_timezone(&Utc)
     }
+
+    const FIXED_TIME: &str = "2026-01-12T19:45:23.307Z";
 
     fn empty_cid() -> Cid {
         // Smallest valid CID: dag-cbor codec, sha256 of empty bytes.
@@ -399,7 +480,8 @@ mod tests {
             }],
             blobs: vec![],
             prev_data: None,
-            time: fixed_time(),
+            time: FIXED_TIME.to_owned(),
+            time_dt: fixed_time(),
         }
     }
 
@@ -409,7 +491,8 @@ mod tests {
             did: "did:plc:test".to_owned(),
             blocks: vec![9, 9, 9],
             rev: tid(),
-            time: fixed_time(),
+            time: FIXED_TIME.to_owned(),
+            time_dt: fixed_time(),
         }
     }
 
@@ -417,7 +500,8 @@ mod tests {
         SubscribeReposIdentity {
             seq: 0,
             did: "did:plc:test".to_owned(),
-            time: fixed_time(),
+            time: FIXED_TIME.to_owned(),
+            time_dt: fixed_time(),
             handle: Some("alice.test".to_owned()),
         }
     }
@@ -426,7 +510,8 @@ mod tests {
         SubscribeReposAccount {
             seq: 0,
             did: "did:plc:test".to_owned(),
-            time: fixed_time(),
+            time: FIXED_TIME.to_owned(),
+            time_dt: fixed_time(),
             active: false,
             status: Some(AccountStatus::Deactivated),
         }
@@ -625,9 +710,10 @@ mod tests {
         let b = SubscribeReposCommitOperation::Update {
             path: "p1".to_owned(),
             cid: empty_cid(),
-            prev_data: None,
+            prev: None,
         };
-        let c = SubscribeReposCommitOperation::Delete { path: "p2".to_owned(), prev_data: None };
+        let c =
+            SubscribeReposCommitOperation::Delete { path: "p2".to_owned(), cid: None, prev: None };
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert!(a < c);
@@ -645,7 +731,7 @@ mod tests {
             SubscribeReposCommitOperation::Update {
                 path: "p".to_owned(),
                 cid: empty_cid(),
-                prev_data: Some(empty_cid()),
+                prev: Some(empty_cid()),
             }
             .is_valid()
         );
@@ -653,20 +739,171 @@ mod tests {
             !SubscribeReposCommitOperation::Update {
                 path: "p".to_owned(),
                 cid: empty_cid(),
-                prev_data: None,
+                prev: None,
             }
             .is_valid()
         );
         assert!(
             SubscribeReposCommitOperation::Delete {
                 path: "p".to_owned(),
-                prev_data: Some(empty_cid()),
+                cid: None,
+                prev: Some(empty_cid()),
             }
             .is_valid()
         );
         assert!(
-            !SubscribeReposCommitOperation::Delete { path: "p".to_owned(), prev_data: None }
+            !SubscribeReposCommitOperation::Delete { path: "p".to_owned(), cid: None, prev: None }
                 .is_valid()
         );
+    }
+
+    #[derive(Deserialize)]
+    struct FrameFixture {
+        kind: String,
+        seq: u64,
+        frame_base64: String,
+    }
+
+    fn fixtures() -> Vec<FrameFixture> {
+        serde_json::from_str(include_str!("../../tests/interop/subscribe-repos-frames.json"))
+            .unwrap()
+    }
+
+    fn decode_base64(input: &str) -> Vec<u8> {
+        let table: Vec<u8> =
+            (b'A'..=b'Z').chain(b'a'..=b'z').chain(b'0'..=b'9').chain([b'+', b'/']).collect();
+        let mut bits = 0u32;
+        let mut nbits = 0;
+        let mut out = Vec::with_capacity(input.len() * 3 / 4);
+        for c in input.bytes().filter(|c| *c != b'=' && !c.is_ascii_whitespace()) {
+            let v = u32::try_from(table.iter().position(|t| *t == c).unwrap()).unwrap();
+            bits = (bits << 6) | v;
+            nbits += 6;
+            if nbits >= 8 {
+                nbits -= 8;
+                out.push(((bits >> nbits) & 0xff) as u8);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn upstream_frames_round_trip_byte_for_byte() {
+        // Frames captured from bsky.network: re-serializing with the same seq must
+        // reproduce the exact bytes, which pins the op shape (`prev`, `cid: null` on
+        // delete) and the omission of absent `handle`/`status`/`prevData`.
+        let fixtures = fixtures();
+        assert_eq!(fixtures.len(), 6);
+        for fixture in fixtures {
+            let raw = decode_base64(&fixture.frame_base64);
+            let event = SubscribeReposEvent::parse(&raw).unwrap().unwrap();
+            assert_eq!(event.seq().get(), fixture.seq, "{}", fixture.kind);
+            let out = event.serialize(raw.len(), Cursor::from(fixture.seq)).unwrap();
+            assert_eq!(out, raw, "{} frame must re-encode byte for byte", fixture.kind);
+        }
+    }
+
+    #[cfg(not(feature = "labeler"))]
+    #[test]
+    fn upstream_delete_op_has_null_cid_and_prev() {
+        let raw = fixtures()
+            .into_iter()
+            .find(|f| f.kind == "delete")
+            .map(|f| decode_base64(&f.frame_base64))
+            .unwrap();
+        let SubscribeReposEvent::Commit(commit) =
+            SubscribeReposEvent::parse(&raw).unwrap().unwrap()
+        else {
+            panic!("delete fixture is a commit");
+        };
+        assert!(matches!(
+            commit.ops.as_slice(),
+            [SubscribeReposCommitOperation::Delete { cid: None, prev: Some(_), .. }]
+        ));
+        assert!(commit.ops[0].is_valid());
+    }
+
+    #[test]
+    fn legacy_op_without_prev_serializes_without_prev_key() {
+        let op = SubscribeReposCommitOperation::Update {
+            path: "p".to_owned(),
+            cid: empty_cid(),
+            prev: None,
+        };
+        let bytes = serde_ipld_dagcbor::to_vec(&op).unwrap();
+        // canonical dag-cbor map with exactly three keys: cid, path, action
+        assert_eq!(bytes[0], 0xa3, "map must have 3 entries, got {bytes:02x?}");
+        let back: SubscribeReposCommitOperation = serde_ipld_dagcbor::from_slice(&bytes).unwrap();
+        assert!(matches!(back, SubscribeReposCommitOperation::Update { prev: None, .. }));
+        let del =
+            SubscribeReposCommitOperation::Delete { path: "p".to_owned(), cid: None, prev: None };
+        let bytes = serde_ipld_dagcbor::to_vec(&del).unwrap();
+        assert_eq!(bytes[0], 0xa3, "delete keeps the null cid key: {bytes:02x?}");
+    }
+
+    #[test]
+    fn absent_identity_handle_and_account_status_are_omitted() {
+        let identity = SubscribeReposIdentity {
+            seq: 1,
+            did: "did:plc:x".to_owned(),
+            time: FIXED_TIME.to_owned(),
+            time_dt: fixed_time(),
+            handle: None,
+        };
+        let bytes = serde_ipld_dagcbor::to_vec(&identity).unwrap();
+        assert_eq!(bytes[0], 0xa3, "identity without handle has 3 keys: {bytes:02x?}");
+        let account = SubscribeReposAccount {
+            seq: 1,
+            did: "did:plc:x".to_owned(),
+            time: FIXED_TIME.to_owned(),
+            time_dt: fixed_time(),
+            active: true,
+            status: None,
+        };
+        let bytes = serde_ipld_dagcbor::to_vec(&account).unwrap();
+        assert_eq!(bytes[0], 0xa4, "account without status has 4 keys: {bytes:02x?}");
+    }
+
+    #[test]
+    fn parse_frame_reports_error_and_info_frames() {
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&Header { type_: Cow::Borrowed(""), operation_: -1 }, &mut buf)
+            .unwrap();
+        serde_ipld_dagcbor::to_writer(
+            &mut buf,
+            &serde_json::json!({"error": "FutureCursor", "message": "cursor in the future"}),
+        )
+        .unwrap();
+        match SubscribeReposEvent::parse_frame(&buf).unwrap() {
+            Frame::Error { name, message } => {
+                assert_eq!(name, "FutureCursor");
+                assert_eq!(message, "cursor in the future");
+            }
+            other => panic!("expected error frame, got {other:?}"),
+        }
+        // an error frame with an undecodable body still reports an error
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&Header { type_: Cow::Borrowed(""), operation_: -1 }, &mut buf)
+            .unwrap();
+        buf.extend_from_slice(&[0xff]);
+        assert!(matches!(
+            SubscribeReposEvent::parse_frame(&buf).unwrap(),
+            Frame::Error { name, .. } if name == "unknown"
+        ));
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(
+            &Header { type_: Cow::Borrowed("#info"), operation_: 1 },
+            &mut buf,
+        )
+        .unwrap();
+        serde_ipld_dagcbor::to_writer(
+            &mut buf,
+            &SubscribeReposInfo { name: "OutdatedCursor".to_owned(), message: "m".to_owned() },
+        )
+        .unwrap();
+        assert!(matches!(
+            SubscribeReposEvent::parse_frame(&buf).unwrap(),
+            Frame::Info { name, .. } if name == "OutdatedCursor"
+        ));
     }
 }

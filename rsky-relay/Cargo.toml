@@ -1,6 +1,6 @@
 [package]
 name = "rsky-relay"
-version = "0.2.1"
+version = "0.3.0"
 default-run = "rsky-relay"
 edition = "2024"
 # Keep in sync with the toolchain pin in `rust-toolchain`. Clippy reads this as
@@ -22,8 +22,12 @@ file-rotate = "0.8"
 fjall = "2"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 hashbrown = "0.15"
+hex = "0.4"
 http = "1"
+http-body-util = "0.1"
 httparse = "1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 ipld-core = "0.4"
 k256 = "0.13"
 libc = "0.2"
@@ -50,7 +54,7 @@ signal-hook = { version = "0.3", features = ["extended-siginfo"] }
 socket2 = "0.5"
 thingbuf = "0.1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "rt", "macros", "net", "time"] }
 tracing = { version = "0.1", features = ["release_max_level_debug"] }
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -71,6 +75,7 @@ tempfile = "3"
 # external
 default = []
 labeler = [] # run a labeler relay
+compare = [] # build the relay parity comparator
 
 [[bin]]
 name = "rsky-relay"
@@ -80,6 +85,11 @@ path = "src/main.rs"
 name = "rsky-relay-labeler"
 path = "src/main.rs"
 required-features = ["labeler"]
+
+[[bin]]
+name = "rsky-relay-compare"
+path = "src/bin/compare.rs"
+required-features = ["compare"]
 
 [package.metadata.cargo-machete]
 ignored = ["serde_bytes"]
