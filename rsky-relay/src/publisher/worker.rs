@@ -17,6 +17,8 @@ use crate::{SHUTDOWN, metrics};
 
 const INTEREST: Interest = Interest::READABLE.add(Interest::WRITABLE);
 const TIME_LAG_SAMPLE: u64 = 64;
+const HEAD_STEP: u64 = 256;
+const HEAD_BATCH: usize = 8192;
 
 /// Live subscriber count across all publisher workers.
 pub static SUBSCRIBERS: AtomicI64 = AtomicI64::new(0);
@@ -129,18 +131,32 @@ impl Worker {
                 self.handle_command(command, *seq);
             }
 
-            for msg in self.firehose.range((*seq + 1)..=(*seq + 32)) {
-                let (k, v) = msg?;
-                *seq = k.into();
-                self.send(*seq, &Bytes::from_owner(v));
+            // Track the validator head until the range is exhausted (bounded per
+            // pass): a fixed 32 frames per pass capped delivery at ~1,000/s per
+            // worker and let subscribers fall hours behind during a replay.
+            let mut sent = 0usize;
+            while sent < HEAD_BATCH {
+                let before = *seq;
+                for msg in self.firehose.range((*seq + 1)..=(*seq + HEAD_STEP)) {
+                    let (k, v) = msg?;
+                    *seq = k.into();
+                    self.send(*seq, &Bytes::from_owner(v));
+                    sent += 1;
+                }
+                if *seq == before {
+                    break;
+                }
             }
 
+            // Only sleep in the poller when nothing is being delivered and no
+            // subscriber can make progress without a WRITABLE event.
+            let busy = sent > 0 || self.can_make_progress(*seq);
+            let (passes, timeout) =
+                if busy { (1, Duration::ZERO) } else { (32, Duration::from_millis(1)) };
             let mut events = std::mem::replace(&mut self.events, Events::with_capacity(0));
-            'outer: for _ in 0..32 {
+            'outer: for _ in 0..passes {
                 #[expect(clippy::expect_used)]
-                self.poll
-                    .poll(&mut events, Some(Duration::from_millis(1)))
-                    .expect("failed to poll");
+                self.poll.poll(&mut events, Some(timeout)).expect("failed to poll");
                 for ev in &events {
                     let idx = ev.token().0;
                     if ev.is_readable() {
@@ -164,6 +180,15 @@ impl Worker {
         }
 
         Ok(true)
+    }
+
+    /// A subscriber behind the head that is not waiting on the socket can be
+    /// replayed right now, so the worker must not idle.
+    fn can_make_progress(&self, seq: Cursor) -> bool {
+        self.connections
+            .iter()
+            .flatten()
+            .any(|conn| !conn.needs_flush && conn.cursor.get() <= seq.get())
     }
 
     fn frame_time(&mut self, data: &Bytes) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -214,7 +239,9 @@ impl Worker {
                 .and_then(|open| if open { conn.poll(seq, &self.firehose) } else { Ok(false) });
             match outcome {
                 Ok(true) => {
-                    let lag = seq.get().saturating_sub(conn.cursor.get().saturating_sub(1));
+                    // against the validator's head, not this worker's position
+                    let head = crate::HEAD_SEQ.load(Ordering::Relaxed).max(seq.get());
+                    let lag = head.saturating_sub(conn.cursor.get().saturating_sub(1));
                     let time_lag = conn.last_time.map_or(0.0, |t| {
                         #[expect(clippy::cast_precision_loss)]
                         let millis = (chrono::Utc::now() - t).num_milliseconds() as f64;
@@ -603,6 +630,72 @@ mod lag_tests {
     use crate::publisher::types::{Command, MaybeTlsStream as PubMaybeTls, SubscribeRepos};
     use crate::types::open_keyspace;
     use crate::validator::testutil::identity_frame;
+
+    #[test]
+    fn worker_tracks_a_large_head_jump_and_drains_lagging_subscribers_fast() {
+        let _g = crate::shutdown_guard();
+        let (_tx, rx) = rtrb::RingBuffer::<Command>::new(8);
+        let tmp = tempfile::tempdir().unwrap();
+        let ks = open_keyspace(tmp.path()).unwrap();
+        let mut w = Worker::with_keyspace(0, rx, &ks).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accept = thread::spawn(move || listener.accept().unwrap());
+        let raw = StdTcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (server_stream, addr) = accept.join().unwrap();
+        let client = thread::spawn(move || {
+            let req = format!("ws://127.0.0.1:{port}/").into_client_request().unwrap();
+            tungstenite::client(req, raw).unwrap().0
+        });
+        w.handle_command(
+            Command::Connect(SubscribeRepos {
+                addr,
+                stream: PubMaybeTls::Plain(server_stream),
+                cursor: Some(Cursor::from(1)),
+            }),
+            Cursor::from(0),
+        );
+        let mut client = client.join().unwrap();
+        let firehose = ks.open_partition("firehose", PartitionCreateOptions::default()).unwrap();
+        let total = 20_000u64;
+        for seq in 1..=total {
+            firehose.insert(Cursor::from(seq), b"e".as_slice()).unwrap();
+        }
+        crate::HEAD_SEQ.store(total, Ordering::Relaxed);
+        // drain on the client side concurrently so the server never backpressures
+        let reader = thread::spawn(move || {
+            client.get_mut().set_nonblocking(true).unwrap();
+            let mut n = 0u64;
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while n < total && std::time::Instant::now() < deadline {
+                match client.read() {
+                    Ok(tungstenite::Message::Binary(_)) => n += 1,
+                    Ok(_) => {}
+                    Err(_) => thread::sleep(Duration::from_millis(1)),
+                }
+            }
+            n
+        });
+        let mut seq = Cursor::from(0);
+        let start = std::time::Instant::now();
+        let mut updates = 0;
+        while seq.get() < total && updates < 200 {
+            w.update(&mut seq).unwrap();
+            updates += 1;
+        }
+        assert_eq!(seq.get(), total, "worker must reach the head");
+        assert!(updates <= 3, "the head is tracked in a few passes, not {updates}");
+        while w.connections[0].as_ref().is_some_and(|c| c.cursor.get() <= total)
+            && start.elapsed() < Duration::from_secs(20)
+        {
+            w.update(&mut seq).unwrap();
+        }
+        assert_eq!(reader.join().unwrap(), total, "every frame reaches the subscriber");
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "20k frames drain in seconds, not minutes"
+        );
+    }
 
     #[test]
     fn sampled_frames_record_subscriber_time_lag_and_vanished_peers_drop() {

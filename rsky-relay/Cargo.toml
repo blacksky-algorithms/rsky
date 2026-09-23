@@ -1,6 +1,6 @@
 [package]
 name = "rsky-relay"
-version = "0.3.0"
+version = "0.3.1"
 default-run = "rsky-relay"
 edition = "2024"
 # Keep in sync with the toolchain pin in `rust-toolchain`. Clippy reads this as
