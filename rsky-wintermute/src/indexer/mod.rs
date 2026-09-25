@@ -41,6 +41,19 @@ static LIKE_INSERT_SEMAPHORE: std::sync::LazyLock<Semaphore> =
 static ACTOR_CACHE: std::sync::LazyLock<DashMap<String, ()>> =
     std::sync::LazyLock::new(DashMap::new);
 const ACTOR_CACHE_MAX_SIZE: usize = 2_000_000;
+
+// Re-indexing a repo would otherwise notify for its whole history.
+static NOTIFICATIONS_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+pub fn disable_notifications() {
+    NOTIFICATIONS_ENABLED.store(false, Ordering::Relaxed);
+}
+
+fn notifications_enabled() -> bool {
+    NOTIFICATIONS_ENABLED.load(Ordering::Relaxed)
+}
+
 /// How long a loop waits before retrying work deferred by a fence.
 const FENCE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const EMBED_IMAGES: &str = "app.bsky.embed.images";
@@ -3521,7 +3534,10 @@ impl IndexerManager {
                 bulk::copy_insert_quotes(client, &quote_data, compute_agg).await
             },
             async {
-                if !compute_agg || (notif_rows.is_empty() && reply_posts.is_empty()) {
+                if !compute_agg
+                    || (notif_rows.is_empty() && reply_posts.is_empty())
+                    || !notifications_enabled()
+                {
                     return Ok(());
                 }
                 let conn = pool.get().await.map_err(WintermuteError::Pool)?;
@@ -3734,7 +3750,7 @@ impl IndexerManager {
         notif_rows: &[bulk::NotificationRow],
         compute_agg: bool,
     ) -> Result<(), WintermuteError> {
-        if !compute_agg || notif_rows.is_empty() {
+        if !compute_agg || notif_rows.is_empty() || !notifications_enabled() {
             return Ok(());
         }
         let conn = pool.get().await.map_err(WintermuteError::Pool)?;
@@ -4170,7 +4186,11 @@ impl IndexerManager {
         }
 
         // Generate mention notifications from facets
-        if let Some(facets) = record.get("facets").and_then(|f| f.as_array()) {
+        if let Some(facets) = record
+            .get("facets")
+            .and_then(|f| f.as_array())
+            .filter(|_| notifications_enabled())
+        {
             for facet in facets {
                 if let Some(features) = facet.get("features").and_then(|f| f.as_array()) {
                     for feature in features {
@@ -4252,6 +4272,9 @@ impl IndexerManager {
         cid: &str,
         sort_at: &str,
     ) -> Result<(), WintermuteError> {
+        if !notifications_enabled() {
+            return Ok(());
+        }
         {
             const REPLY_NOTIF_DEPTH: i32 = 5;
 
@@ -4513,7 +4536,10 @@ impl IndexerManager {
                     .await?;
 
                 // Generate quote notification
-                if let Ok(quoted_uri) = AtUri::new(embed_uri.to_owned(), None) {
+                if let Some(quoted_uri) = AtUri::new(embed_uri.to_owned(), None)
+                    .ok()
+                    .filter(|_| notifications_enabled())
+                {
                     let quoted_author = quoted_uri.get_hostname();
                     if quoted_author != creator {
                         let sort_at = if indexed_at < created_at {
@@ -4673,7 +4699,7 @@ impl IndexerManager {
             )
             .await?;
 
-        if row_count > 0 && !subject.is_empty() {
+        if row_count > 0 && !subject.is_empty() && notifications_enabled() {
             if let Ok(subject_uri) = AtUri::new(subject.to_owned(), None) {
                 let subject_author = subject_uri.get_hostname();
                 if subject_author != did {
@@ -4791,16 +4817,18 @@ impl IndexerManager {
             .await?;
 
         if row_count > 0 {
-            if let Err(e) = client
-                .execute(
-                    "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)
-                     ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
-                    &[&subject, &did, &uri, &cid, &"follow", &None::<String>, &indexed_at],
-                )
-                .await
-            {
-                tracing::warn!("failed to insert follow notification for {uri}: {e}");
+            if notifications_enabled() {
+                if let Err(e) = client
+                    .execute(
+                        "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
+                         VALUES ($1, $2, $3, $4, $5, $6, $7)
+                         ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
+                        &[&subject, &did, &uri, &cid, &"follow", &None::<String>, &indexed_at],
+                    )
+                    .await
+                {
+                    tracing::warn!("failed to insert follow notification for {uri}: {e}");
+                }
             }
 
             client
@@ -4929,7 +4957,7 @@ impl IndexerManager {
             )
             .await?;
 
-        if row_count > 0 && !subject.is_empty() {
+        if row_count > 0 && !subject.is_empty() && notifications_enabled() {
             if let Ok(subject_uri) = AtUri::new(subject.to_owned(), None) {
                 let subject_author = subject_uri.get_hostname();
                 if subject_author != did {
@@ -5116,7 +5144,7 @@ impl IndexerManager {
             )
             .await?;
 
-        if row_count > 0 {
+        if row_count > 0 && notifications_enabled() {
             if let Some(starter_pack_uri_str) = joined_via_uri {
                 if let Ok(starter_pack_uri) = AtUri::new(starter_pack_uri_str.to_owned(), None) {
                     let starter_pack_author = starter_pack_uri.get_hostname();
