@@ -241,9 +241,17 @@ pub async fn assert_rpc_scope(
     let lxm = parse_req_nsid(req);
     // An `rpc:` grant is bound to an audience, so a destination we cannot
     // resolve is a destination we cannot show the call is scoped for.
-    let aud = match format_url_and_aud(req, None).await {
-        Ok(UrlAndAud { aud, .. }) => aud,
-        Err(error) => return Err(pipethrough_error(&error)),
+    if let Err(error) = format_url_and_aud(req, None).await {
+        return Err(pipethrough_error(&error));
+    }
+    // The grant names a service (`did#service_id`), as the reference's
+    // `computeProxyTo` does, not the bare DID `format_url_and_aud` returns for
+    // the service-auth JWT. Checking the bare DID refused every spec-shaped
+    // grant, e.g. `rpc:app.bsky.feed.getTimeline?aud=did:web:api.bsky.app%23bsky_appview`.
+    let Some(aud) = crate::apis::rpc_audience(req, &lxm) else {
+        return Err(pipethrough_error(&anyhow::anyhow!(
+            InvalidRequestError::NoServiceConfigured(req.path.clone())
+        )));
     };
     if scopes.allows_rpc(&lxm, &aud) {
         Ok(())
