@@ -3111,4 +3111,101 @@ mod indexer_tests {
             cleanup_test_data(&pool, did).await;
         }
     }
+
+    #[tokio::test]
+    async fn test_reindex_fills_missing_reply_links() {
+        let pool = setup_test_pool();
+        let did = "did:plc:reindexreplylinks";
+        let parent = "at://did:plc:reindexreplyparent/app.bsky.feed.post/parent1";
+        let uri = format!("at://{did}/app.bsky.feed.post/child1");
+        cleanup_test_data(&pool, did).await;
+
+        let client = pool.get().await.unwrap();
+        client
+            .execute(
+                "INSERT INTO post (uri, cid, creator, text, \"createdAt\", \"indexedAt\")
+                 VALUES ($1, 'bafychild', $2, 'reply', '2025-07-17T23:11:58.017Z', '2026-01-15T22:38:59.532Z')",
+                &[&uri, &did],
+            )
+            .await
+            .unwrap();
+        client
+            .execute(
+                "INSERT INTO profile_agg (did, \"postsCount\") VALUES ($1, 1)",
+                &[&did],
+            )
+            .await
+            .unwrap();
+
+        let job = crate::types::IndexJob {
+            uri: uri.clone(),
+            cid: "bafychild".to_owned(),
+            action: WriteAction::Create,
+            record: Some(serde_json::json!({
+                "text": "reply",
+                "createdAt": "2025-07-17T23:11:58.017Z",
+                "reply": {
+                    "root": {"uri": parent, "cid": "bafyparent"},
+                    "parent": {"uri": parent, "cid": "bafyparent"}
+                }
+            })),
+            indexed_at: chrono::Utc::now().to_rfc3339(),
+            rev: "3mwreindex0001".to_owned(),
+            provenance: None,
+        };
+        for _ in 0..2 {
+            IndexerManager::process_job(&pool, &job, false)
+                .await
+                .expect("reindex succeeds");
+        }
+
+        let row = client
+            .query_one(
+                "SELECT \"replyParent\", \"replyParentCid\", \"replyRoot\", \"replyRootCid\"
+                 FROM post WHERE uri = $1",
+                &[&uri],
+            )
+            .await
+            .unwrap();
+        assert_eq!(row.get::<_, Option<String>>(0).as_deref(), Some(parent));
+        assert_eq!(
+            row.get::<_, Option<String>>(1).as_deref(),
+            Some("bafyparent")
+        );
+        assert_eq!(row.get::<_, Option<String>>(2).as_deref(), Some(parent));
+        assert_eq!(
+            row.get::<_, Option<String>>(3).as_deref(),
+            Some("bafyparent")
+        );
+
+        let posts_count: i64 = client
+            .query_one(
+                "SELECT \"postsCount\"::int8 FROM profile_agg WHERE did = $1",
+                &[&did],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            posts_count, 1,
+            "relinking an existing post must not recount it"
+        );
+
+        let reply_count: i64 = client
+            .query_one(
+                "SELECT \"replyCount\"::int8 FROM post_agg WHERE uri = $1",
+                &[&parent],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(reply_count, 1);
+
+        drop(
+            client
+                .execute("DELETE FROM post_agg WHERE uri = $1", &[&parent])
+                .await,
+        );
+        cleanup_test_data(&pool, did).await;
+    }
 }

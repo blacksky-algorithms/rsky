@@ -26,6 +26,10 @@ struct Args {
     /// PostgreSQL connection URL
     #[arg(long, env = "DATABASE_URL")]
     database_url: String,
+
+    /// Do not write notification rows
+    #[arg(long)]
+    no_notifications: bool,
 }
 
 #[tokio::main]
@@ -34,6 +38,9 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let args = Args::parse();
+    if args.no_notifications {
+        rsky_wintermute::indexer::disable_notifications();
+    }
 
     // Parse all DIDs from args (supporting comma-separated)
     let dids: Vec<String> = args
