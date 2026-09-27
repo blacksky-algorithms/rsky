@@ -43,10 +43,11 @@ pub async fn space_list_blobs(
         false,
     )
     .await?;
-    // Proves the repo exists in this space before any listing is returned.
+    // A repo with no rows has no blobs to list, which is an empty page rather
+    // than a missing space.
     reader
         .space
-        .live_repo_state(&space_id.uri())
+        .readable_repo_state(&space_id.uri())
         .await
         .map_err(space_error)?;
     let page = reader

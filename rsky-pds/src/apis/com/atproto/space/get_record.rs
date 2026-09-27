@@ -43,9 +43,11 @@ pub async fn space_get_record(
         false,
     )
     .await?;
+    // Tombstone gate only. A repo with no rows yields `RecordNotFound` below,
+    // which is the honest answer for a record that was never written.
     reader
         .space
-        .live_repo_state(&space_id.uri())
+        .readable_repo_state(&space_id.uri())
         .await
         .map_err(space_error)?;
     let record = reader

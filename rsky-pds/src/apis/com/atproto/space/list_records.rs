@@ -48,9 +48,11 @@ pub async fn space_list_records(
         false,
     )
     .await?;
+    // An unwritten repo is empty, not absent: `listRecords` is exactly the
+    // call an app makes to discover that a member has not written yet.
     reader
         .space
-        .live_repo_state(&space_id.uri())
+        .readable_repo_state(&space_id.uri())
         .await
         .map_err(space_error)?;
     let rows = reader

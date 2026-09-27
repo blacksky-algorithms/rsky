@@ -364,6 +364,25 @@ impl SpaceStore {
         Ok(state)
     }
 
+    /// Repo state for a *read*: `Ok(None)` before the member's first write.
+    ///
+    /// The `space_repo` row is created by [`apply_writes_tx`], so a member who
+    /// has been added to a space but has not written to it yet has no row. That
+    /// is the ordinary pre-first-write state rather than a missing space — the
+    /// same ordering `simplespace::add_member` documents when it indexes a
+    /// membership "before their first write creates a repo row".
+    ///
+    /// A tombstoned repo still errors, which is the half of
+    /// [`Self::live_repo_state`] a read actually needs.
+    pub async fn readable_repo_state(&self, space_uri: &str) -> Result<Option<SpaceRepoState>> {
+        match self.repo_state(space_uri).await? {
+            Some(state) if state.deleted => {
+                Err(SpaceStoreError::SpaceDeleted(space_uri.to_string()).into())
+            }
+            other => Ok(other),
+        }
+    }
+
     pub async fn get_record(
         &self,
         space_uri: &str,
@@ -453,7 +472,12 @@ impl SpaceStore {
         cursor: Option<i64>,
         limit: usize,
     ) -> Result<(Vec<SpaceOplogRow>, bool)> {
-        let state = self.live_repo_state(space_uri).await?;
+        // No repo yet means no ops yet — an empty page rather than a refusal, so a
+        // syncer walking a member from `since = None` gets a clean answer instead of
+        // an error it has to special-case.
+        let Some(state) = self.readable_repo_state(space_uri).await? else {
+            return Ok((Vec::new(), false));
+        };
         if let Some(floor) = state.oplog_floor_rev {
             match since {
                 Some(ref since) if since.as_str() >= floor.as_str() => {}

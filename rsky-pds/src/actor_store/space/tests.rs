@@ -494,11 +494,11 @@ async fn repo_lifecycle_flags_and_listing() {
         err.downcast_ref::<SpaceStoreError>(),
         Some(SpaceStoreError::SpaceNotFound(_))
     ));
-    let err = store.list_repo_ops(&uri, None, None, 10).await.unwrap_err();
-    assert!(matches!(
-        err.downcast_ref::<SpaceStoreError>(),
-        Some(SpaceStoreError::SpaceNotFound(_))
-    ));
+    // An unwritten repo has no ops rather than no space. This used to assert
+    // `SpaceNotFound`, which made the pre-first-write window unreadable.
+    let (ops, more) = store.list_repo_ops(&uri, None, None, 10).await.unwrap();
+    assert!(ops.is_empty());
+    assert!(!more);
 
     store
         .apply_writes(&space, vec![create("a", "one")], DEFAULT_OPLOG_WINDOW)
@@ -819,4 +819,75 @@ async fn oplog_window_env_override() {
     std::env::set_var("PDS_SPACE_OPLOG_WINDOW", "0");
     assert_eq!(oplog_window(), 1);
     std::env::remove_var("PDS_SPACE_OPLOG_WINDOW");
+}
+
+/// A member added to a space, before they have written anything, reads as empty.
+///
+/// Every member passes through this state exactly once, and an application that
+/// syncs on page load meets them in it. `space_repo` is created by the first
+/// write (see `apply_writes_tx`), so a read that requires the row refuses the
+/// one moment it is guaranteed to be absent.
+#[tokio::test]
+async fn reads_before_the_first_write_are_empty_not_missing() {
+    let (_dir, store) = store().await;
+    let space = space();
+    let uri = space.uri();
+
+    // No write has happened, so there is no repo row.
+    assert!(store.repo_state(&uri).await.unwrap().is_none());
+
+    // ...which a read reports as "nothing here", not as a missing space.
+    assert!(store.readable_repo_state(&uri).await.unwrap().is_none());
+    assert!(store
+        .list_records(&uri, None, 50, None)
+        .await
+        .unwrap()
+        .is_empty());
+    let (ops, more) = store.list_repo_ops(&uri, None, None, 50).await.unwrap();
+    assert!(ops.is_empty());
+    assert!(!more);
+    assert!(store
+        .list_space_blobs(&uri, None, 50)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .get_record(&uri, "com.example.post", "a")
+        .await
+        .unwrap()
+        .is_none());
+
+    // The first write creates the row, and reads keep working afterwards.
+    store
+        .apply_writes(&space, vec![create("a", "one")], DEFAULT_OPLOG_WINDOW)
+        .await
+        .unwrap();
+    assert!(store.readable_repo_state(&uri).await.unwrap().is_some());
+    assert_eq!(
+        store
+            .list_records(&uri, None, 50, None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// A tombstoned repo still errors — the half of `live_repo_state` reads need.
+#[tokio::test]
+async fn readable_repo_state_still_refuses_a_deleted_repo() {
+    let (_dir, store) = store().await;
+    let space = space();
+    let uri = space.uri();
+    store
+        .apply_writes(&space, vec![create("a", "one")], DEFAULT_OPLOG_WINDOW)
+        .await
+        .unwrap();
+    assert!(store.flag_repo_deleted(&uri).await.unwrap());
+
+    let err = store.readable_repo_state(&uri).await.unwrap_err();
+    assert!(matches!(
+        err.downcast_ref::<SpaceStoreError>(),
+        Some(SpaceStoreError::SpaceDeleted(_))
+    ));
 }

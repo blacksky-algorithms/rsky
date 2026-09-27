@@ -117,9 +117,10 @@ pub async fn space_register_notify(
                 .map_err(|error| {
                     ApiError::BadRequest("RepoNotFound".to_string(), error.to_string())
                 })?;
+            // A member may subscribe to a space before writing into it.
             reader
                 .space
-                .live_repo_state(&space_id.uri())
+                .readable_repo_state(&space_id.uri())
                 .await
                 .map_err(space_error)?;
             reader
