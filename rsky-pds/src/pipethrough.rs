@@ -239,20 +239,16 @@ pub async fn assert_rpc_scope(
         return Ok(());
     };
     let lxm = parse_req_nsid(req);
+    // The grant names a service (`did#service_id`), as the reference's
+    // `computeProxyTo` does, not the bare DID `format_url_and_aud` returns for
+    // the service-auth JWT. Checking the bare DID refused every spec-shaped
+    // grant, e.g. `rpc:app.bsky.feed.getTimeline?aud=did:web:api.bsky.app%23bsky_appview`.
+    let aud = configured_audience(crate::apis::rpc_audience(req, &lxm), &req.path)?;
     // An `rpc:` grant is bound to an audience, so a destination we cannot
     // resolve is a destination we cannot show the call is scoped for.
     if let Err(error) = format_url_and_aud(req, None).await {
         return Err(pipethrough_error(&error));
     }
-    // The grant names a service (`did#service_id`), as the reference's
-    // `computeProxyTo` does, not the bare DID `format_url_and_aud` returns for
-    // the service-auth JWT. Checking the bare DID refused every spec-shaped
-    // grant, e.g. `rpc:app.bsky.feed.getTimeline?aud=did:web:api.bsky.app%23bsky_appview`.
-    let Some(aud) = crate::apis::rpc_audience(req, &lxm) else {
-        return Err(pipethrough_error(&anyhow::anyhow!(
-            InvalidRequestError::NoServiceConfigured(req.path.clone())
-        )));
-    };
     if scopes.allows_rpc(&lxm, &aud) {
         Ok(())
     } else {
@@ -260,6 +256,14 @@ pub async fn assert_rpc_scope(
             "Token scope does not permit calling {lxm} on {aud}"
         )))
     }
+}
+
+fn configured_audience(aud: Option<String>, path: &str) -> Result<String, ApiError> {
+    aud.ok_or_else(|| {
+        pipethrough_error(&anyhow::anyhow!(InvalidRequestError::NoServiceConfigured(
+            path.to_owned()
+        )))
+    })
 }
 
 // Request setup/formatting
@@ -659,7 +663,7 @@ pub async fn read_array_buffer_res(res: Response) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod default_service_tests {
-    use super::default_service_for;
+    use super::{configured_audience, default_service_for};
     use crate::config::{env_to_cfg, ServiceConfig};
 
     fn service(name: &str) -> Option<ServiceConfig> {
@@ -696,6 +700,20 @@ mod default_service_tests {
         assert_eq!(did_for("xyz.unknown.method"), "did:web:appview.example.com");
         cfg.bsky_app_view = None;
         assert!(default_service_for(&cfg, "app.bsky.feed.getTimeline").is_none());
+    }
+
+    #[test]
+    fn a_proxied_call_with_no_service_configured_is_refused() {
+        let path = "/xrpc/app.bsky.feed.getTimeline";
+        assert_eq!(
+            configured_audience(
+                Some("did:web:appview.example.com#bsky_appview".into()),
+                path
+            )
+            .unwrap(),
+            "did:web:appview.example.com#bsky_appview"
+        );
+        assert!(configured_audience(None, path).is_err());
     }
 }
 
