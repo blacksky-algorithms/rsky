@@ -192,11 +192,14 @@ fn service_audience(
     if let Some(aud) = proxy_to {
         return Some(aud.to_string());
     }
-    let service_id = if lxm.starts_with("tools.ozone.") {
-        "atproto_labeler"
-    } else {
-        "bsky_appview"
-    };
+    // The reference's `defaultService`: moderation tools and reports go to a
+    // labeler, everything else to the appview.
+    let service_id =
+        if lxm.starts_with("tools.ozone.") || lxm == "com.atproto.moderation.createReport" {
+            "atproto_labeler"
+        } else {
+            "bsky_appview"
+        };
     Some(format!("{}#{service_id}", service_did?))
 }
 
@@ -960,7 +963,7 @@ pub mod community;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oauth_scope::{AccountAction, RepoAction};
+    use crate::oauth_scope::{AccountAction, GrantedScopes, RepoAction};
 
     #[test]
     fn the_rpc_audience_is_the_proxy_header_or_the_default_service() {
@@ -992,8 +995,38 @@ mod tests {
             Some("did:web:mod.example#atproto_labeler")
         );
         assert_eq!(
+            service_audience(
+                None,
+                Some("did:web:mod.example"),
+                "com.atproto.moderation.createReport"
+            )
+            .as_deref(),
+            Some("did:web:mod.example#atproto_labeler")
+        );
+        assert_eq!(
             service_audience(None, None, "app.bsky.actor.getPreferences"),
             None
+        );
+    }
+
+    /// The proxied-call check matches a grant against the full `did#service`
+    /// target, as the reference PDS does, so a spec-shaped grant naming the
+    /// appview's service id is honoured and one naming another is not.
+    #[test]
+    fn an_rpc_grant_naming_the_service_id_covers_the_proxied_call() {
+        let lxm = "app.bsky.feed.getTimeline";
+        let aud = service_audience(Some("did:web:api.bsky.app#bsky_appview"), None, lxm).unwrap();
+        let granted =
+            |scope: &str| GrantedScopes::parse(&["atproto".to_string(), scope.to_string()]);
+
+        assert!(
+            granted("rpc:app.bsky.feed.getTimeline?aud=did:web:api.bsky.app%23bsky_appview")
+                .allows_rpc(lxm, &aud)
+        );
+        assert!(granted("rpc:app.bsky.feed.getTimeline?aud=*").allows_rpc(lxm, &aud));
+        assert!(
+            !granted("rpc:app.bsky.feed.getTimeline?aud=did:web:api.bsky.app%23other")
+                .allows_rpc(lxm, &aud)
         );
     }
 
