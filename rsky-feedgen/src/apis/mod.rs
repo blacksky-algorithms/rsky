@@ -17,6 +17,7 @@ use regex::Regex;
 use rocket::State;
 use rsky_common::env::{env_bool, env_int};
 use rsky_common::explicit_slurs::contains_explicit_slurs;
+use rsky_lexicon::app::bsky::embed::gallery::GalleryItem;
 use rsky_lexicon::app::bsky::embed::{Embeds, MediaUnion};
 use rsky_lexicon::app::bsky::feed::PostLabels;
 use std::collections::HashSet;
@@ -604,6 +605,7 @@ pub async fn queue_creation(
                         if let Some(PostLabels::SelfLabels(self_labels)) = post_record.labels {
                             new_post.labels = self_labels.values.into_iter().map(|self_label| Some(self_label.val)).collect::<Vec<Option<String>>>();
                         }
+                        let mut post_gallery_images = Vec::new();
                         if let Some(embed) = post_record.embed {
                             match embed {
                                 Embeds::Images(e) => {
@@ -734,6 +736,7 @@ pub async fn queue_creation(
                                                 _ => eprintln!("Unknown video type: {v:?}")
                                             };
                                         }
+                                        MediaUnion::Gallery(m) => post_gallery_images.extend(m.items),
                                         MediaUnion::External(e) => {
                                             new_post.external_uri = Some(e.external.uri);
                                             new_post.external_title = Some(e.external.title);
@@ -760,6 +763,23 @@ pub async fn queue_creation(
                                     new_post.quote_cid = Some(e.record.cid);
                                     new_post.quote_uri = Some(e.record.uri);
                                 },
+                                Embeds::Gallery(e) => post_gallery_images.extend(e.items),
+                            }
+                        }
+                        for GalleryItem::Image(image) in post_gallery_images {
+                            let labels: Vec<Option<String>> = vec![];
+                            let image_cid = image.image.cid.or(image.image.r#ref.map(|image_ref| image_ref.to_string()));
+                            match image_cid {
+                                Some(image_cid) => post_images.push((
+                                    ImageSchema::cid.eq(image_cid),
+                                    ImageSchema::alt.eq(image.alt),
+                                    ImageSchema::postCid.eq(new_post.cid.clone()),
+                                    ImageSchema::postUri.eq(new_post.uri.clone()),
+                                    ImageSchema::indexedAt.eq(new_post.indexed_at.clone()),
+                                    ImageSchema::createdAt.eq(new_post.created_at.clone()),
+                                    ImageSchema::labels.eq(labels),
+                                )),
+                                None => eprintln!("Gallery image without a cid in {}", new_post.uri),
                             }
                         }
                     }

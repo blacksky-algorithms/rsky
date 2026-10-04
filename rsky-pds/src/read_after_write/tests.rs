@@ -18,7 +18,8 @@ use rsky_lexicon::app::bsky::actor::{
     GetProfilesOutput, Profile, ProfileViewBasic, ProfileViewDetailed,
 };
 use rsky_lexicon::app::bsky::embed::external::{External, ExternalObject};
-use rsky_lexicon::app::bsky::embed::images::{Image, Images};
+use rsky_lexicon::app::bsky::embed::gallery::{Gallery, GalleryItem, Image as GalleryImage};
+use rsky_lexicon::app::bsky::embed::images::{AspectRatio, Image, Images};
 use rsky_lexicon::app::bsky::embed::record::Record as RecordEmbed;
 use rsky_lexicon::app::bsky::embed::record_with_media::RecordWithMedia;
 use rsky_lexicon::app::bsky::embed::video::Video;
@@ -604,6 +605,30 @@ async fn video_embeds_format_to_no_view_instead_of_panicking() {
         aspect_ratio: None,
     }));
     assert_eq!(viewer.format_post_embed(post).await.unwrap(), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn gallery_embeds_format_to_no_view() {
+    let (_dir, viewer) = test_viewer().await;
+    let gallery = Gallery {
+        items: vec![GalleryItem::Image(GalleryImage {
+            image: test_blob(),
+            alt: "alt text".to_owned(),
+            aspect_ratio: AspectRatio {
+                width: 4,
+                height: 3,
+            },
+        })],
+    };
+    let mut post = post_record("gallery post");
+    post.embed = Some(Embeds::Gallery(gallery.clone()));
+    assert_eq!(viewer.format_post_embed(post).await.unwrap(), None);
+    assert_eq!(
+        viewer
+            .format_simple_embed(MediaUnion::Gallery(gallery))
+            .await,
+        None
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
