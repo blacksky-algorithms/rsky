@@ -1229,9 +1229,11 @@ pub async fn copy_insert_blocks(
     Ok(())
 }
 
-/// Bulk insert `post_embed_image` records using `COPY` protocol.
+/// Bulk insert image embed records into `post_embed_image` or
+/// `post_embed_gallery_image` using `COPY` protocol.
 pub async fn copy_insert_post_embed_images(
     client: &deadpool_postgres::Client,
+    table: &'static str,
     data: &[(String, String, String, String)], // post_uri, position, image_cid, alt
 ) -> Result<(), WintermuteError> {
     use std::time::Instant;
@@ -1276,10 +1278,12 @@ pub async fn copy_insert_post_embed_images(
     let insert_start = Instant::now();
     client
         .execute(
-            "INSERT INTO post_embed_image (\"postUri\", position, \"imageCid\", alt)
-             SELECT post_uri, position, image_cid, alt
-             FROM _bulk_post_embed_image
-             ON CONFLICT DO NOTHING",
+            &format!(
+                "INSERT INTO {table} (\"postUri\", position, \"imageCid\", alt)
+                 SELECT post_uri, position, image_cid, alt
+                 FROM _bulk_post_embed_image
+                 ON CONFLICT DO NOTHING"
+            ),
             &[],
         )
         .await?;
@@ -1289,7 +1293,8 @@ pub async fn copy_insert_post_embed_images(
     let total_ms = setup_ms + copy_ms + insert_ms;
     if total_ms > 100 {
         tracing::warn!(
-            "SLOW post_embed_image bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms) for {} rows",
+            "SLOW {} bulk: {}ms total (setup={}ms, copy={}ms, insert={}ms) for {} rows",
+            table,
             total_ms,
             setup_ms,
             copy_ms,
