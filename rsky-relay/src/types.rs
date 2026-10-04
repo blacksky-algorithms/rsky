@@ -4,14 +4,33 @@ use std::sync::LazyLock;
 use std::{env, fmt};
 
 use bytes::Bytes;
+use chrono::{DateTime, Utc};
 use fjall::compaction::{Fifo, Strategy};
 use fjall::{Keyspace, PartitionCreateOptions, Slice};
+use serde::{Deserialize, Serialize};
 use thingbuf::{Recycle, mpsc};
 
 use crate::config::{
-    BLOCK_SIZE, CACHE_SIZE, DISK_SIZE, FSYNC_MS, MEMTABLE_SIZE, QUEUE_DISK_SIZE, QUEUE_TTL_SECONDS,
-    TTL_SECONDS, WRITE_BUFFER_SIZE,
+    BLOCK_SIZE, CACHE_SIZE, DISK_SIZE, FSYNC_MS, MEMTABLE_SIZE, PUBLISHED_DISK_SIZE,
+    QUEUE_DISK_SIZE, QUEUE_TTL_SECONDS, TTL_SECONDS, WRITE_BUFFER_SIZE,
 };
+
+pub const PARTITION_FIREHOSE: &str = "firehose";
+/// 0.2.x deferred queue, kept frozen for rollback until PR 6 removes it.
+pub const PARTITION_QUEUE_LEGACY: &str = "queue";
+pub const PARTITION_QUEUE: &str = "queue_v2";
+#[cfg(not(feature = "labeler"))]
+pub const PARTITION_REPOS: &str = "repos";
+pub const PARTITION_HOST_CURSORS: &str = "host_cursors";
+pub const PARTITION_PUBLISHED: &str = "published";
+pub const PARTITION_META: &str = "meta";
+pub const PARTITION_LEGACY_IMPORTED: &str = "legacy_imported";
+
+pub const META_MIGRATED_V1: &[u8] = b"migrated_v1";
+pub const META_DOWNGRADED_AT: &[u8] = b"downgraded_at";
+pub const META_ADMISSION: &[u8] = b"admission";
+pub const META_PUBLISHED_INDEXED_UPTO: &[u8] = b"published_indexed_upto";
+pub const META_DOWNGRADE_GENERATION_PREFIX: &[u8] = b"downgrade_generation>";
 
 pub type MessageSender = mpsc::blocking::Sender<Message, MessageRecycle>;
 pub type MessageReceiver = mpsc::blocking::Receiver<Message, MessageRecycle>;
@@ -30,16 +49,126 @@ pub fn open_keyspace(path: &std::path::Path) -> fjall::Result<Keyspace> {
         .max_write_buffer_size(WRITE_BUFFER_SIZE)
         .fsync_ms(FSYNC_MS)
         .open()?;
-    db.open_partition("firehose", firehose_options())?;
-    db.open_partition("queue", queue_options())?;
-    #[cfg(not(feature = "labeler"))]
-    db.open_partition("repos", PartitionCreateOptions::default())?;
+    open_partitions(&db)?;
     Ok(db)
 }
 
-fn queue_options() -> PartitionCreateOptions {
+/// A read-only view of a stopped relay's copied `db/`: with no compaction workers
+/// the legacy FIFO policies cannot evict anything while it is being imported.
+pub fn open_source_keyspace(path: &std::path::Path) -> fjall::Result<Keyspace> {
+    fjall::Config::new(path).compaction_workers(0).flush_workers(1).open()
+}
+
+pub fn open_partitions(db: &Keyspace) -> fjall::Result<()> {
+    db.open_partition(PARTITION_FIREHOSE, firehose_options())?;
+    db.open_partition(PARTITION_QUEUE, PartitionCreateOptions::default())?;
+    db.open_partition(PARTITION_HOST_CURSORS, PartitionCreateOptions::default())?;
+    db.open_partition(PARTITION_PUBLISHED, published_options())?;
+    db.open_partition(PARTITION_META, PartitionCreateOptions::default())?;
+    db.open_partition(PARTITION_LEGACY_IMPORTED, PartitionCreateOptions::default())?;
+    #[cfg(not(feature = "labeler"))]
+    db.open_partition(PARTITION_REPOS, PartitionCreateOptions::default())?;
+    Ok(())
+}
+
+pub fn legacy_queue_options() -> PartitionCreateOptions {
     PartitionCreateOptions::default()
         .compaction_strategy(Strategy::Fifo(Fifo::new(QUEUE_DISK_SIZE, QUEUE_TTL_SECONDS)))
+}
+
+fn published_options() -> PartitionCreateOptions {
+    PartitionCreateOptions::default()
+        .compaction_strategy(Strategy::Fifo(Fifo::new(PUBLISHED_DISK_SIZE, None)))
+}
+
+/// Value stored in `queue_v2`; the key (`{did}>` + admission counter) carries no
+/// provenance, so the source host travels with the frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueEntry {
+    pub host: String,
+    pub generation: u64,
+    pub seq: u64,
+    #[serde(with = "serde_bytes")]
+    pub frame: Vec<u8>,
+}
+
+impl QueueEntry {
+    #[must_use]
+    pub fn key(did: &str, admission: u64) -> Vec<u8> {
+        let mut key = Vec::with_capacity(did.len() + 9);
+        key.extend_from_slice(did.as_bytes());
+        key.push(b'>');
+        key.extend_from_slice(&admission.to_be_bytes());
+        key
+    }
+
+    #[must_use]
+    pub fn prefix(did: &str) -> Vec<u8> {
+        let mut key = Vec::with_capacity(did.len() + 1);
+        key.extend_from_slice(did.as_bytes());
+        key.push(b'>');
+        key
+    }
+
+    pub fn encode(
+        &self,
+    ) -> Result<Vec<u8>, serde_ipld_dagcbor::EncodeError<std::collections::TryReserveError>> {
+        serde_ipld_dagcbor::to_vec(self)
+    }
+
+    pub fn decode(
+        bytes: &[u8],
+    ) -> Result<Self, serde_ipld_dagcbor::DecodeError<std::convert::Infallible>> {
+        serde_ipld_dagcbor::from_slice(bytes)
+    }
+
+    /// The 0.2.x key shape `{did}>{host}>{seq}`, for the downgrade path.
+    #[must_use]
+    pub fn legacy_key(&self, did: &str) -> Vec<u8> {
+        format!("{did}>{}>{}", self.host, self.seq).into_bytes()
+    }
+}
+
+/// Durable per-host crawl position, written in the same batch as the event it
+/// belongs to. Only moves forward within a generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostCursor {
+    pub generation: u64,
+    pub seq: u64,
+    #[serde(with = "chrono::serde::ts_milliseconds")]
+    pub time: DateTime<Utc>,
+}
+
+impl HostCursor {
+    pub fn encode(
+        &self,
+    ) -> Result<Vec<u8>, serde_ipld_dagcbor::EncodeError<std::collections::TryReserveError>> {
+        serde_ipld_dagcbor::to_vec(self)
+    }
+
+    pub fn decode(
+        bytes: &[u8],
+    ) -> Result<Self, serde_ipld_dagcbor::DecodeError<std::convert::Infallible>> {
+        serde_ipld_dagcbor::from_slice(bytes)
+    }
+}
+
+/// `published` key: `{did}>{rev}>{commit cid}`.
+#[cfg(not(feature = "labeler"))]
+#[must_use]
+pub fn published_key(did: &str, rev: &str, cid: &cid::Cid) -> Vec<u8> {
+    let cid = cid.to_bytes();
+    let mut key = Vec::with_capacity(did.len() + rev.len() + cid.len() + 2);
+    key.extend_from_slice(did.as_bytes());
+    key.push(b'>');
+    key.extend_from_slice(rev.as_bytes());
+    key.push(b'>');
+    key.extend_from_slice(&cid);
+    key
+}
+
+pub fn meta_u64(meta: &fjall::PartitionHandle, key: &[u8]) -> fjall::Result<Option<u64>> {
+    Ok(meta.get(key)?.map(|v| u64::from_be_bytes(v.as_ref().try_into().unwrap_or_default())))
 }
 
 fn firehose_options() -> PartitionCreateOptions {
@@ -343,7 +472,7 @@ mod tests {
         let ks = open_keyspace(tmp.path()).unwrap();
         // Both partitions must be present after open_keyspace.
         let firehose = ks.open_partition("firehose", PartitionCreateOptions::default()).unwrap();
-        let queue = ks.open_partition("queue", PartitionCreateOptions::default()).unwrap();
+        let queue = ks.open_partition(PARTITION_QUEUE, PartitionCreateOptions::default()).unwrap();
         // The on-disk dir was created.
         assert!(tmp.path().exists());
         // Both partitions are usable: insert + read round-trip.
@@ -364,5 +493,47 @@ mod tests {
             std::env::set_var("RELAY_DB_PATH", tmp.path());
         }
         let _ks: &fjall::Keyspace = &DB;
+    }
+
+    #[test]
+    fn queue_entry_and_host_cursor_round_trip() {
+        let entry =
+            QueueEntry { host: "h".to_owned(), generation: 2, seq: 7, frame: vec![1, 2, 3] };
+        let decoded = QueueEntry::decode(&entry.encode().unwrap()).unwrap();
+        assert_eq!(decoded, entry);
+        assert_eq!(entry.legacy_key("did:plc:x"), b"did:plc:x>h>7".to_vec());
+        let key = QueueEntry::key("did:plc:x", 5);
+        assert!(key.starts_with(&QueueEntry::prefix("did:plc:x")));
+        assert_eq!(&key[key.len() - 8..], &5u64.to_be_bytes());
+        assert!(QueueEntry::key("did:plc:x", 5) < QueueEntry::key("did:plc:x", 6));
+        let cursor = HostCursor { generation: 1, seq: 9, time: chrono::DateTime::UNIX_EPOCH };
+        assert_eq!(HostCursor::decode(&cursor.encode().unwrap()).unwrap(), cursor);
+        assert!(QueueEntry::decode(b"nope").is_err());
+        assert!(HostCursor::decode(b"nope").is_err());
+    }
+
+    #[cfg(not(feature = "labeler"))]
+    #[test]
+    fn published_key_shape() {
+        let cid = cid::Cid::try_from("bafyreigbtj4x7ip5legnfznufuopl4sg4knzc2cof6duas4b3q2fy6swua")
+            .unwrap();
+        let key = published_key("did:plc:x", "rev", &cid);
+        assert!(key.starts_with(b"did:plc:x>rev>"));
+        assert_eq!(key.len(), "did:plc:x>rev>".len() + cid.to_bytes().len());
+    }
+
+    #[test]
+    fn meta_helpers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ks = open_keyspace(tmp.path()).unwrap();
+        let meta = ks.open_partition(PARTITION_META, PartitionCreateOptions::default()).unwrap();
+        assert_eq!(meta_u64(&meta, b"missing").unwrap(), None);
+        meta.insert(b"n", 42u64.to_be_bytes()).unwrap();
+        assert_eq!(meta_u64(&meta, b"n").unwrap(), Some(42));
+        meta.insert(b"short", b"x".as_slice()).unwrap();
+        assert_eq!(meta_u64(&meta, b"short").unwrap(), Some(0));
+        let source = open_source_keyspace(&tmp.path().join("src")).unwrap();
+        assert!(source.list_partitions().is_empty());
+        let _ = legacy_queue_options();
     }
 }

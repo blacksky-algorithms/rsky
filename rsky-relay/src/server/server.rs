@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::{self, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -56,6 +56,50 @@ impl HostListFetcher for ReqwestHostListFetcher {
     }
 }
 
+/// Walks every `listHosts` page of one upstream and returns crawlable hostnames,
+/// largest account count first; bans are applied by the caller on the accept
+/// thread, which owns the `SQLite` handle.
+#[cfg(not(feature = "labeler"))]
+pub fn discover_hosts<F: HostListFetcher + ?Sized>(
+    fetcher: &F, sleep: impl Fn(Duration) + Copy, seen: &mut hashbrown::HashSet<String>,
+    upstream: &str,
+) -> Vec<String> {
+    let mut cursor: Option<String> = None;
+    let mut total_seen: usize = 0;
+    let mut added = Vec::new();
+    let mut had_failure = false;
+    loop {
+        let page = match fetch_page_with_retry(fetcher, cursor.as_deref(), sleep) {
+            Ok(page) => page,
+            Err(err) => {
+                tracing::warn!(%err, %upstream, "listHosts page failed after retries");
+                had_failure = true;
+                break;
+            }
+        };
+        total_seen += page.hosts.len();
+        let mut sorted = page.hosts;
+        sorted.sort_unstable_by_key(|host| host.account_count);
+        for host in sorted.into_iter().rev() {
+            if host.account_count > HOSTS_MIN_ACCOUNTS
+                && matches!(host.status, HostStatus::Active | HostStatus::Idle)
+                && seen.insert(host.hostname.clone())
+            {
+                added.push(host.hostname);
+            }
+        }
+        cursor = page.cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    let outcome =
+        if had_failure { if added.is_empty() { "fail" } else { "partial" } } else { "ok" };
+    metrics::record_discovery_round(outcome);
+    tracing::info!(total = %total_seen, added = %added.len(), %outcome, %upstream, "host discovery refresh complete");
+    added
+}
+
 #[cfg(not(feature = "labeler"))]
 pub fn fetch_page_with_retry<F: HostListFetcher + ?Sized>(
     fetcher: &F, cursor: Option<&str>, sleep: impl Fn(Duration),
@@ -80,6 +124,10 @@ pub fn fetch_page_with_retry<F: HostListFetcher + ?Sized>(
 
 const SLEEP: Duration = Duration::from_millis(10);
 const ACCEPTS_PER_TICK: usize = 64;
+// One stalled client must not hold the accept loop: bounded socket I/O.
+const SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(not(feature = "labeler"))]
+const DISCOVERY_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(not(feature = "labeler"))]
 const PATH_LIST_HOSTS: &str = "/xrpc/com.atproto.sync.listHosts";
@@ -152,9 +200,19 @@ impl Drop for ErrorOnDropTcpStream {
 }
 
 fn write_response(stream: &mut ErrorOnDropTcpStream, status: &str, body: &str) -> Result<()> {
+    write_with_type(stream, status, "text/plain; charset=utf-8", body)
+}
+
+fn write_json(stream: &mut ErrorOnDropTcpStream, status: &str, body: &str) -> Result<()> {
+    write_with_type(stream, status, "application/json", body)
+}
+
+fn write_with_type(
+    stream: &mut ErrorOnDropTcpStream, status: &str, content_type: &str, body: &str,
+) -> Result<()> {
     let response = format!(
         "HTTP/1.1 {status}\r\n\
-         Content-Type: text/plain; charset=utf-8\r\n\
+         Content-Type: {content_type}\r\n\
          Content-Length: {}\r\n\
          Connection: close\r\n\
          \r\n\
@@ -183,12 +241,31 @@ pub struct Server {
     admin_conn: Connection,
     request_crawl_tx: RequestCrawlSender,
     subscribe_repos_tx: SubscribeReposSender,
+    #[cfg(not(feature = "labeler"))]
+    discovery: Option<std::sync::mpsc::Receiver<Vec<String>>>,
+    #[cfg(not(feature = "labeler"))]
+    discovery_pending: std::collections::VecDeque<String>,
 }
 
 impl Server {
     pub fn new(
         ssl_configs: Option<(PathBuf, PathBuf)>, request_crawl_tx: RequestCrawlSender,
         subscribe_repos_tx: SubscribeReposSender,
+    ) -> Result<Self, ServerError> {
+        Self::with_paths(
+            ssl_configs,
+            request_crawl_tx,
+            subscribe_repos_tx,
+            &format!("127.0.0.1:{PORT}"),
+            Path::new("relay.db"),
+            Path::new("plc_directory.db"),
+        )
+    }
+
+    #[allow(unused_variables)]
+    pub fn with_paths(
+        ssl_configs: Option<(PathBuf, PathBuf)>, request_crawl_tx: RequestCrawlSender,
+        subscribe_repos_tx: SubscribeReposSender, bind: &str, relay_db: &Path, plc_db: &Path,
     ) -> Result<Self, ServerError> {
         let tls_config = if let Some((certs, private_key)) = ssl_configs {
             let certs = rustls_pemfile::certs(&mut BufReader::new(&mut File::open(certs)?))
@@ -205,7 +282,7 @@ impl Server {
             None
         };
 
-        let listener = TcpListener::bind(format!("127.0.0.1:{PORT}"))?;
+        let listener = TcpListener::bind(bind)?;
         listener.set_nonblocking(true)?;
         let base_url = Url::parse("http://example.com")?;
         let now = Instant::now();
@@ -213,16 +290,16 @@ impl Server {
         // Created by `ValidatorManager::new`.
         #[cfg(not(feature = "labeler"))]
         let relay_conn = Connection::open_with_flags(
-            "relay.db",
+            relay_db,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         #[cfg(feature = "labeler")]
         let conn = Connection::open_with_flags(
-            "plc_directory.db",
+            plc_db,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         let admin_conn = Connection::open_with_flags(
-            "relay.db",
+            relay_db,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         admin_conn.busy_timeout(Duration::from_secs(5))?;
@@ -239,6 +316,10 @@ impl Server {
             admin_conn,
             request_crawl_tx,
             subscribe_repos_tx,
+            #[cfg(not(feature = "labeler"))]
+            discovery: None,
+            #[cfg(not(feature = "labeler"))]
+            discovery_pending: std::collections::VecDeque::new(),
         })
     }
 
@@ -261,6 +342,8 @@ impl Server {
             }
             self.last = Instant::now();
         }
+        #[cfg(not(feature = "labeler"))]
+        self.drain_discovery();
 
         // Drain the accept backlog each tick: one accept per sleep caps intake
         // at ~100/s, which overflows the listen queue whenever every
@@ -270,6 +353,8 @@ impl Server {
             match self.listener.accept() {
                 Ok((mut stream, addr)) => {
                     tracing::trace!(%addr, "received request");
+                    stream.set_read_timeout(Some(SOCKET_TIMEOUT))?;
+                    stream.set_write_timeout(Some(SOCKET_TIMEOUT))?;
                     let stream = if let Some(tls_config) = self.tls_config.clone() {
                         let mut conn = ServerConnection::new(tls_config)?;
                         if let Err(err) = conn.complete_io(&mut stream) {
@@ -312,7 +397,11 @@ impl Server {
         let url = Url::options().base_url(Some(&self.base_url)).parse(path)?;
 
         match (method, url.path()) {
-            ("GET", "/_health") => write_response(&mut stream, "200 OK", "ok"),
+            ("GET", "/_health" | "/xrpc/_health") => {
+                let (code, body) = crate::health::health_body();
+                let status = if code.is_success() { "200 OK" } else { "503 Service Unavailable" };
+                write_json(&mut stream, status, &body)
+            }
             ("GET", "/") => write_response(&mut stream, "200 OK", INDEX_ASCII),
             #[cfg(not(feature = "labeler"))]
             ("GET", PATH_LIST_HOSTS) => {
@@ -540,69 +629,68 @@ impl Server {
             .ok_or_else(|| eyre!("hostname {hostname:?} not found"))
     }
 
+    /// Discovery runs on its own thread: fetching `listHosts` from every upstream
+    /// with retries took long enough to stall the accept loop.
     #[cfg(not(feature = "labeler"))]
     fn query_hosts(&mut self) -> Result<()> {
+        if self.discovery.is_some() {
+            tracing::warn!("previous discovery round still running; skipping");
+            return Ok(());
+        }
         let client = reqwest::blocking::Client::builder()
             .user_agent("rsky-relay")
             .https_only(true)
+            .timeout(DISCOVERY_REQUEST_TIMEOUT)
             .build()?;
-        let mut seen: hashbrown::HashSet<String> = hashbrown::HashSet::new();
-        for upstream in HOSTS_RELAYS.iter() {
-            let fetcher = ReqwestHostListFetcher {
-                client: client.clone(),
-                base_url: format!("https://{upstream}{PATH_LIST_HOSTS}"),
-            };
-            if let Err(err) =
-                self.query_hosts_with_fetcher(&fetcher, thread::sleep, &mut seen, upstream)
-            {
-                tracing::warn!(%err, %upstream, "discovery upstream failed entirely");
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::Builder::new().name("rsky-discovery".into()).spawn(move || {
+            let mut seen: hashbrown::HashSet<String> = hashbrown::HashSet::new();
+            for upstream in HOSTS_RELAYS.iter() {
+                let fetcher = ReqwestHostListFetcher {
+                    client: client.clone(),
+                    base_url: format!("https://{upstream}{PATH_LIST_HOSTS}"),
+                };
+                let hosts = discover_hosts(&fetcher, thread::sleep, &mut seen, upstream);
+                if tx.send(hosts).is_err() {
+                    return;
+                }
             }
-        }
+        })?;
+        self.discovery = Some(rx);
         Ok(())
     }
 
+    /// Hands discovered hosts to the crawler; whatever does not fit in the ring
+    /// this tick stays buffered for the next one instead of being abandoned.
     #[cfg(not(feature = "labeler"))]
-    fn query_hosts_with_fetcher<F: HostListFetcher + ?Sized>(
-        &mut self, fetcher: &F, sleep: impl Fn(Duration) + Copy,
-        seen: &mut hashbrown::HashSet<String>, upstream: &str,
-    ) -> Result<()> {
-        let mut cursor: Option<String> = None;
-        let mut total_seen: usize = 0;
-        let mut total_added: usize = 0;
-        let mut had_failure = false;
-        loop {
-            let page = match fetch_page_with_retry(fetcher, cursor.as_deref(), sleep) {
-                Ok(page) => page,
-                Err(err) => {
-                    tracing::warn!(%err, %upstream, "listHosts page failed after retries");
-                    had_failure = true;
-                    break;
-                }
-            };
-            total_seen += page.hosts.len();
-            let mut sorted = page.hosts;
-            sorted.sort_unstable_by_key(|host| host.account_count);
-            for host in sorted.into_iter().rev() {
-                if host.account_count > HOSTS_MIN_ACCOUNTS
-                    && matches!(host.status, HostStatus::Active | HostStatus::Idle)
-                    && !self.is_host_banned(&host.hostname)
-                    && seen.insert(host.hostname.clone())
-                {
-                    self.request_crawl_tx
-                        .push(RequestCrawl { hostname: host.hostname, cursor: None })?;
-                    total_added += 1;
+    fn drain_discovery(&mut self) {
+        let mut finished = false;
+        if let Some(rx) = &self.discovery {
+            loop {
+                match rx.try_recv() {
+                    Ok(hosts) => self.discovery_pending.extend(hosts),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        finished = true;
+                        break;
+                    }
                 }
             }
-            cursor = page.cursor;
-            if cursor.is_none() {
+        }
+        while let Some(hostname) = self.discovery_pending.pop_front() {
+            if self.is_host_banned(&hostname) {
+                continue;
+            }
+            if let Err(rtrb::PushError::Full(request)) =
+                self.request_crawl_tx.push(RequestCrawl { hostname, cursor: None })
+            {
+                self.discovery_pending.push_front(request.hostname);
                 break;
             }
         }
-        let outcome =
-            if had_failure { if total_added > 0 { "partial" } else { "fail" } } else { "ok" };
-        metrics::record_discovery_round(outcome);
-        tracing::info!(total = %total_seen, added = %total_added, %outcome, %upstream, "host discovery refresh complete");
-        Ok(())
+        if finished {
+            self.discovery = None;
+        }
     }
 
     #[cfg(feature = "labeler")]
@@ -771,4 +859,136 @@ mod tests {
         assert_eq!(sleeps[0], Duration::from_secs(1));
         assert_eq!(sleeps[1], Duration::from_secs(2));
     }
+
+    #[test]
+    fn discover_hosts_filters_sorts_and_dedupes() {
+        let fetcher = ScriptedFetcher::new(vec![
+            Ok(ListHosts {
+                cursor: Some("1".to_owned()),
+                hosts: vec![
+                    Host {
+                        account_count: 5,
+                        hostname: "small".to_owned(),
+                        seq: 1,
+                        status: HostStatus::Active,
+                    },
+                    Host {
+                        account_count: 50,
+                        hostname: "big".to_owned(),
+                        seq: 1,
+                        status: HostStatus::Idle,
+                    },
+                    Host {
+                        account_count: 0,
+                        hostname: "empty".to_owned(),
+                        seq: 1,
+                        status: HostStatus::Active,
+                    },
+                    Host {
+                        account_count: 9,
+                        hostname: "off".to_owned(),
+                        seq: 1,
+                        status: HostStatus::Offline,
+                    },
+                ],
+            }),
+            Ok(ListHosts {
+                cursor: None,
+                hosts: vec![Host {
+                    account_count: 7,
+                    hostname: "big".to_owned(),
+                    seq: 2,
+                    status: HostStatus::Active,
+                }],
+            }),
+        ]);
+        let mut seen = hashbrown::HashSet::new();
+        let hosts = discover_hosts(&fetcher, |_| {}, &mut seen, "up");
+        assert_eq!(hosts, vec!["big".to_owned(), "small".to_owned()]);
+        assert_eq!(fetcher.calls(), 2);
+        // a failing upstream yields partial or empty results without panicking
+        let failing = ScriptedFetcher::new(vec![Err("boom"), Err("boom"), Err("boom")]);
+        let mut seen = hashbrown::HashSet::new();
+        assert!(discover_hosts(&failing, |_| {}, &mut seen, "down").is_empty());
+    }
+
+    fn test_server() -> (Server, rtrb::Consumer<RequestCrawl>, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let relay_db = tmp.path().join("relay.db");
+        Connection::open(&relay_db)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE hosts (host TEXT PRIMARY KEY, cursor INTEGER NOT NULL, latest TEXT NOT NULL);
+                 CREATE TABLE banned_hosts (host TEXT PRIMARY KEY, created_at TEXT NOT NULL DEFAULT (datetime('now')));",
+            )
+            .unwrap();
+        let (request_crawl_tx, request_crawl_rx) = rtrb::RingBuffer::new(2);
+        let (subscribe_repos_tx, _subscribe_repos_rx) = rtrb::RingBuffer::new(2);
+        let server = Server::with_paths(
+            None,
+            request_crawl_tx,
+            subscribe_repos_tx,
+            "127.0.0.1:0",
+            &relay_db,
+            &tmp.path().join("plc.db"),
+        )
+        .unwrap();
+        (server, request_crawl_rx, tmp)
+    }
+
+    #[test]
+    fn drain_discovery_buffers_overflow_and_skips_banned_hosts() {
+        let _lock = SERVER_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mut server, mut rx, _tmp) = test_server();
+        server.drain_discovery();
+        let (tx, rx_hosts) = std::sync::mpsc::channel();
+        server.discovery = Some(rx_hosts);
+        server.ban_host("banned").unwrap();
+        tx.send(vec!["banned".to_owned(), "a".to_owned(), "b".to_owned(), "c".to_owned()]).unwrap();
+        server.drain_discovery();
+        assert_eq!(rx.pop().unwrap().hostname, "a");
+        assert_eq!(rx.pop().unwrap().hostname, "b");
+        assert!(rx.pop().is_err(), "ring of two holds two");
+        assert_eq!(server.discovery_pending.len(), 1, "c waits for the next tick");
+        assert!(server.discovery.is_some(), "sender still alive");
+        drop(tx);
+        server.drain_discovery();
+        assert_eq!(rx.pop().unwrap().hostname, "c");
+        assert!(server.discovery.is_none(), "finished round is released");
+        server.unban_host("banned").unwrap();
+    }
+
+    #[test]
+    fn query_hosts_spawns_one_round_at_a_time() {
+        let _lock = SERVER_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mut server, _rx, _tmp) = test_server();
+        let (_tx, rx_hosts) = std::sync::mpsc::channel();
+        server.discovery = Some(rx_hosts);
+        server.query_hosts().unwrap();
+        assert!(server.discovery.is_some());
+    }
+
+    #[test]
+    fn health_route_returns_json_with_validator_state() {
+        let _lock = SERVER_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mut server, _rx, _tmp) = test_server();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = thread::spawn(move || {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            stream.write_all(b"GET /xrpc/_health HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+            let mut body = String::new();
+            std::io::Read::read_to_string(&mut stream, &mut body).unwrap();
+            body
+        });
+        let (stream, peer) = listener.accept().unwrap();
+        server
+            .handle_stream(ErrorOnDropTcpStream(Some(MaybeTlsStream::Plain(stream))), peer)
+            .unwrap();
+        let body = client.join().unwrap();
+        assert!(body.contains("application/json"), "{body}");
+        assert!(body.contains("\"validator\""), "{body}");
+    }
+
+    static SERVER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }

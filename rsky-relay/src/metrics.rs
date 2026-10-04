@@ -18,8 +18,18 @@ pub const VALIDATOR_DEFERRED: &str = "relay_validator_deferred_total";
 pub const VALIDATOR_DROPPED: &str = "relay_validator_dropped_total";
 pub const VALIDATOR_PASSED_WITH_WARNING: &str = "relay_validator_passed_with_warning_total";
 pub const FIREHOSE_HEAD: &str = "relay_firehose_head_seq";
+pub const FIREHOSE_HEAD_AGE_SECONDS: &str = "relay_firehose_head_age_seconds";
 pub const QUEUE_DEPTH_BYTES: &str = "relay_queue_depth_bytes";
 pub const DISCOVERY_ROUND: &str = "relay_discovery_round_total";
+pub const UPSTREAM_ERRORS: &str = "relay_upstream_error_total";
+pub const INTAKE_BYTES: &str = "relay_intake_bytes";
+pub const INTAKE_SLOTS: &str = "relay_intake_slots";
+pub const SUBSCRIBER_SEQ_LAG: &str = "relay_subscriber_seq_lag";
+pub const SUBSCRIBER_TIME_LAG_SECONDS: &str = "relay_subscriber_time_lag_seconds";
+pub const RESOLVER_INFLIGHT: &str = "relay_resolver_inflight";
+pub const RESOLVER_FETCHES: &str = "relay_resolver_fetch_total";
+pub const VALIDATOR_LOOPS: &str = "relay_validator_loop_total";
+pub const CRAWLER_LOOPS: &str = "relay_crawler_loop_total";
 
 #[derive(Debug, Clone, Copy)]
 pub enum DropReason {
@@ -76,6 +86,28 @@ pub fn describe() {
     describe_gauge!(FIREHOSE_HEAD, Unit::Count, "Highest sequence number written to firehose");
     describe_gauge!(QUEUE_DEPTH_BYTES, Unit::Bytes, "Approximate validator queue partition size");
     describe_counter!(DISCOVERY_ROUND, Unit::Count, "listHosts discovery round outcome");
+    describe_gauge!(
+        FIREHOSE_HEAD_AGE_SECONDS,
+        Unit::Seconds,
+        "Age of the newest published event's upstream timestamp"
+    );
+    describe_counter!(
+        UPSTREAM_ERRORS,
+        Unit::Count,
+        "Error and #info frames received from upstream"
+    );
+    describe_gauge!(INTAKE_BYTES, Unit::Bytes, "Unconsumed bytes in the crawler intake ring");
+    describe_gauge!(INTAKE_SLOTS, Unit::Count, "Occupied slots in the crawler intake ring");
+    describe_gauge!(SUBSCRIBER_SEQ_LAG, Unit::Count, "Head seq minus the subscriber's next seq");
+    describe_gauge!(
+        SUBSCRIBER_TIME_LAG_SECONDS,
+        Unit::Seconds,
+        "Head event time minus the subscriber's last delivered event time"
+    );
+    describe_gauge!(RESOLVER_INFLIGHT, Unit::Count, "DIDs awaiting resolution by kind");
+    describe_counter!(RESOLVER_FETCHES, Unit::Count, "Direct DID document fetches by outcome");
+    describe_counter!(VALIDATOR_LOOPS, Unit::Count, "Validator loop iterations");
+    describe_counter!(CRAWLER_LOOPS, Unit::Count, "Crawler worker loop iterations");
 }
 
 /// Build a recorder + handle without binding a socket. Tolerates "global already set".
@@ -173,6 +205,52 @@ pub fn record_queue_depth_bytes(bytes: u64) {
 #[inline]
 pub fn record_discovery_round(outcome: &'static str) {
     counter!(DISCOVERY_ROUND, "outcome" => outcome).increment(1);
+}
+
+#[inline]
+pub fn record_firehose_head_age(seconds: f64) {
+    gauge!(FIREHOSE_HEAD_AGE_SECONDS).set(seconds);
+}
+
+#[inline]
+pub fn record_upstream_error(host: &str, name: &str) {
+    counter!(UPSTREAM_ERRORS, "host" => host.to_owned(), "name" => name.to_owned()).increment(1);
+}
+
+#[inline]
+pub fn record_intake(bytes: usize, slots: usize) {
+    #[expect(clippy::cast_precision_loss)]
+    gauge!(INTAKE_BYTES).set(bytes as f64);
+    #[expect(clippy::cast_precision_loss)]
+    gauge!(INTAKE_SLOTS).set(slots as f64);
+}
+
+#[inline]
+pub fn record_subscriber_lag(addr: &str, seq_lag: u64, time_lag_seconds: f64) {
+    #[expect(clippy::cast_precision_loss)]
+    gauge!(SUBSCRIBER_SEQ_LAG, "addr" => addr.to_owned()).set(seq_lag as f64);
+    gauge!(SUBSCRIBER_TIME_LAG_SECONDS, "addr" => addr.to_owned()).set(time_lag_seconds);
+}
+
+#[inline]
+pub fn record_resolver_inflight(kind: &'static str, n: usize) {
+    #[expect(clippy::cast_precision_loss)]
+    gauge!(RESOLVER_INFLIGHT, "kind" => kind).set(n as f64);
+}
+
+#[inline]
+pub fn record_resolver_fetch(outcome: &'static str) {
+    counter!(RESOLVER_FETCHES, "outcome" => outcome).increment(1);
+}
+
+#[inline]
+pub fn record_validator_loop() {
+    counter!(VALIDATOR_LOOPS).increment(1);
+}
+
+#[inline]
+pub fn record_crawler_loops(n: u64) {
+    counter!(CRAWLER_LOOPS).increment(n);
 }
 
 #[cfg(test)]

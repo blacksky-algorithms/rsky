@@ -7,7 +7,7 @@ use bytes::{Buf, Bytes};
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
-use hashbrown::HashSet;
+use hashbrown::{HashMap, HashSet};
 use lru::LruCache;
 use reqwest::Client;
 use rusqlite::{Connection, OpenFlags};
@@ -19,6 +19,7 @@ use tokio::time::timeout;
 use rsky_identity::types::DidDocument;
 
 use crate::config::{CAPACITY_CACHE, DO_PLC_EXPORT, PLC_EXPORT_INTERVAL};
+use crate::metrics;
 use crate::validator::event::{DidEndpoint, DidKey};
 
 /// Hot-path interface used by the validator. Returns owned values so the resolver isn't
@@ -36,12 +37,22 @@ pub trait IdentityResolver: Send {
 }
 
 const POLL_TIMEOUT: Duration = Duration::from_micros(10);
+// Completed fetches handled per validator iteration; one per iteration let
+// thousands of pending DIDs back up behind a busy ring.
+const POLL_BATCH: usize = 256;
 const REQ_TIMEOUT: Duration = Duration::from_secs(30);
 const TCP_KEEPALIVE: Duration = Duration::from_secs(300);
 // Hard ceiling on concurrent DID fetches: event floods from never-before-seen
 // DIDs must not grow the future set without bound. Skipped DIDs retry on
 // their next event once capacity frees.
 const MAX_INFLIGHT_FETCHES: usize = 4096;
+// DIDs parked on the export stream; older waiters are handed back unresolved
+// so the validator can decide, instead of accumulating forever.
+const MAX_EXPORT_WAITERS: usize = CAPACITY_CACHE;
+const EXPORT_WAITER_MAX_AGE: Duration = Duration::from_secs(2 * 60);
+// Direct document fetches against the PLC directory: sustained rate and burst.
+const DIRECT_FETCH_RATE: f64 = 50.0;
+const DIRECT_FETCH_BURST: f64 = 50.0;
 
 /// The PLC directory to resolve against; `RELAY_PLC_URL` overrides the
 /// public directory for a private deployment.
@@ -54,12 +65,43 @@ static PLC_URL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
 const PLC_EXPORT: &str = "export?count=1000&after";
 const DOC_PATH: &str = ".well-known/did.json";
 
-type RequestFuture = Pin<Box<dyn Future<Output = (Query, reqwest::Result<Bytes>)> + Send>>;
+type RequestFuture = Pin<Box<dyn Future<Output = (Query, Option<Bytes>)> + Send>>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Query {
     Did(String),
     Export(String),
+}
+
+/// Token bucket for direct fetches: `rate` tokens per second up to `burst`.
+#[derive(Debug)]
+struct TokenBucket {
+    tokens: f64,
+    rate: f64,
+    burst: f64,
+    last: Instant,
+}
+
+impl TokenBucket {
+    fn new(rate: f64, burst: f64) -> Self {
+        Self { tokens: burst, rate, burst, last: Instant::now() }
+    }
+
+    fn take(&mut self) -> bool {
+        let now = Instant::now();
+        self.tokens = now
+            .duration_since(self.last)
+            .as_secs_f64()
+            .mul_add(self.rate, self.tokens)
+            .min(self.burst);
+        self.last = now;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -78,7 +120,15 @@ pub struct Resolver {
     last: Instant,
     after: Option<String>,
     client: Client,
-    inflight: HashSet<String>,
+    /// DIDs waiting for their op to show up on the export stream.
+    export_waiters: HashMap<String, Instant>,
+    /// DIDs with a document fetch in flight.
+    direct_inflight: HashSet<String>,
+    exporting: bool,
+    bucket: TokenBucket,
+    /// HTTP runs on the shared multi-thread runtime when one exists, so a busy
+    /// validator thread never starves its own DNS and TLS.
+    handle: Option<tokio::runtime::Handle>,
     futures: FuturesUnordered<RequestFuture>,
 }
 
@@ -121,9 +171,25 @@ impl Resolver {
             // a private directory may be reached without TLS; the public one never is
             .https_only(!PLC_URL.starts_with("http://"))
             .build()?;
-        let inflight = HashSet::new();
         let futures = FuturesUnordered::new();
-        Ok(Self { cache, conn, last, after, client, inflight, futures })
+        Ok(Self {
+            cache,
+            conn,
+            last,
+            after,
+            client,
+            export_waiters: HashMap::new(),
+            direct_inflight: HashSet::new(),
+            exporting: false,
+            bucket: TokenBucket::new(DIRECT_FETCH_RATE, DIRECT_FETCH_BURST),
+            handle: tokio::runtime::Handle::try_current().ok(),
+            futures,
+        })
+    }
+
+    #[cfg(all(test, not(feature = "labeler")))]
+    pub(crate) fn set_direct_rate(&mut self, rate: f64, burst: f64) {
+        self.bucket = TokenBucket::new(rate, burst);
     }
 
     pub fn expire(&mut self, did: &str, time: DateTime<Utc>) {
@@ -138,7 +204,7 @@ impl Resolver {
 
     pub fn resolve(&mut self, did: &str) -> Result<Option<(Option<&str>, &DidKey)>, ResolverError> {
         // the identity might have expired, so check inflight dids first
-        if self.inflight.contains(did) {
+        if self.direct_inflight.contains(did) || self.export_waiters.contains_key(did) {
             return Ok(None);
         }
         // if let Some(_) = self.cache.get(did) doesn't work because of NLL
@@ -173,36 +239,56 @@ impl Resolver {
         Ok(false)
     }
 
+    /// Park a `did:plc` on the export stream (its next op resolves it); any other
+    /// DID goes straight to a document fetch.
     pub fn request(&mut self, did: &str) {
-        self.request_inner(did, false);
+        if did.starts_with("did:plc:") && *DO_PLC_EXPORT {
+            if self.direct_inflight.contains(did) || self.export_waiters.contains_key(did) {
+                return;
+            }
+            if self.export_waiters.len() >= MAX_EXPORT_WAITERS {
+                return;
+            }
+            self.export_waiters.insert(did.to_owned(), Instant::now());
+            metrics::record_resolver_inflight("export_waiters", self.export_waiters.len());
+            self.send_req(None, None, None);
+            return;
+        }
+        self.request_direct(did);
     }
 
-    /// Force an individual DID lookup from plc.directory, bypassing the export stream.
-    /// Used when a hostname mismatch suggests the user may have migrated.
+    /// Fetch the DID document now, even for a DID parked on the export stream:
+    /// a waiter whose op never arrives would otherwise stay unresolved forever.
     pub fn request_direct(&mut self, did: &str) {
-        self.request_inner(did, true);
-    }
-
-    fn request_inner(&mut self, did: &str, force_direct: bool) {
         // One fetch per DID at a time, bounded overall: repeat events for a
         // pending DID must not stack additional futures.
-        if self.inflight.contains(did) || self.futures.len() >= MAX_INFLIGHT_FETCHES {
+        if self.direct_inflight.contains(did) || self.direct_inflight.len() >= MAX_INFLIGHT_FETCHES
+        {
             return;
         }
         if let Some(plc) = did.strip_prefix("did:plc:") {
-            let plc = if *DO_PLC_EXPORT && !force_direct { None } else { Some(plc) };
-            self.inflight.insert(did.to_owned());
-            self.send_req(Some(did), None, plc);
+            if !self.bucket.take() {
+                metrics::record_resolver_fetch("rate_limited");
+                return;
+            }
+            self.direct_inflight.insert(did.to_owned());
+            self.send_req(Some(did), None, Some(plc));
         } else if let Some(web) = did.strip_prefix("did:web:") {
             let Ok(web) = urlencoding::decode(web) else {
                 tracing::debug!(%did, "invalid did");
                 return;
             };
-            self.inflight.insert(did.to_owned());
+            if !self.bucket.take() {
+                metrics::record_resolver_fetch("rate_limited");
+                return;
+            }
+            self.direct_inflight.insert(did.to_owned());
             self.send_req(Some(did), Some(&web), None);
         } else {
             tracing::debug!(%did, "invalid did");
+            return;
         }
+        metrics::record_resolver_inflight("direct", self.direct_inflight.len());
     }
 
     fn send_req(&mut self, did: Option<&str>, web: Option<&str>, plc: Option<&str>) {
@@ -215,9 +301,13 @@ impl Resolver {
                 self.client.get(format!("{}/did:plc:{plc}", PLC_URL.as_str())),
                 Query::Did(did.to_owned()),
             )
-        } else if let Some(after) = self.after.take() {
+        } else if !self.exporting && *DO_PLC_EXPORT {
+            let Some(after) = self.after.take() else {
+                return;
+            };
             tracing::trace!(%after, "fetching after");
             self.last = Instant::now();
+            self.exporting = true;
             (
                 self.client.get(format!("{}/{PLC_EXPORT}={after}", PLC_URL.as_str())),
                 Query::Export(after),
@@ -225,87 +315,134 @@ impl Resolver {
         } else {
             return;
         };
-        self.futures.push(Box::pin(async move {
+        let fallback = query.clone();
+        let fetch = async move {
             match req.send().await {
-                Ok(req) => match req.bytes().await {
-                    Ok(bytes) => (query, Ok(bytes)),
-                    Err(err) => (query, Err(err)),
-                },
-                Err(err) => (query, Err(err)),
-            }
-        }));
-    }
-
-    pub async fn poll_inner(&mut self) -> Result<Vec<String>, ResolverError> {
-        if let Ok(Some((query, res))) = timeout(POLL_TIMEOUT, self.futures.next()).await {
-            match res {
-                Ok(bytes) => match query {
-                    Query::Did(query) => {
-                        // Clear inflight on every fetch outcome so the DID can
-                        // be retried; a stuck entry would pin it unresolved.
-                        self.inflight.remove(&query);
-                        if let Some((did, (pds, key))) = parse_did_doc(&bytes) {
-                            if query != did {
-                                tracing::warn!(%query, %did, "did query mismatch");
-                                return Ok(Vec::new());
-                            }
-                            self.cache.put(did.clone(), (pds, key));
-                            return Ok(vec![did]);
-                        }
-                    }
-                    Query::Export(after) => {
-                        self.after = Some(after);
-                        let mut dids = Vec::new();
-                        let mut count = 0;
-                        let tx = self.conn.transaction()?;
-                        let mut stmt = tx.prepare_cached("INSERT OR IGNORE INTO plc_operations (cid, did, created_at, nullified, operation) VALUES (?1, ?2, ?3, ?4, ?5)")?;
-                        for line in bytes.reader().lines() {
-                            count += 1;
-                            if let Some(doc) = parse_plc_doc(&line.unwrap_or_default()) {
-                                stmt.execute((
-                                    &doc.cid,
-                                    &doc.did,
-                                    &doc.created_at,
-                                    &doc.nullified,
-                                    doc.operation.get().as_bytes(),
-                                ))?;
-                                self.after = Some(doc.created_at);
-                                if self.inflight.remove(&doc.did) {
-                                    dids.push(doc.did);
-                                }
-                            }
-                        }
-                        drop(stmt);
-                        tx.commit()?;
-                        if count == 1000 {
-                            self.send_req(None, None, None);
-                        } else {
-                            // no more plc operations, drain inflight dids
-                            dids.extend(
-                                self.inflight.extract_if(|did| did.starts_with("did:plc:")),
-                            );
-                        }
-                        return Ok(dids);
+                Ok(response) => match response.bytes().await {
+                    Ok(bytes) => (query, Some(bytes)),
+                    Err(err) => {
+                        tracing::debug!(%err, "fetch error");
+                        (query, None)
                     }
                 },
                 Err(err) => {
                     tracing::debug!(%err, "fetch error");
-                    match query {
-                        // Restore the after cursor on export failure so exports can be retried
-                        Query::Export(after) => {
-                            self.after = Some(after);
+                    (query, None)
+                }
+            }
+        };
+        match &self.handle {
+            Some(handle) => {
+                let task = handle.spawn(fetch);
+                self.futures
+                    .push(Box::pin(async move { task.await.unwrap_or_else(|_| (fallback, None)) }));
+            }
+            None => self.futures.push(Box::pin(fetch)),
+        }
+    }
+
+    /// Handles every completed fetch that is ready now (bounded per call) and
+    /// returns the DIDs whose resolution state changed.
+    pub async fn poll_inner(&mut self) -> Result<Vec<String>, ResolverError> {
+        let mut dids = Vec::new();
+        for _ in 0..POLL_BATCH {
+            let Ok(Some((query, res))) = timeout(POLL_TIMEOUT, self.futures.next()).await else {
+                break;
+            };
+            self.handle_result(query, res, &mut dids)?;
+        }
+        if *DO_PLC_EXPORT && !self.exporting && self.last.elapsed() > PLC_EXPORT_INTERVAL {
+            self.send_req(None, None, None);
+        }
+        self.expire_waiters(&mut dids);
+        Ok(dids)
+    }
+
+    fn handle_result(
+        &mut self, query: Query, res: Option<Bytes>, dids: &mut Vec<String>,
+    ) -> Result<(), ResolverError> {
+        match (query, res) {
+            (Query::Did(query), Some(bytes)) => {
+                // Clear inflight on every fetch outcome so the DID can
+                // be retried; a stuck entry would pin it unresolved.
+                self.direct_inflight.remove(&query);
+                metrics::record_resolver_inflight("direct", self.direct_inflight.len());
+                match parse_did_doc(&bytes) {
+                    Some((did, (pds, key))) => {
+                        if query != did {
+                            tracing::warn!(%query, %did, "did query mismatch");
+                            metrics::record_resolver_fetch("mismatch");
+                            return Ok(());
                         }
-                        // Clear inflight on failed DID fetches so they can be retried
-                        Query::Did(query) => {
-                            self.inflight.remove(&query);
+                        self.export_waiters.remove(&did);
+                        self.cache.put(did.clone(), (pds, key));
+                        metrics::record_resolver_fetch("ok");
+                        dids.push(did);
+                    }
+                    None => metrics::record_resolver_fetch("parse_error"),
+                }
+            }
+            (Query::Did(query), None) => {
+                self.direct_inflight.remove(&query);
+                metrics::record_resolver_inflight("direct", self.direct_inflight.len());
+                metrics::record_resolver_fetch("error");
+            }
+            (Query::Export(after), Some(bytes)) => {
+                self.exporting = false;
+                self.after = Some(after);
+                let mut count = 0;
+                let tx = self.conn.transaction()?;
+                let mut stmt = tx.prepare_cached("INSERT OR IGNORE INTO plc_operations (cid, did, created_at, nullified, operation) VALUES (?1, ?2, ?3, ?4, ?5)")?;
+                for line in bytes.reader().lines() {
+                    count += 1;
+                    if let Some(doc) = parse_plc_doc(&line.unwrap_or_default()) {
+                        stmt.execute((
+                            &doc.cid,
+                            &doc.did,
+                            &doc.created_at,
+                            &doc.nullified,
+                            doc.operation.get().as_bytes(),
+                        ))?;
+                        self.after = Some(doc.created_at);
+                        if self.export_waiters.remove(&doc.did).is_some() {
+                            dids.push(doc.did);
                         }
                     }
                 }
+                drop(stmt);
+                tx.commit()?;
+                if count == 1000 {
+                    self.send_req(None, None, None);
+                } else {
+                    // no more plc operations, drain the waiters
+                    dids.extend(self.export_waiters.drain().map(|(did, _)| did));
+                }
+                metrics::record_resolver_inflight("export_waiters", self.export_waiters.len());
             }
-        } else if *DO_PLC_EXPORT && self.last.elapsed() > PLC_EXPORT_INTERVAL {
-            self.send_req(None, None, None);
+            (Query::Export(after), None) => {
+                // Restore the after cursor on export failure so exports can be retried
+                self.exporting = false;
+                self.after = Some(after);
+            }
         }
-        Ok(Vec::new())
+        Ok(())
+    }
+
+    fn expire_waiters(&mut self, dids: &mut Vec<String>) {
+        if self.export_waiters.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let expired: Vec<String> = self
+            .export_waiters
+            .iter()
+            .filter(|(_, since)| now.duration_since(**since) > EXPORT_WAITER_MAX_AGE)
+            .map(|(did, _)| did.clone())
+            .collect();
+        for did in expired {
+            self.export_waiters.remove(&did);
+            dids.push(did);
+        }
     }
 }
 
@@ -416,7 +553,7 @@ pub(crate) type ResolveResult = Result<Option<(Option<String>, DidKey)>, Resolve
 pub(crate) type PollResult = Result<Vec<String>, ResolverError>;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::collections::VecDeque;
 
@@ -511,6 +648,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "labeler"))]
     fn test_resolver(dir: &tempfile::TempDir) -> Resolver {
         let db_path = dir.path().join("plc_directory.db");
         let conn = Connection::open(&db_path).unwrap();
@@ -526,6 +664,7 @@ mod tests {
         Resolver::with_db_path(db_path.to_str().unwrap()).unwrap()
     }
 
+    #[cfg(not(feature = "labeler"))]
     #[test]
     fn repeat_requests_for_pending_did_do_not_stack_futures() {
         let dir = tempfile::TempDir::with_prefix("resolver_test_").unwrap();
@@ -534,25 +673,28 @@ mod tests {
             resolver.request_direct("did:web:pds.example.com");
         }
         assert_eq!(resolver.futures.len(), 1);
-        assert_eq!(resolver.inflight.len(), 1);
+        assert_eq!(resolver.direct_inflight.len(), 1);
         for _ in 0..5 {
             resolver.request_direct("did:plc:aaaabbbbccccdddd");
         }
         assert_eq!(resolver.futures.len(), 2);
-        assert_eq!(resolver.inflight.len(), 2);
+        assert_eq!(resolver.direct_inflight.len(), 2);
     }
 
+    #[cfg(not(feature = "labeler"))]
     #[test]
     fn distinct_did_fetches_are_capped() {
         let dir = tempfile::TempDir::with_prefix("resolver_test_").unwrap();
         let mut resolver = test_resolver(&dir);
+        resolver.set_direct_rate(1e9, 1e9);
         for i in 0..(MAX_INFLIGHT_FETCHES + 10) {
             resolver.request_direct(&format!("did:web:host{i}.example.com"));
         }
         assert_eq!(resolver.futures.len(), MAX_INFLIGHT_FETCHES);
-        assert_eq!(resolver.inflight.len(), MAX_INFLIGHT_FETCHES);
+        assert_eq!(resolver.direct_inflight.len(), MAX_INFLIGHT_FETCHES);
     }
 
+    #[cfg(not(feature = "labeler"))]
     #[test]
     fn invalid_did_leaves_no_inflight_entry() {
         let dir = tempfile::TempDir::with_prefix("resolver_test_").unwrap();
@@ -560,6 +702,226 @@ mod tests {
         resolver.request_direct("did:example:nonsense");
         resolver.request_direct("not-a-did");
         assert_eq!(resolver.futures.len(), 0);
-        assert_eq!(resolver.inflight.len(), 0);
+        assert_eq!(resolver.direct_inflight.len(), 0);
+    }
+
+    #[cfg(not(feature = "labeler"))]
+    fn did_doc(did: &str, pds: &str) -> Bytes {
+        Bytes::from(
+            serde_json::json!({
+                "id": did,
+                "verificationMethod": [{
+                    "id": format!("{did}#atproto"),
+                    "type": "Multikey",
+                    "controller": did,
+                    "publicKeyMultibase": "zQ3shokFTS3brHcDQrn82RUDfCZESWL1ZdCEJwekUDPQiYBme"
+                }],
+                "service": [{
+                    "id": "#atproto_pds",
+                    "type": "AtprotoPersonalDataServer",
+                    "serviceEndpoint": format!("https://{pds}")
+                }]
+            })
+            .to_string(),
+        )
+    }
+
+    #[cfg(not(feature = "labeler"))]
+    #[test]
+    fn request_parks_plc_dids_on_the_export_stream_and_direct_promotes_them() {
+        let dir = tempfile::TempDir::with_prefix("resolver_test_").unwrap();
+        let mut resolver = test_resolver(&dir);
+        resolver.request("did:plc:aaaabbbbccccdddd");
+        resolver.request("did:plc:aaaabbbbccccdddd");
+        assert_eq!(resolver.export_waiters.len(), 1);
+        assert!(resolver.exporting, "a waiter kicks an export page fetch");
+        assert_eq!(resolver.futures.len(), 1);
+        // resolve() reports pending while parked
+        assert!(resolver.resolve("did:plc:aaaabbbbccccdddd").unwrap().is_none());
+        // promotion: a direct fetch is issued even though the DID is a waiter
+        resolver.request_direct("did:plc:aaaabbbbccccdddd");
+        assert!(resolver.direct_inflight.contains("did:plc:aaaabbbbccccdddd"));
+        assert_eq!(resolver.futures.len(), 2);
+        // non-plc DIDs go straight to a direct fetch
+        resolver.request("did:web:pds.example.com");
+        assert!(resolver.direct_inflight.contains("did:web:pds.example.com"));
+        // a second export request while one is running does not stack
+        resolver.request("did:plc:eeeeffffgggghhhh");
+        assert_eq!(resolver.futures.len(), 3);
+    }
+
+    #[cfg(not(feature = "labeler"))]
+    #[test]
+    fn export_waiters_are_bounded_and_direct_fetches_are_rate_limited() {
+        let dir = tempfile::TempDir::with_prefix("resolver_test_").unwrap();
+        let mut resolver = test_resolver(&dir);
+        resolver.set_direct_rate(0.0, 1.0);
+        resolver.request_direct("did:web:a.example");
+        resolver.request_direct("did:web:b.example");
+        assert_eq!(resolver.direct_inflight.len(), 1, "bucket of one token");
+        resolver.request_direct("did:plc:aaaabbbbccccdddd");
+        assert_eq!(resolver.direct_inflight.len(), 1);
+        for i in 0..MAX_EXPORT_WAITERS + 5 {
+            resolver.export_waiters.insert(format!("did:plc:{i}"), Instant::now());
+        }
+        let before = resolver.export_waiters.len();
+        resolver.request("did:plc:overflow");
+        assert_eq!(resolver.export_waiters.len(), before);
+        let mut bucket = TokenBucket::new(1000.0, 2.0);
+        assert!(bucket.take());
+        assert!(bucket.take());
+        assert!(!bucket.take());
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(bucket.take());
+    }
+
+    #[cfg(not(feature = "labeler"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn poll_inner_handles_every_fetch_outcome() {
+        let dir = tempfile::TempDir::with_prefix("resolver_test_").unwrap();
+        let mut resolver = test_resolver(&dir);
+        resolver.direct_inflight.insert("did:plc:ok".to_owned());
+        resolver.export_waiters.insert("did:plc:ok".to_owned(), Instant::now());
+        resolver.direct_inflight.insert("did:plc:mismatch".to_owned());
+        resolver.direct_inflight.insert("did:plc:garbage".to_owned());
+        resolver.direct_inflight.insert("did:plc:failed".to_owned());
+        let push = |resolver: &mut Resolver, q: Query, b: Option<Bytes>| {
+            resolver.futures.push(Box::pin(async move { (q, b) }));
+        };
+        push(
+            &mut resolver,
+            Query::Did("did:plc:ok".to_owned()),
+            Some(did_doc("did:plc:ok", "pds.a")),
+        );
+        push(
+            &mut resolver,
+            Query::Did("did:plc:mismatch".to_owned()),
+            Some(did_doc("did:plc:other", "pds.b")),
+        );
+        push(
+            &mut resolver,
+            Query::Did("did:plc:garbage".to_owned()),
+            Some(Bytes::from_static(b"{")),
+        );
+        push(&mut resolver, Query::Did("did:plc:failed".to_owned()), None);
+        let mut from_docs = resolver.poll_inner().await.unwrap();
+        from_docs.sort();
+        assert_eq!(from_docs, vec!["did:plc:ok".to_owned()]);
+        assert!(resolver.direct_inflight.is_empty());
+        assert!(resolver.export_waiters.is_empty(), "a resolved waiter leaves the export set");
+        assert!(resolver.cache.contains("did:plc:ok"));
+        let (endpoint, _) = resolver.resolve("did:plc:ok").unwrap().unwrap();
+        assert_eq!(endpoint, Some("pds.a"));
+
+        // export page: op for a waiter resolves it; short page drains the rest; failure restores cursor
+        resolver.export_waiters.insert("did:plc:waiter".to_owned(), Instant::now());
+        resolver.export_waiters.insert("did:plc:drained".to_owned(), Instant::now());
+        resolver.exporting = true;
+        let op = serde_json::json!({
+            "did": "did:plc:waiter", "operation": {"type": "plc_operation"}, "cid": "bafycid1",
+            "nullified": false, "createdAt": "2026-09-23T00:00:00.000Z"
+        });
+        let page = format!("{op}\nnot json\n");
+        push(
+            &mut resolver,
+            Query::Export("2026-01-01T00:00:00Z".to_owned()),
+            Some(Bytes::from(page)),
+        );
+        let mut from_export = resolver.poll_inner().await.unwrap();
+        from_export.sort();
+        assert_eq!(from_export, vec!["did:plc:drained".to_owned(), "did:plc:waiter".to_owned()]);
+        assert!(!resolver.exporting);
+        assert_eq!(resolver.after.as_deref(), Some("2026-09-23T00:00:00.000Z"));
+        let rows: i64 = resolver
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM plc_operations WHERE did = 'did:plc:waiter'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1);
+
+        resolver.exporting = true;
+        push(&mut resolver, Query::Export("cursor-x".to_owned()), None);
+        assert!(resolver.poll_inner().await.unwrap().is_empty());
+        assert_eq!(resolver.after.as_deref(), Some("cursor-x"));
+        assert!(!resolver.exporting);
+
+        // a full page chains another export request
+        resolver.exporting = true;
+        let full: String = (0..1000).map(|_| "x\n").collect();
+        push(&mut resolver, Query::Export("c".to_owned()), Some(Bytes::from(full)));
+        resolver.poll_inner().await.unwrap();
+        assert!(resolver.exporting, "count == 1000 requests the next page");
+
+        // stale waiters are handed back unresolved
+        resolver.export_waiters.insert(
+            "did:plc:stale".to_owned(),
+            Instant::now().checked_sub(EXPORT_WAITER_MAX_AGE + Duration::from_secs(1)).unwrap(),
+        );
+        let expired = resolver.poll_inner().await.unwrap();
+        assert_eq!(expired, vec!["did:plc:stale".to_owned()]);
+        assert!(resolver.export_waiters.is_empty());
+    }
+
+    #[cfg(not(feature = "labeler"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fetches_run_on_the_shared_runtime_when_available() {
+        let dir = tempfile::TempDir::with_prefix("resolver_test_").unwrap();
+        let mut resolver = test_resolver(&dir);
+        assert!(resolver.handle.is_some());
+        resolver.request_direct("did:web:127.0.0.1");
+        assert_eq!(resolver.futures.len(), 1);
+        // the fetch fails (nothing listens) and the outcome is reported as an error
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while resolver.direct_inflight.contains("did:web:127.0.0.1") && Instant::now() < deadline {
+            resolver.poll_inner().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!resolver.direct_inflight.contains("did:web:127.0.0.1"));
+    }
+
+    #[cfg(not(feature = "labeler"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn identity_resolver_impl_and_query_db_paths() {
+        let dir = tempfile::TempDir::with_prefix("resolver_test_").unwrap();
+        let mut resolver = test_resolver(&dir);
+        resolver
+            .conn
+            .execute(
+                "INSERT INTO plc_keys (did, pds_endpoint, pds_key, labeler_endpoint, labeler_key)
+                 VALUES ('did:plc:indb', 'https://pds.db/', 'did:key:zQ3shokFTS3brHcDQrn82RUDfCZESWL1ZdCEJwekUDPQiYBme', NULL, NULL),
+                        ('did:plc:nokey', 'https://pds.db/', NULL, NULL, NULL)",
+                [],
+            )
+            .unwrap();
+        let (pds, _) =
+            IdentityResolver::resolve_owned(&mut resolver, "did:plc:indb").unwrap().unwrap();
+        assert_eq!(pds.as_deref(), Some("pds.db"));
+        assert!(resolver.cache.contains("did:plc:indb"));
+        assert!(IdentityResolver::resolve_owned(&mut resolver, "did:plc:nokey").unwrap().is_none());
+        assert!(
+            IdentityResolver::resolve_owned(&mut resolver, "did:plc:missing").unwrap().is_none()
+        );
+        assert!(resolver.export_waiters.contains_key("did:plc:missing"), "a miss parks the DID");
+        IdentityResolver::request_direct(&mut resolver, "did:plc:missing");
+        assert!(resolver.direct_inflight.contains("did:plc:missing"));
+        let t = DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z").unwrap().with_timezone(&Utc);
+        resolver.after = Some("2026-01-01T00:00:00Z".to_owned());
+        IdentityResolver::expire(&mut resolver, "did:plc:indb", t);
+        assert!(
+            !resolver.cache.contains("did:plc:indb"),
+            "a newer identity event evicts the cache"
+        );
+        assert!(IdentityResolver::poll(&mut resolver).await.unwrap().is_empty());
+        resolver.request("not-a-did");
+        assert!(!resolver.direct_inflight.contains("not-a-did"));
+    }
+
+    #[test]
+    fn parse_key_endpoint_rejects_bad_keys() {
+        assert!(parse_key_endpoint(Some("https://p"), Some("did:key:zQ3shokFTS3")).is_none());
+        assert!(parse_key_endpoint(Some("https://p"), Some("!!!")).is_none());
     }
 }

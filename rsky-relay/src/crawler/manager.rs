@@ -7,7 +7,7 @@ use exponential_backoff::{Backoff, IntoIter as BackoffIter};
 use hashbrown::{HashMap, HashSet};
 use magnetic::Consumer;
 use magnetic::buffer::dynamic::DynamicBufferP2;
-use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags};
 use thiserror::Error;
 
 use crate::SHUTDOWN;
@@ -15,7 +15,7 @@ use crate::config::{BAN_REFRESH_INTERVAL, CAPACITY_STATUS};
 use crate::crawler::RequestCrawl;
 use crate::crawler::types::{Command, CommandSender, RequestCrawlReceiver, Status, StatusReceiver};
 use crate::crawler::worker::{Worker, WorkerError};
-use crate::types::{Cursor, MessageSender};
+use crate::types::{Cursor, DB, HostCursor, MessageSender, PARTITION_HOST_CURSORS};
 
 const SLEEP: Duration = Duration::from_millis(10);
 
@@ -29,6 +29,10 @@ pub enum ManagerError {
     Push(#[from] Box<rtrb::PushError<Command>>),
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("fjall error: {0}")]
+    Fjall(#[from] fjall::Error),
+    #[error("cursor decode error: {0}")]
+    CursorDecode(#[from] serde_ipld_dagcbor::DecodeError<std::convert::Infallible>),
     #[error("join error")]
     Join,
 }
@@ -53,6 +57,7 @@ pub struct Manager {
     banned: HashSet<String>,
     last_ban_check: Instant,
     conn: Connection,
+    host_cursors: fjall::PartitionHandle,
     request_crawl_rx: RequestCrawlReceiver,
     status_rx: StatusReceiver,
 }
@@ -83,6 +88,8 @@ impl Manager {
         let banned = HashSet::new();
         let now = Instant::now();
         let last_ban_check = now.checked_sub(BAN_REFRESH_INTERVAL).unwrap_or(now);
+        let host_cursors =
+            DB.open_partition(PARTITION_HOST_CURSORS, fjall::PartitionCreateOptions::default())?;
         Ok(Self {
             workers: workers.into_boxed_slice(),
             next_id: 0,
@@ -91,6 +98,7 @@ impl Manager {
             banned,
             last_ban_check,
             conn,
+            host_cursors,
             request_crawl_rx,
             status_rx,
         })
@@ -184,14 +192,7 @@ impl Manager {
             [backoff_connect.iter(), backoff_reconnect.iter()]
         });
         if request_crawl.cursor.is_none() {
-            request_crawl.cursor = loop {
-                match self.get_cursor(&request_crawl.hostname) {
-                    Ok(cursor) => break cursor,
-                    Err(ManagerError::Sqlite(err))
-                        if err.sqlite_error_code() == Some(ErrorCode::DatabaseLocked) => {}
-                    Err(err) => Err(err)?,
-                }
-            };
+            request_crawl.cursor = self.get_cursor(&request_crawl.hostname)?;
         }
         self.workers[self.next_id].command_tx.push(Command::Connect(request_crawl))?;
         self.next_id = (self.next_id + 1) % self.workers.len();
@@ -199,14 +200,14 @@ impl Manager {
         Ok(())
     }
 
+    /// Recovery reads the durable cursor written with its event; the `SQLite`
+    /// `hosts` table is only a read model for `listHosts`.
     fn get_cursor(&self, host: &str) -> Result<Option<Cursor>, ManagerError> {
-        let mut stmt = self.conn.prepare_cached("SELECT * FROM hosts WHERE host = ?1")?;
-        Ok(stmt
-            .query_one((&host,), |row| {
-                Ok(u64::try_from(row.get_unwrap::<_, i64>("cursor")).unwrap_or_default())
-            })
-            .optional()?
-            .map(Into::into))
+        let Some(raw) = self.host_cursors.get(host)? else {
+            return Ok(None);
+        };
+        let cursor = HostCursor::decode(&raw)?;
+        Ok(Some(cursor.seq.into()))
     }
 
     fn refresh_bans(&mut self) -> Result<(), ManagerError> {

@@ -29,11 +29,24 @@ const ATPROTO_REPO_VERSION: u8 = 3;
 
 pub type BlockMap = HashMap<Cid, Vec<u8>>;
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Whether a stored repo head came from a signature-verified commit. Entries
+/// written by 0.2.x recorded heads from lenient-forwarded unverified commits and
+/// deserialize as `Legacy`; only `Verified` state backs the rev replay check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Provenance {
+    #[default]
+    Legacy,
+    Verified,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoState {
     pub rev: TID,
     pub data: Cid,
     pub head: Cid,
+    #[serde(default)]
+    pub provenance: Provenance,
 }
 
 impl SubscribeReposEvent {
@@ -209,9 +222,9 @@ impl Node {
                     Ok(false)
                 }
             }
-            SubscribeReposCommitOperation::Update { path, cid: expected, prev_data } => {
+            SubscribeReposCommitOperation::Update { path, cid: expected, prev } => {
                 #[expect(clippy::unwrap_used)]
-                let Some(found) = self.insert(path.as_str(), prev_data.unwrap(), -1)? else {
+                let Some(found) = self.insert(path.as_str(), prev.unwrap(), -1)? else {
                     tracing::debug!(%expected, "unable to invert update: not found");
                     return Ok(false);
                 };
@@ -222,9 +235,9 @@ impl Node {
                     Ok(false)
                 }
             }
-            SubscribeReposCommitOperation::Delete { path, prev_data } => {
+            SubscribeReposCommitOperation::Delete { path, prev, .. } => {
                 #[expect(clippy::unwrap_used)]
-                let Some(found) = self.insert(path.as_str(), prev_data.unwrap(), -1)? else {
+                let Some(found) = self.insert(path.as_str(), prev.unwrap(), -1)? else {
                     return Ok(true);
                 };
                 tracing::debug!(%found, "unable to invert delete");

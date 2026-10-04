@@ -18,6 +18,9 @@ use crate::types::MessageSender;
 
 const INTEREST: Interest = Interest::READABLE;
 const TIMEOUT: Duration = Duration::from_secs(5);
+const BACKPRESSURE_SLEEP: Duration = Duration::from_millis(1);
+const LOOP_METRIC_EVERY: u64 = 1000;
+pub const RING_HEADROOM: usize = 16;
 
 #[derive(Debug, Error)]
 pub enum WorkerError {
@@ -37,6 +40,7 @@ pub struct Worker {
     status_tx: StatusSender,
     poll: Poll,
     events: Events,
+    pub(crate) loops: u64,
 }
 
 impl Worker {
@@ -55,6 +59,7 @@ impl Worker {
             status_tx,
             poll,
             events,
+            loops: 0,
         })
     }
 
@@ -63,11 +68,31 @@ impl Worker {
         let span = tracing::info_span!("crawler", id = %self.id);
         let _enter = span.enter();
         while self.update() {
-            thread::yield_now();
+            self.pause();
         }
         tracing::info!("shutting down");
         self.shutdown();
         Ok(())
+    }
+
+    /// A full intake ring or exhausted byte budget means nothing can be read
+    /// until the validator drains; spinning on `yield_now` there costs a core.
+    fn pause(&mut self) {
+        self.loops += 1;
+        if self.loops % LOOP_METRIC_EVERY == 0 {
+            crate::metrics::record_crawler_loops(LOOP_METRIC_EVERY);
+        }
+        if Self::backpressured(&self.message_tx) {
+            thread::sleep(BACKPRESSURE_SLEEP);
+        } else {
+            thread::yield_now();
+        }
+    }
+
+    #[inline]
+    fn backpressured(message_tx: &MessageSender) -> bool {
+        message_tx.remaining() < RING_HEADROOM
+            || crate::types::intake_bytes() > crate::config::INTAKE_BYTE_BUDGET
     }
 
     pub fn shutdown(self) {
@@ -154,7 +179,7 @@ impl Worker {
                 }
             }
 
-            if self.message_tx.remaining() < 16 {
+            if Self::backpressured(&self.message_tx) {
                 break;
             }
 
@@ -209,5 +234,53 @@ impl Worker {
         }
 
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::MessageRecycle;
+    use magnetic::buffer::dynamic::DynamicBufferP2;
+
+    fn worker(ring: usize) -> (Worker, MessageSender) {
+        let (message_tx, _rx) = thingbuf::mpsc::blocking::with_recycle(ring, MessageRecycle);
+        let (_cmd_tx, command_rx) = rtrb::RingBuffer::new(4);
+        let (status_tx, _status_rx) = magnetic::mpsc::mpsc_queue(DynamicBufferP2::new(4).unwrap());
+        let w = Worker::new(0, message_tx.clone(), command_rx, status_tx).unwrap();
+        (w, message_tx)
+    }
+
+    #[test]
+    fn full_ring_pauses_instead_of_spinning() {
+        let (mut w, tx) = worker(8);
+        assert!(Worker::backpressured(&tx), "a ring smaller than the headroom is always full");
+        let start = Instant::now();
+        for _ in 0..50 {
+            w.pause();
+        }
+        assert_eq!(w.loops, 50);
+        assert!(
+            start.elapsed() >= Duration::from_millis(40),
+            "each pause sleeps under backpressure"
+        );
+        assert!(!w.update() || w.update(), "update runs with an empty connection set");
+    }
+
+    #[test]
+    fn free_ring_yields_without_sleeping() {
+        let (mut w, tx) = worker(1024);
+        assert!(!Worker::backpressured(&tx));
+        let start = Instant::now();
+        for _ in 0..50 {
+            w.pause();
+        }
+        assert!(start.elapsed() < Duration::from_millis(40));
+        w.loops = LOOP_METRIC_EVERY - 1;
+        w.pause();
+        assert_eq!(w.loops, LOOP_METRIC_EVERY, "loop counter feeds the crawler loop metric");
+        crate::types::intake_bytes_add(crate::config::INTAKE_BYTE_BUDGET + 1);
+        assert!(Worker::backpressured(&tx), "byte budget also backpressures");
+        crate::types::intake_bytes_sub(crate::config::INTAKE_BYTE_BUDGET + 1);
     }
 }
