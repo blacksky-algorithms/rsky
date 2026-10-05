@@ -145,29 +145,37 @@ jobs:
       # not gated behind a feature or #[ignore], so a stock image alone fails
       # them with `relation "actor" does not exist`. The schema is applied from
       # the checked-in dump in the step after this one.
-      - name: Start Postgres for rsky-wintermute
-        if: matrix.package == 'rsky-wintermute'
+      - name: Start Postgres for DB-backed tests
+        if: matrix.package == 'rsky-wintermute' || matrix.package == 'rsky-feedgen'
         run: |
-          docker run -d --name wintermute-pg \
+          docker run -d --name test-pg \
             -e POSTGRES_PASSWORD=postgres \
             -e POSTGRES_DB=bsky_test \
             -p 5432:5432 postgres:17
           for _ in $(seq 1 30); do
-            if docker exec wintermute-pg pg_isready -U postgres -d bsky_test; then
+            if docker exec test-pg pg_isready -U postgres -d bsky_test; then
               exit 0
             fi
             sleep 1
           done
           echo "Postgres did not become ready" >&2
-          docker logs wintermute-pg >&2
+          docker logs test-pg >&2
           exit 1
       # Appview schema snapshot (public schema, no rows). Regenerate per
       # rsky-wintermute/README.md when the dataplane migrations change.
       - name: Apply appview schema for rsky-wintermute
         if: matrix.package == 'rsky-wintermute'
         run: |
-          docker exec -i wintermute-pg psql -U postgres -d bsky_test \
+          docker exec -i test-pg psql -U postgres -d bsky_test \
             -v ON_ERROR_STOP=1 -q < rsky-wintermute/tests/schema/appview.sql
+      # rsky-feedgen's ban-list tests read and write its own tables.
+      - name: Apply migrations for rsky-feedgen
+        if: matrix.package == 'rsky-feedgen'
+        run: |
+          for migration in rsky-feedgen/migrations/*/up.sql; do
+            docker exec -i test-pg psql -U postgres -d bsky_test \
+              -v ON_ERROR_STOP=1 -q < "$migration"
+          done
       - name: Run cargo test for ${{ matrix.package }}
         run: cargo test --release -p ${{ matrix.package }}
         env:
