@@ -1904,6 +1904,162 @@ mod indexer_tests {
         cleanup_test_data(&pool, test_did).await;
     }
 
+    fn gallery_embed() -> serde_json::Value {
+        let image = |cid: &str, alt: &str| {
+            serde_json::json!({
+                "$type": "app.bsky.embed.gallery#image",
+                "image": {"$type": "blob", "ref": {"$link": cid}, "mimeType": "image/jpeg", "size": 1},
+                "alt": alt,
+                "aspectRatio": {"width": 4, "height": 3},
+            })
+        };
+        serde_json::json!({
+            "$type": "app.bsky.embed.gallery",
+            "items": [
+                image("bafkreigallery0", "first"),
+                {"$type": "app.bsky.embed.gallery#futureItem"},
+                image("bafkreigallery2", "third"),
+            ],
+        })
+    }
+
+    fn gallery_rows(uri: &str) -> Vec<(String, String, String, String)> {
+        vec![
+            (
+                uri.to_owned(),
+                "0".to_owned(),
+                "bafkreigallery0".to_owned(),
+                "first".to_owned(),
+            ),
+            (
+                uri.to_owned(),
+                "2".to_owned(),
+                "bafkreigallery2".to_owned(),
+                "third".to_owned(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn gallery_images_are_extracted_apart_from_image_embeds() {
+        let uri = "at://did:plc:gallery/app.bsky.feed.post/1";
+        let images_embed = serde_json::json!({
+            "$type": "app.bsky.embed.images",
+            "images": [{"image": {"ref": "bafkreiimage0"}, "alt": "plain"}, {"alt": "no blob"}],
+        });
+        let with_media = serde_json::json!({
+            "$type": "app.bsky.embed.recordWithMedia",
+            "record": {"record": {"uri": "at://did:plc:other/app.bsky.feed.post/q", "cid": "bafyq"}},
+            "media": gallery_embed(),
+        });
+        let no_media = serde_json::json!({"$type": "app.bsky.embed.recordWithMedia"});
+        let external = serde_json::json!({"$type": "app.bsky.embed.external"});
+
+        for embed in [gallery_embed(), with_media] {
+            let (mut images, mut gallery, mut videos) = (Vec::new(), Vec::new(), Vec::new());
+            IndexerManager::extract_embed_data(&embed, uri, &mut images, &mut gallery, &mut videos);
+            assert_eq!(gallery, gallery_rows(uri));
+            assert!(images.is_empty());
+            assert!(videos.is_empty());
+        }
+
+        let (mut images, mut gallery, mut videos) = (Vec::new(), Vec::new(), Vec::new());
+        for embed in [images_embed, no_media, external] {
+            IndexerManager::extract_embed_data(&embed, uri, &mut images, &mut gallery, &mut videos);
+        }
+        assert_eq!(
+            images,
+            vec![(
+                uri.to_owned(),
+                "0".to_owned(),
+                "bafkreiimage0".to_owned(),
+                "plain".to_owned()
+            )]
+        );
+        assert!(gallery.is_empty());
+        assert!(videos.is_empty());
+    }
+
+    #[tokio::test]
+    async fn gallery_posts_index_their_images_on_the_live_and_bulk_paths() {
+        use crate::types::IndexJob;
+
+        let pool = setup_test_pool();
+        let test_did = "did:plc:wintermute-test-gallery";
+        let client = pool.get().await.unwrap();
+        let clear_embeds = || async {
+            for table in ["post_embed_gallery_image", "post_embed_image"] {
+                client
+                    .execute(
+                        &format!("DELETE FROM {table} WHERE \"postUri\" LIKE $1"),
+                        &[&format!("at://{test_did}/%")],
+                    )
+                    .await
+                    .unwrap();
+            }
+        };
+        cleanup_test_data(&pool, test_did).await;
+        clear_embeds().await;
+
+        let job = |rkey: &str| IndexJob {
+            uri: format!("at://{test_did}/app.bsky.feed.post/{rkey}"),
+            cid: "bafyreihhl5mpvjkrhnnagen2fomozzhnhhdq2jr6cego2nzbvmwewv5rd4".to_owned(),
+            action: WriteAction::Create,
+            record: Some(serde_json::json!({
+                "$type": "app.bsky.feed.post",
+                "text": "gallery post",
+                "createdAt": "2026-10-04T14:00:00.000Z",
+                "embed": gallery_embed(),
+            })),
+            indexed_at: "2026-10-04T14:00:00.000Z".to_owned(),
+            rev: "3lgallery".to_owned(),
+            provenance: None,
+        };
+
+        let live = job("live");
+        IndexerManager::process_job(&pool, &live, false)
+            .await
+            .unwrap();
+        let bulk = job("bulk");
+        let (results, batch_failed) = IndexerManager::process_jobs_batch(
+            &pool,
+            &[(b"gallery".to_vec(), bulk.clone())],
+            false,
+            false,
+        )
+        .await;
+        assert!(!batch_failed);
+        assert!(results.iter().all(|(_, r)| r.is_ok()), "{results:?}");
+
+        for uri in [&live.uri, &bulk.uri] {
+            let rows = client
+                .query(
+                    "SELECT \"postUri\", position, \"imageCid\", alt \
+                     FROM post_embed_gallery_image WHERE \"postUri\" = $1 ORDER BY position",
+                    &[uri],
+                )
+                .await
+                .unwrap();
+            let rows: Vec<(String, String, String, String)> = rows
+                .iter()
+                .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
+                .collect();
+            assert_eq!(rows, gallery_rows(uri));
+            let images: i64 = client
+                .query_one(
+                    "SELECT COUNT(*) FROM post_embed_image WHERE \"postUri\" = $1",
+                    &[uri],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(images, 0);
+        }
+
+        clear_embeds().await;
+        cleanup_test_data(&pool, test_did).await;
+    }
+
     #[tokio::test]
     async fn bulk_post_langs_tags_round_trip_as_arrays() {
         use crate::indexer::bulk::{self, PostCopyRow};

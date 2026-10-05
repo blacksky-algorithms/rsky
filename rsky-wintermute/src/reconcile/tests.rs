@@ -1119,8 +1119,8 @@ async fn a_commit_acknowledgement_is_retried_until_it_is_durable() {
     // a record write that fails in the same batch withholds the acknowledgement
     client
         .batch_execute(&format!(
-            "DROP TRIGGER IF EXISTS wintermute_test_refuse_record ON record; \
-             CREATE TRIGGER wintermute_test_refuse_record BEFORE INSERT ON record FOR EACH ROW \
+            "DROP TRIGGER IF EXISTS wintermute_test_refuse_batch_record ON record; \
+             CREATE TRIGGER wintermute_test_refuse_batch_record BEFORE INSERT ON record FOR EACH ROW \
              WHEN (NEW.did = '{did}') EXECUTE FUNCTION wintermute_test_refuse();"
         ))
         .await
@@ -1162,7 +1162,7 @@ async fn a_commit_acknowledgement_is_retried_until_it_is_durable() {
         Some("bafyack")
     );
     client
-        .batch_execute("DROP TRIGGER wintermute_test_refuse_record ON record")
+        .batch_execute("DROP TRIGGER wintermute_test_refuse_batch_record ON record")
         .await
         .unwrap();
     reset_actor(&pool, did).await;
