@@ -289,7 +289,7 @@ impl LocalViewer {
                     .format_record_with_media_embed(embed)
                     .await?
                     .map(EmbedViews::RecordWithMediaView)),
-                Embeds::Video(_) => Ok(None),
+                Embeds::Video(_) | Embeds::Gallery(_) => Ok(None),
             },
         }
     }
@@ -337,7 +337,7 @@ impl LocalViewer {
                     },
                 }))
             }
-            MediaUnion::Video(_) => None,
+            MediaUnion::Video(_) | MediaUnion::Gallery(_) => None,
         }
     }
 
