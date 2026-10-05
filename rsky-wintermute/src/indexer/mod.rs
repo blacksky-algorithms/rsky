@@ -42,6 +42,11 @@ static ACTOR_CACHE: std::sync::LazyLock<DashMap<String, ()>> =
 const ACTOR_CACHE_MAX_SIZE: usize = 2_000_000;
 /// How long a loop waits before retrying work deferred by a fence.
 const FENCE_RETRY_DELAY: Duration = Duration::from_millis(100);
+const EMBED_IMAGES: &str = "app.bsky.embed.images";
+const EMBED_GALLERY: &str = "app.bsky.embed.gallery";
+const EMBED_GALLERY_IMAGE: &str = "app.bsky.embed.gallery#image";
+const EMBED_IMAGE_TABLE: &str = "post_embed_image";
+const EMBED_GALLERY_IMAGE_TABLE: &str = "post_embed_gallery_image";
 
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
@@ -3270,6 +3275,7 @@ impl IndexerManager {
         let mut feed_item_data: Vec<(String, String, String, String, String, String)> =
             Vec::with_capacity(jobs.len());
         let mut embed_image_data: Vec<(String, String, String, String)> = Vec::new();
+        let mut embed_gallery_data: Vec<(String, String, String, String)> = Vec::new();
         let mut embed_video_data: Vec<(String, String, Option<String>)> = Vec::new();
         let mut quote_data: Vec<(String, String, String, String, String, String)> = Vec::new();
         let mut notif_rows: Vec<bulk::NotificationRow> = Vec::new();
@@ -3389,6 +3395,7 @@ impl IndexerManager {
                         embed,
                         &uri,
                         &mut embed_image_data,
+                        &mut embed_gallery_data,
                         &mut embed_video_data,
                     );
                     let quotes_before = quote_data.len();
@@ -3433,7 +3440,14 @@ impl IndexerManager {
         // embed/quote inserts.
         let (embed_result, notif_result) = futures::join!(
             async {
-                bulk::copy_insert_post_embed_images(client, &embed_image_data).await?;
+                bulk::copy_insert_post_embed_images(client, EMBED_IMAGE_TABLE, &embed_image_data)
+                    .await?;
+                bulk::copy_insert_post_embed_images(
+                    client,
+                    EMBED_GALLERY_IMAGE_TABLE,
+                    &embed_gallery_data,
+                )
+                .await?;
                 bulk::copy_insert_post_embed_videos(client, &embed_video_data).await?;
                 bulk::copy_insert_quotes(client, &quote_data, compute_agg).await
             },
@@ -3485,36 +3499,56 @@ impl IndexerManager {
         }
     }
 
-    /// Extract embed data (images and videos) from a post's embed field
+    /// Extract embed data (images, gallery images and videos) from a post's embed field
     fn extract_embed_data(
         embed: &serde_json::Value,
         post_uri: &str,
         embed_image_data: &mut Vec<(String, String, String, String)>,
+        embed_gallery_data: &mut Vec<(String, String, String, String)>,
         embed_video_data: &mut Vec<(String, String, Option<String>)>,
     ) {
         let embed_type = embed.get("$type").and_then(|t| t.as_str()).unwrap_or("");
-
-        // Handle app.bsky.embed.images
-        if embed_type == "app.bsky.embed.images" {
-            Self::extract_images(embed, post_uri, embed_image_data);
+        let media = if embed_type == "app.bsky.embed.recordWithMedia" {
+            embed.get("media")
+        } else {
+            Some(embed)
+        };
+        let Some(media) = media else { return };
+        match media.get("$type").and_then(|t| t.as_str()).unwrap_or("") {
+            EMBED_IMAGES => Self::extract_images(media, post_uri, embed_image_data),
+            EMBED_GALLERY => Self::extract_images(media, post_uri, embed_gallery_data),
+            "app.bsky.embed.video" => Self::extract_video(media, post_uri, embed_video_data),
+            _ => {}
         }
+    }
 
-        // Handle app.bsky.embed.video
-        if embed_type == "app.bsky.embed.video" {
-            Self::extract_video(embed, post_uri, embed_video_data);
-        }
-
-        // Handle app.bsky.embed.recordWithMedia (has nested media)
-        if embed_type == "app.bsky.embed.recordWithMedia" {
-            if let Some(media) = embed.get("media") {
-                let media_type = media.get("$type").and_then(|t| t.as_str()).unwrap_or("");
-                if media_type == "app.bsky.embed.images" {
-                    Self::extract_images(media, post_uri, embed_image_data);
-                } else if media_type == "app.bsky.embed.video" {
-                    Self::extract_video(media, post_uri, embed_video_data);
-                }
-            }
-        }
+    /// `(position, image cid, alt)` for each image of an images or gallery
+    /// embed. Gallery items are a union, so only its image items are kept,
+    /// at their position among all items.
+    fn embed_images(embed: &serde_json::Value) -> Vec<(String, &str, &str)> {
+        let is_gallery = embed.get("$type").and_then(|t| t.as_str()) == Some(EMBED_GALLERY);
+        let items = embed
+            .get(if is_gallery { "items" } else { "images" })
+            .and_then(|i| i.as_array());
+        items
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .filter(|(_, item)| {
+                !is_gallery
+                    || item.get("$type").and_then(|t| t.as_str()) == Some(EMBED_GALLERY_IMAGE)
+            })
+            .filter_map(|(position, item)| {
+                // The image CID can be in image.ref.$link (CBOR decoded) or image.ref (string)
+                let image_cid = item.get("image").and_then(|img| {
+                    img.get("ref")
+                        .and_then(|r| r.get("$link").and_then(|l| l.as_str()))
+                        .or_else(|| img.get("ref").and_then(|r| r.as_str()))
+                })?;
+                let alt = item.get("alt").and_then(|a| a.as_str()).unwrap_or("");
+                Some((position.to_string(), image_cid, alt))
+            })
+            .collect()
     }
 
     fn extract_images(
@@ -3522,26 +3556,13 @@ impl IndexerManager {
         post_uri: &str,
         embed_image_data: &mut Vec<(String, String, String, String)>,
     ) {
-        if let Some(images) = embed.get("images").and_then(|i| i.as_array()) {
-            for (position, image) in images.iter().enumerate() {
-                // Get the image CID - can be in image.ref.$link (CBOR decoded) or image.ref (string)
-                let image_cid = image.get("image").and_then(|img| {
-                    img.get("ref")
-                        .and_then(|r| r.get("$link").and_then(|l| l.as_str()))
-                        .or_else(|| img.get("ref").and_then(|r| r.as_str()))
-                });
-
-                let alt = image.get("alt").and_then(|a| a.as_str()).unwrap_or("");
-
-                if let Some(image_cid) = image_cid {
-                    embed_image_data.push((
-                        post_uri.to_owned(),
-                        position.to_string(),
-                        image_cid.to_owned(),
-                        alt.to_owned(),
-                    ));
-                }
-            }
+        for (position, image_cid, alt) in Self::embed_images(embed) {
+            embed_image_data.push((
+                post_uri.to_owned(),
+                position,
+                image_cid.to_owned(),
+                alt.to_owned(),
+            ));
         }
     }
 
@@ -4293,8 +4314,8 @@ impl IndexerManager {
     ) -> Result<(), WintermuteError> {
         let embed_type = embed.get("$type").and_then(|t| t.as_str()).unwrap_or("");
 
-        // Handle app.bsky.embed.images
-        if embed_type == "app.bsky.embed.images" {
+        // Handle app.bsky.embed.images and app.bsky.embed.gallery
+        if embed_type == EMBED_IMAGES || embed_type == EMBED_GALLERY {
             Self::handle_embed_images(client, embed, post_uri).await?;
         }
 
@@ -4326,7 +4347,7 @@ impl IndexerManager {
             // Handle the media part (images or video)
             if let Some(media) = embed.get("media") {
                 let media_type = media.get("$type").and_then(|t| t.as_str()).unwrap_or("");
-                if media_type == "app.bsky.embed.images" {
+                if media_type == EMBED_IMAGES || media_type == EMBED_GALLERY {
                     Self::handle_embed_images(client, media, post_uri).await?;
                 } else if media_type == "app.bsky.embed.video" {
                     Self::handle_embed_video(client, media, post_uri).await?;
@@ -4342,29 +4363,20 @@ impl IndexerManager {
         embed: &serde_json::Value,
         post_uri: &str,
     ) -> Result<(), WintermuteError> {
-        if let Some(images) = embed.get("images").and_then(|i| i.as_array()) {
-            for (position, image) in images.iter().enumerate() {
-                // Get the image CID - can be in image.ref.$link (CBOR decoded) or image.ref (string)
-                let image_cid = image.get("image").and_then(|img| {
-                    img.get("ref")
-                        .and_then(|r| r.get("$link").and_then(|l| l.as_str()))
-                        .or_else(|| img.get("ref").and_then(|r| r.as_str()))
-                });
-
-                let alt = image.get("alt").and_then(|a| a.as_str()).unwrap_or("");
-
-                if let Some(image_cid) = image_cid {
-                    let position_str = position.to_string();
-                    client
-                        .execute(
-                            "INSERT INTO post_embed_image (\"postUri\", position, \"imageCid\", alt)
-                             VALUES ($1, $2, $3, $4)
-                             ON CONFLICT DO NOTHING",
-                            &[&post_uri, &position_str, &image_cid, &alt],
-                        )
-                        .await?;
-                }
-            }
+        let table = if embed.get("$type").and_then(|t| t.as_str()) == Some(EMBED_GALLERY) {
+            EMBED_GALLERY_IMAGE_TABLE
+        } else {
+            EMBED_IMAGE_TABLE
+        };
+        let insert = format!(
+            "INSERT INTO {table} (\"postUri\", position, \"imageCid\", alt)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT DO NOTHING"
+        );
+        for (position, image_cid, alt) in Self::embed_images(embed) {
+            client
+                .execute(&insert, &[&post_uri, &position, &image_cid, &alt])
+                .await?;
         }
         Ok(())
     }
