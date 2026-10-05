@@ -101,6 +101,40 @@ async fn oauth_session_can_mint_service_auth_tokens() {
     assert_ne!(status, Status::Ok);
 }
 
+/// `com.atproto.server.createAccount` is a privileged method, but that gate
+/// is for app passwords: the reference checks an OAuth session against its
+/// rpc permission alone. An account migration asks the old PDS for exactly
+/// this token, so a session granted it must receive it.
+#[tokio::test]
+async fn oauth_session_can_mint_a_create_account_service_auth_token() {
+    let (_dir, client) = get_oauth_client().await;
+    create_active_account(&client).await;
+    activate_test_account(&client).await;
+    let path = "/xrpc/com.atproto.server.getServiceAuth\
+                ?aud=did:web:pds.invalid&lxm=com.atproto.server.createAccount";
+
+    let key = dpop_key();
+    let access_token = generic_oauth_access_token(&client, &key).await;
+    let (status, body) = dpop_get(&client, &key, &access_token, path).await;
+    assert_eq!(status, Status::Ok, "{body}");
+    assert!(body["token"].as_str().is_some());
+
+    let (access_token, key) = granular_access_token(
+        &client,
+        "atproto rpc:com.atproto.server.createAccount?aud=*",
+    )
+    .await;
+    let (status, body) = dispatch_scoped_get(&client, path, &access_token, &key).await;
+    assert_eq!(status, Status::Ok, "{body}");
+    assert!(body["token"].as_str().is_some());
+
+    // a grant naming another method does not cover it
+    let (access_token, key) =
+        granular_access_token(&client, "atproto rpc:app.bsky.video.getUploadLimits?aud=*").await;
+    let (status, body) = dispatch_scoped_get(&client, path, &access_token, &key).await;
+    assert_ne!(status, Status::Ok, "{body}");
+}
+
 #[tokio::test]
 async fn oauth_well_known_documents() {
     let (_dir, client) = get_oauth_client().await;

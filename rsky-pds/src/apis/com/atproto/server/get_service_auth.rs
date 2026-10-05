@@ -23,6 +23,10 @@ use std::time::SystemTime;
 /// Mirrors the upstream TS reference (`getServiceAuth.ts`):
 /// `lxm != null && PRIVILEGED_METHODS.has(lxm) && !isAccessPrivileged(scope)`.
 ///
+/// Applies to app-password and legacy sessions only; an OAuth session is
+/// checked by [`ensure_rpc_grant`] instead, as upstream checks it through
+/// `permissions.assertRpc`.
+///
 /// This is intentionally the inverse of a naive "gate privileged sessions"
 /// check: a plain (non-privileged) app-password session must never be able
 /// to mint a token for a privileged method such as
@@ -95,7 +99,11 @@ pub async fn inner_get_service_auth(
         if PROTECTED_METHODS.contains(lxm.as_str()) {
             bail!("cannot request a service auth token for the following protected method: {lxm}");
         }
-        ensure_lxm_access(lxm.as_str(), credentials.is_privileged.unwrap_or(false))?;
+
+        // Run ensure_lxm_access only if it's not an oauth request. ensure_rpc_grant covers oauth sessions
+        if credentials.granted_scopes.is_none() {
+            ensure_lxm_access(lxm.as_str(), credentials.is_privileged.unwrap_or(false))?;
+        }
     }
     ensure_rpc_grant(credentials.granted_scopes.as_deref(), &aud, lxm.as_deref())?;
     let keypair = actor_store.keypair(&did).await?;
