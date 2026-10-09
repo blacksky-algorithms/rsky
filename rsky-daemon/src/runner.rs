@@ -304,15 +304,17 @@ async fn sweep(
             &credential,
         )
         .await?;
-        reconcile_blobs_once(
-            host,
-            client.as_ref(),
-            index,
-            &opts.space_uri,
-            &credential,
-            opts.blob_fetch_enabled,
-        )
-        .await?;
+        if opts.blob_fetch_enabled {
+            reconcile_blobs_once(
+                host,
+                client.as_ref(),
+                index,
+                &opts.space_uri,
+                &credential,
+                opts.blob_fetch_enabled,
+            )
+            .await?;
+        }
         Ok::<SweepReport, DaemonError>(report)
     };
     match attempt.await {
@@ -566,6 +568,7 @@ mod tests {
     struct PagedSpaceHost {
         pages: Vec<ListReposOutput>,
         registrations: AtomicUsize,
+        list_repos_calls: AtomicUsize,
         expiry: DateTime<Utc>,
     }
     impl PagedSpaceHost {
@@ -573,6 +576,7 @@ mod tests {
             Self {
                 pages,
                 registrations: AtomicUsize::new(0),
+                list_repos_calls: AtomicUsize::new(0),
                 expiry: Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
             }
         }
@@ -596,6 +600,7 @@ mod tests {
         ) -> Result<ListReposOutput> {
             assert_eq!(space, SPACE);
             assert_eq!(credential, "sc.jwt");
+            self.list_repos_calls.fetch_add(1, Ordering::SeqCst);
             let i: usize = cursor.map(|c| c.parse().unwrap()).unwrap_or(0);
             let mut page = self.pages[i].clone();
             page.cursor = (i + 1 < self.pages.len()).then(|| (i + 1).to_string());
@@ -1235,6 +1240,36 @@ mod tests {
         index.save_head(AUTHOR, "3a", &LtHash::new()).await.unwrap();
         let client: Arc<dyn RepoHostClient> = Arc::new(ScriptedRepoHost(HashMap::new()));
         let make_repo_host: RepoHostFactory = Box::new(move |_| client.clone());
+        let opts = RunnerOptions {
+            blob_fetch_enabled: true,
+            ..options(1)
+        };
+        assert!(
+            sweep(
+                &opts,
+                &host,
+                &StaticCredential("sc.jwt".to_string()),
+                &make_repo_host,
+                &index,
+                &FixedKey(a.did_key.clone()),
+            )
+            .await
+        );
+        assert_eq!(host.list_repos_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn sweep_skips_blob_reconcile_when_blob_fetch_is_disabled() {
+        let _guard = trace_guard();
+        let a = author();
+        let host = PagedSpaceHost::new(vec![ListReposOutput {
+            cursor: None,
+            repos: vec![repo_ref(AUTHOR, "3a", None)],
+        }]);
+        let index = InMemoryIndex::new();
+        index.save_head(AUTHOR, "3a", &LtHash::new()).await.unwrap();
+        let client: Arc<dyn RepoHostClient> = Arc::new(ScriptedRepoHost(HashMap::new()));
+        let make_repo_host: RepoHostFactory = Box::new(move |_| client.clone());
         assert!(
             sweep(
                 &options(1),
@@ -1246,6 +1281,7 @@ mod tests {
             )
             .await
         );
+        assert_eq!(host.list_repos_calls.load(Ordering::SeqCst), 1);
     }
 
     struct FailingSpaceHost;

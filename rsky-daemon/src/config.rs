@@ -150,6 +150,7 @@ pub struct Config {
     #[arg(long, env = "DAEMON_PLC_URL", default_value = "")]
     pub plc_url: String,
 
+    /// Reconcile space blobs every sweep (`listRepos` plus `listBlobs` per member).
     #[arg(long, env = "DAEMON_BLOB_FETCH_ENABLED", default_value_t = false)]
     pub blob_fetch_enabled: bool,
 
