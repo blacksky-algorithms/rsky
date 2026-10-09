@@ -12,6 +12,7 @@ use crate::engine::{CommitKeyResolver, SyncOutcome};
 use crate::error::{DaemonError, Result};
 use crate::index::{IndexMutation, SpaceIndex};
 use crate::repohost::RepoHostClient;
+use crate::sqlite_index::extract_blob_cids;
 
 /// Recover an author's repo from a full-state CAR: verify the commit with the
 /// author's resolved key, authenticate the index against the trusted hash,
@@ -69,12 +70,18 @@ pub async fn recover_repo(
                 value: Some(bytes.clone()),
             });
         }
+        index
+            .update_blob_ledger(did, collection, rkey, &extract_blob_cids(bytes.as_slice()))
+            .await?;
         lth.add(&element(collection, rkey, &cid));
         keep.insert(path.clone());
     }
     for (collection, rkey, _) in index.list_paths(did).await? {
         if !keep.contains(&format!("{collection}/{rkey}")) {
             index.delete(did, &collection, &rkey).await?;
+            index
+                .update_blob_ledger(did, &collection, &rkey, &[])
+                .await?;
             changed += 1;
             mutations.push(IndexMutation::Delete { collection, rkey });
         }

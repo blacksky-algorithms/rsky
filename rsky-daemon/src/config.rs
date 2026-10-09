@@ -149,6 +149,14 @@ pub struct Config {
     /// which cannot know about a local or staging network.
     #[arg(long, env = "DAEMON_PLC_URL", default_value = "")]
     pub plc_url: String,
+
+    #[arg(long, env = "DAEMON_BLOB_FETCH_ENABLED", default_value_t = false)]
+    pub blob_fetch_enabled: bool,
+
+    /// Accept a plain-http `localhost`/`127.0.0.1` PDS from a DID document.
+    /// Only for local development networks.
+    #[arg(long, env = "DAEMON_ALLOW_HTTP_LOOPBACK_PDS", default_value_t = false)]
+    pub allow_http_loopback_pds: bool,
 }
 
 impl Config {
@@ -254,6 +262,8 @@ mod tests {
         let cfg = Config::try_parse_from(REQUIRED).unwrap();
         assert_eq!(cfg.sweep_interval_secs, 300);
         assert_eq!(cfg.denial_park_after, crate::journal::DENIAL_PARK_AFTER);
+        assert!(!cfg.blob_fetch_enabled);
+        assert!(!cfg.allow_http_loopback_pds);
         assert_eq!(cfg.index_db_path, "");
         assert_eq!(cfg.notify_bind, "127.0.0.1:8055");
         assert_eq!(cfg.repo_host_url(), "https://host.example");

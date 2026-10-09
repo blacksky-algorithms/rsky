@@ -9,8 +9,10 @@ use serde_bytes::ByteBuf;
 
 use crate::dpop::DpopSigner;
 use crate::error::Result;
-use crate::xrpc::{check, http_client, net_err};
-use std::sync::Arc;
+use crate::identity::PdsResolver;
+use crate::xrpc::{http_client, net_err, send_with_dpop_retry};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// A page of the operation log, plus the current signed commit when the page
 /// reaches the repo head (proposal §Incremental sync).
@@ -39,6 +41,17 @@ pub trait RepoHostClient: Send + Sync {
     async fn get_repo_car(&self, space: &str, did: &str) -> Result<Vec<u8>>;
     /// The repo's current signed commit (`getLatestCommit`).
     async fn get_latest_commit(&self, space: &str, did: &str) -> Result<SignedCommit>;
+    async fn list_blobs(
+        &self,
+        space: &str,
+        did: &str,
+        cursor: Option<&str>,
+    ) -> Result<wire::ListBlobsOutput> {
+        let _ = (space, did, cursor);
+        Err(crate::error::DaemonError::Xrpc(
+            "listBlobs is not implemented by this repo host".to_string(),
+        ))
+    }
 }
 
 // The wire types (rsky-lexicon, `$bytes`/JSON values) and the internal types
@@ -97,19 +110,15 @@ impl HttpRepoHost {
 
     async fn get(&self, nsid: &str, query: &[(&str, &str)]) -> Result<reqwest::Response> {
         let url = self.url(nsid);
-        let resp = self
-            .http
-            .get(&url)
-            .header("Authorization", format!("DPoP {}", self.credential))
-            .header(
-                "DPoP",
-                self.dpop.proof("GET", &url, Some(&self.credential))?,
-            )
-            .query(query)
-            .send()
-            .await
-            .map_err(net_err)?;
-        check(resp).await
+        send_with_dpop_retry(&self.dpop, "GET", &url, Some(&self.credential), |proof| {
+            Ok(self
+                .http
+                .get(&url)
+                .header("Authorization", format!("DPoP {}", self.credential))
+                .header("DPoP", proof)
+                .query(query))
+        })
+        .await
     }
 }
 
@@ -164,6 +173,116 @@ impl RepoHostClient for HttpRepoHost {
             .map_err(net_err)?;
         Ok(commit_from_wire(out.commit))
     }
+
+    async fn list_blobs(
+        &self,
+        space: &str,
+        did: &str,
+        cursor: Option<&str>,
+    ) -> Result<wire::ListBlobsOutput> {
+        let mut query = vec![("space", space), ("repo", did)];
+        if let Some(cursor) = cursor {
+            query.push(("cursor", cursor));
+        }
+        self.get("com.atproto.space.listBlobs", &query)
+            .await?
+            .json()
+            .await
+            .map_err(net_err)
+    }
+}
+
+/// Sends each repo's requests to the PDS named by that account's DID
+/// document, or to `fallback` when the document names none.
+pub struct ResolvingRepoHost {
+    resolver: Arc<dyn PdsResolver>,
+    fallback: String,
+    credential: String,
+    http: reqwest::Client,
+    dpop: Arc<DpopSigner>,
+    // A cursor is only meaningful to the host that issued it.
+    pinned: Mutex<HashMap<String, String>>,
+}
+
+impl ResolvingRepoHost {
+    pub fn new(
+        resolver: Arc<dyn PdsResolver>,
+        fallback: &str,
+        credential: impl Into<String>,
+        dpop: Arc<DpopSigner>,
+    ) -> Self {
+        Self {
+            resolver,
+            fallback: fallback.trim_end_matches('/').to_string(),
+            credential: credential.into(),
+            http: http_client(),
+            dpop,
+            pinned: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn host(&self, did: &str, continuing: bool) -> Result<HttpRepoHost> {
+        let pinned = continuing
+            .then(|| self.pinned.lock().unwrap().get(did).cloned())
+            .flatten();
+        let base_url = match pinned {
+            Some(url) => url,
+            None => self
+                .resolver
+                .pds_url(did)
+                .await?
+                .unwrap_or_else(|| self.fallback.clone()),
+        };
+        self.pinned
+            .lock()
+            .unwrap()
+            .insert(did.to_string(), base_url.clone());
+        Ok(HttpRepoHost {
+            base_url,
+            credential: self.credential.clone(),
+            http: self.http.clone(),
+            dpop: self.dpop.clone(),
+        })
+    }
+}
+
+#[async_trait]
+impl RepoHostClient for ResolvingRepoHost {
+    async fn list_repo_ops(
+        &self,
+        space: &str,
+        did: &str,
+        since: Option<&str>,
+        cursor: Option<&str>,
+    ) -> Result<OplogPage> {
+        self.host(did, cursor.is_some())
+            .await?
+            .list_repo_ops(space, did, since, cursor)
+            .await
+    }
+
+    async fn get_repo_car(&self, space: &str, did: &str) -> Result<Vec<u8>> {
+        self.host(did, false).await?.get_repo_car(space, did).await
+    }
+
+    async fn get_latest_commit(&self, space: &str, did: &str) -> Result<SignedCommit> {
+        self.host(did, false)
+            .await?
+            .get_latest_commit(space, did)
+            .await
+    }
+
+    async fn list_blobs(
+        &self,
+        space: &str,
+        did: &str,
+        cursor: Option<&str>,
+    ) -> Result<wire::ListBlobsOutput> {
+        self.host(did, cursor.is_some())
+            .await?
+            .list_blobs(space, did, cursor)
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -179,6 +298,53 @@ mod tests {
 
     const SPACE: &str = "at://did:plc:authority/space/community.blacksky.feed/main";
     const AUTHOR: &str = "did:plc:author";
+
+    #[tokio::test]
+    async fn list_blobs_sends_repo_and_cursor() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.space.listBlobs"))
+            .and(query_param("space", SPACE))
+            .and(query_param("repo", AUTHOR))
+            .and(query_param("cursor", "c1"))
+            .and(header("authorization", "DPoP sc.jwt"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"cids": ["bafyA"], "cursor": "c2"})),
+            )
+            .mount(&server)
+            .await;
+        let host = HttpRepoHost::new(server.uri(), "sc.jwt", test_dpop());
+        let out = host.list_blobs(SPACE, AUTHOR, Some("c1")).await.unwrap();
+        assert_eq!(out.cids, ["bafyA"]);
+        assert_eq!(out.cursor.as_deref(), Some("c2"));
+        assert!(host.list_blobs(SPACE, AUTHOR, None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_host_without_list_blobs_reports_it_unimplemented() {
+        struct Bare;
+        #[async_trait]
+        impl RepoHostClient for Bare {
+            async fn list_repo_ops(
+                &self,
+                _space: &str,
+                _did: &str,
+                _since: Option<&str>,
+                _cursor: Option<&str>,
+            ) -> Result<OplogPage> {
+                unimplemented!()
+            }
+            async fn get_repo_car(&self, _space: &str, _did: &str) -> Result<Vec<u8>> {
+                unimplemented!()
+            }
+            async fn get_latest_commit(&self, _space: &str, _did: &str) -> Result<SignedCommit> {
+                unimplemented!()
+            }
+        }
+        let err = Bare.list_blobs(SPACE, AUTHOR, None).await.unwrap_err();
+        assert!(matches!(err, DaemonError::Xrpc(_)));
+    }
 
     fn wire_commit_json() -> serde_json::Value {
         serde_json::json!({
@@ -356,5 +522,154 @@ mod tests {
         let host = HttpRepoHost::new(server.uri(), "sc.jwt", test_dpop());
         let err = host.get_latest_commit(SPACE, AUTHOR).await.unwrap_err();
         assert!(matches!(err, DaemonError::Xrpc(_)));
+    }
+}
+
+#[cfg(test)]
+mod resolving_tests {
+    use super::*;
+    use crate::identity::tests::plc_serving;
+    use crate::identity::{DidResolver, PDS_ENDPOINT_TTL};
+    use rsky_oauth::jwt::decode;
+    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const SPACE: &str = "at://did:plc:authority/space/community.blacksky.feed/main";
+
+    async fn pds_hosting(did: &str, car: u8) -> MockServer {
+        let pds = MockServer::start().await;
+        let commit = serde_json::json!({
+            "ver": 1, "hash": {"$bytes": "AQID"}, "ikm": {"$bytes": "BAUG"},
+            "sig": {"$bytes": "BwgJ"}, "mac": {"$bytes": "CgsM"}, "rev": did
+        });
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.space.listRepoOps"))
+            .and(query_param("repo", did))
+            .and(header("authorization", "DPoP sc.jwt"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ops": []})))
+            .mount(&pds)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.space.getRepo"))
+            .and(query_param("repo", did))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![car]))
+            .mount(&pds)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.space.getLatestCommit"))
+            .and(query_param("repo", did))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"commit": commit})),
+            )
+            .mount(&pds)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.space.listBlobs"))
+            .and(query_param("repo", did))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"cids": [did]})),
+            )
+            .mount(&pds)
+            .await;
+        pds
+    }
+
+    #[tokio::test]
+    async fn each_member_is_read_from_its_own_pds_or_the_fallback() {
+        let blacksky = pds_hosting("did:plc:alice", 1).await;
+        let nds = pds_hosting("did:plc:bob", 2).await;
+        let fallback = pds_hosting("did:plc:carol", 3).await;
+        let plc = plc_serving(&[
+            ("did:plc:alice", Some(&blacksky.uri())),
+            ("did:plc:bob", Some(&nds.uri())),
+            ("did:plc:carol", None),
+        ])
+        .await;
+        let host = ResolvingRepoHost::new(
+            Arc::new(DidResolver::new(Some(plc.uri()), PDS_ENDPOINT_TTL, true)),
+            &fallback.uri(),
+            "sc.jwt",
+            Arc::new(DpopSigner::generate().unwrap()),
+        );
+        for (did, server, car) in [
+            ("did:plc:alice", &blacksky, 1u8),
+            ("did:plc:bob", &nds, 2),
+            ("did:plc:carol", &fallback, 3),
+        ] {
+            host.list_repo_ops(SPACE, did, None, None).await.unwrap();
+            assert_eq!(host.get_repo_car(SPACE, did).await.unwrap(), vec![car]);
+            assert_eq!(host.get_latest_commit(SPACE, did).await.unwrap().rev, did);
+            assert_eq!(host.list_blobs(SPACE, did, None).await.unwrap().cids, [did]);
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 4);
+            for request in requests {
+                let proof = request.headers.get("dpop").unwrap().to_str().unwrap();
+                let htu = decode(proof).unwrap().claims.extra["htu"].clone();
+                assert_eq!(htu, format!("{}{}", server.uri(), request.url.path()));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unresolvable_member_is_never_sent_to_the_fallback() {
+        let fallback = pds_hosting("did:plc:dave", 4).await;
+        let plc = plc_serving(&[]).await;
+        let host = ResolvingRepoHost::new(
+            Arc::new(DidResolver::new(Some(plc.uri()), PDS_ENDPOINT_TTL, true)),
+            &fallback.uri(),
+            "sc.jwt",
+            Arc::new(DpopSigner::generate().unwrap()),
+        );
+        assert!(host
+            .list_repo_ops(SPACE, "did:plc:dave", None, None)
+            .await
+            .is_err());
+        assert!(host.get_repo_car(SPACE, "did:plc:dave").await.is_err());
+        assert!(host.get_latest_commit(SPACE, "did:plc:dave").await.is_err());
+        assert!(host.list_blobs(SPACE, "did:plc:dave", None).await.is_err());
+        assert!(fallback.received_requests().await.unwrap().is_empty());
+    }
+
+    struct Moving(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait]
+    impl PdsResolver for Moving {
+        async fn pds_url(&self, _did: &str) -> Result<Option<String>> {
+            Ok(self.0.lock().unwrap().pop())
+        }
+        async fn space_host_url(&self, _did: &str) -> Result<Option<String>> {
+            unreachable!("repo hosts resolve PDSes")
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pagination_run_stays_on_the_host_that_issued_the_cursor() {
+        let first = pds_hosting("did:plc:alice", 1).await;
+        let second = pds_hosting("did:plc:alice", 2).await;
+        let resolver = Arc::new(Moving(std::sync::Mutex::new(vec![
+            second.uri(),
+            second.uri(),
+            first.uri(),
+        ])));
+        let host = ResolvingRepoHost::new(
+            resolver,
+            "https://fallback.invalid",
+            "sc.jwt",
+            Arc::new(DpopSigner::generate().unwrap()),
+        );
+        host.list_repo_ops(SPACE, "did:plc:alice", None, None)
+            .await
+            .unwrap();
+        host.list_repo_ops(SPACE, "did:plc:alice", None, Some("c1"))
+            .await
+            .unwrap();
+        host.list_blobs(SPACE, "did:plc:alice", Some("c1"))
+            .await
+            .unwrap();
+        assert_eq!(first.received_requests().await.unwrap().len(), 3);
+        host.list_repo_ops(SPACE, "did:plc:alice", None, None)
+            .await
+            .unwrap();
+        assert_eq!(second.received_requests().await.unwrap().len(), 1);
     }
 }

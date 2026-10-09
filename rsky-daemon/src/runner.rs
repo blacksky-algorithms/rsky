@@ -44,6 +44,7 @@ pub struct MultiRunnerOptions {
     pub notify_endpoint: String,
     pub service_identity: String,
     pub now_fn: fn() -> u64,
+    pub blob_fetch_enabled: bool,
 }
 
 /// Supervises one existing `run` worker per discovered space. Source errors
@@ -79,7 +80,7 @@ pub async fn run_multi(
                 for (space, target) in &desired { if workers.contains_key(space) { continue; }
                     let (creds, repo, index, projectors, acker) = match factory(space, target.generation) { Ok(parts) => parts, Err(error) => { tracing::warn!(%space, error = %error, "cannot prepare space worker"); continue; } };
                     let (tx, rx) = mpsc::channel(256); let (stop, stop_rx) = watch::channel(false);
-                    let worker_opts = RunnerOptions { space_uri: space.clone(), sweep_interval_secs: opts.sweep_interval_secs, notify_endpoint: opts.notify_endpoint.clone(), service_identity: opts.service_identity.clone(), generation: target.generation, now_fn: opts.now_fn };
+                    let worker_opts = RunnerOptions { space_uri: space.clone(), sweep_interval_secs: opts.sweep_interval_secs, notify_endpoint: opts.notify_endpoint.clone(), service_identity: opts.service_identity.clone(), generation: target.generation, now_fn: opts.now_fn, blob_fetch_enabled: opts.blob_fetch_enabled };
                     let handle = tokio::spawn(run(worker_opts, host.clone(), creds, repo, index, keys.clone(), projectors, acker, rx, stop_rx));
                     workers.insert(space.clone(), Worker { generation: target.generation, stop, notices: tx, handle });
                 }
@@ -102,6 +103,8 @@ pub struct SweepReport {
     pub synced: usize,
     pub skipped: usize,
     pub recovered: usize,
+    /// Members whose host failed; they are retried on the next sweep.
+    pub failed: usize,
 }
 
 /// Sync one repo, falling back to full-state recovery on divergence or when
@@ -159,14 +162,23 @@ pub async fn sync_space_once(
                 report.skipped += 1;
                 continue;
             }
-            match sync_repo(client, index, keys, space_uri, &repo.did).await {
-                Ok(_) => report.synced += 1,
+            let outcome = match sync_repo(client, index, keys, space_uri, &repo.did).await {
                 Err(e @ (DaemonError::Diverged(_) | DaemonError::HistoryUnavailable(_))) => {
                     tracing::warn!(did = %repo.did, error = %e, "incremental sync failed; full-state recovery");
-                    recover_repo(client, index, keys, space_uri, &repo.did).await?;
-                    report.recovered += 1;
+                    recover_repo(client, index, keys, space_uri, &repo.did)
+                        .await
+                        .map(|_| true)
                 }
-                Err(e) => return Err(e),
+                other => other.map(|_| false),
+            };
+            match outcome {
+                Ok(false) => report.synced += 1,
+                Ok(true) => report.recovered += 1,
+                Err(e @ DaemonError::Index(_)) => return Err(e),
+                Err(e) => {
+                    tracing::warn!(did = %repo.did, error = %e, "member sync failed; retrying next sweep");
+                    report.failed += 1;
+                }
             }
         }
         match page.cursor {
@@ -175,6 +187,56 @@ pub async fn sync_space_once(
         }
     }
     Ok(report)
+}
+
+pub async fn reconcile_blobs_once(
+    host: &dyn SpaceHostClient,
+    client: &dyn RepoHostClient,
+    index: &dyn SpaceIndex,
+    space_uri: &str,
+    credential: &str,
+    blob_fetch_enabled: bool,
+) -> Result<usize> {
+    let mut repos_cursor = None;
+    let mut repos_seen = 0;
+    loop {
+        let page = host
+            .list_repos(space_uri, credential, repos_cursor.as_deref(), None)
+            .await?;
+        for repo in page.repos {
+            let mut blobs_cursor = None;
+            let mut remote_cids = Vec::new();
+            let listed = loop {
+                match client
+                    .list_blobs(space_uri, &repo.did, blobs_cursor.as_deref())
+                    .await
+                {
+                    Ok(page) => {
+                        remote_cids.extend(page.cids);
+                        match page.cursor {
+                            Some(next) => blobs_cursor = Some(next),
+                            None => break Ok(()),
+                        }
+                    }
+                    Err(e) => break Err(e),
+                }
+            };
+            if let Err(error) = listed {
+                tracing::warn!(did = %repo.did, error = %error, "listBlobs failed; skipping member");
+                continue;
+            }
+            index.reconcile_blob_ledger(&repo.did, &remote_cids).await?;
+            if blob_fetch_enabled {
+                tracing::debug!(did = %repo.did, "blob fetch is not implemented");
+            }
+            repos_seen += 1;
+        }
+        match page.cursor {
+            Some(next) => repos_cursor = Some(next),
+            None => break,
+        }
+    }
+    Ok(repos_seen)
 }
 
 pub struct RunnerOptions {
@@ -188,6 +250,7 @@ pub struct RunnerOptions {
     /// acknowledgement names the generation it observed.
     pub generation: i64,
     pub now_fn: fn() -> u64,
+    pub blob_fetch_enabled: bool,
 }
 
 async fn register(
@@ -232,7 +295,7 @@ async fn sweep(
     let attempt = async {
         let credential = creds.credential((opts.now_fn)()).await?;
         let client = make_repo_host(credential.clone());
-        sync_space_once(
+        let report = sync_space_once(
             host,
             client.as_ref(),
             index,
@@ -240,11 +303,21 @@ async fn sweep(
             &opts.space_uri,
             &credential,
         )
-        .await
+        .await?;
+        reconcile_blobs_once(
+            host,
+            client.as_ref(),
+            index,
+            &opts.space_uri,
+            &credential,
+            opts.blob_fetch_enabled,
+        )
+        .await?;
+        Ok::<SweepReport, DaemonError>(report)
     };
     match attempt.await {
         Ok(r) => {
-            tracing::info!(synced = %r.synced, recovered = %r.recovered, "sweep complete");
+            tracing::info!(synced = %r.synced, recovered = %r.recovered, failed = %r.failed, "sweep complete");
             true
         }
         Err(e) => {
@@ -678,6 +751,7 @@ mod tests {
                 synced: 2,
                 skipped: 2,
                 recovered: 2,
+                failed: 0,
             }
         );
         assert_eq!(index.record_count("did:plc:stale"), 1);
@@ -754,19 +828,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_space_once_propagates_unrecoverable_errors() {
+    async fn sync_space_once_skips_failing_members_but_not_index_errors() {
+        let _guard = trace_guard();
         let a = author();
         let index = InMemoryIndex::new();
         let keys = FixedKey(a.did_key.clone());
 
         let host = PagedSpaceHost::new(vec![ListReposOutput {
             cursor: None,
-            repos: vec![repo_ref("did:plc:writer", "3rev", None)],
+            repos: vec![
+                repo_ref("did:plc:writer", "3rev", None),
+                repo_ref("did:plc:other", "3rev", None),
+            ],
         }]);
-        let err = sync_space_once(&host, &BrokenHost, &index, &keys, SPACE, "sc.jwt")
+        let report = sync_space_once(&host, &BrokenHost, &index, &keys, SPACE, "sc.jwt")
+            .await
+            .unwrap();
+        assert_eq!(report.failed, 2);
+        assert_eq!(index.last_rev("did:plc:writer").await.unwrap(), None);
+
+        struct BrokenIndexHost;
+        #[async_trait]
+        impl RepoHostClient for BrokenIndexHost {
+            async fn list_repo_ops(
+                &self,
+                _space: &str,
+                _did: &str,
+                _since: Option<&str>,
+                _cursor: Option<&str>,
+            ) -> Result<OplogPage> {
+                Err(DaemonError::Index("disk".to_string()))
+            }
+            async fn get_repo_car(&self, _space: &str, _did: &str) -> Result<Vec<u8>> {
+                Err(DaemonError::Index("disk".to_string()))
+            }
+            async fn get_latest_commit(&self, _space: &str, _did: &str) -> Result<SignedCommit> {
+                Err(DaemonError::Index("disk".to_string()))
+            }
+        }
+        let err = sync_space_once(&host, &BrokenIndexHost, &index, &keys, SPACE, "sc.jwt")
             .await
             .unwrap_err();
-        assert!(matches!(err, DaemonError::Xrpc(_)));
+        assert!(matches!(err, DaemonError::Index(_)));
+        assert!(BrokenIndexHost.get_repo_car(SPACE, AUTHOR).await.is_err());
+        assert!(BrokenIndexHost
+            .get_latest_commit(SPACE, AUTHOR)
+            .await
+            .is_err());
         assert!(BrokenHost.get_repo_car(SPACE, AUTHOR).await.is_err());
         assert!(BrokenHost.get_latest_commit(SPACE, AUTHOR).await.is_err());
     }
@@ -830,6 +938,7 @@ mod tests {
             service_identity: "did:web:syncer.example".to_string(),
             generation: 1,
             now_fn: fixed_now,
+            blob_fetch_enabled: false,
         }
     }
 
@@ -1040,6 +1149,102 @@ mod tests {
             *acker.0.lock().unwrap(),
             vec![(SPACE.to_string(), 7_i64)],
             "the acknowledgement is sent once, not on every sweep"
+        );
+    }
+
+    struct PagedBlobHost;
+    #[async_trait]
+    impl RepoHostClient for PagedBlobHost {
+        async fn list_repo_ops(
+            &self,
+            _space: &str,
+            _did: &str,
+            _since: Option<&str>,
+            _cursor: Option<&str>,
+        ) -> Result<OplogPage> {
+            Err(DaemonError::Xrpc("unused".to_string()))
+        }
+        async fn get_repo_car(&self, _space: &str, _did: &str) -> Result<Vec<u8>> {
+            Err(DaemonError::Xrpc("unused".to_string()))
+        }
+        async fn get_latest_commit(&self, _space: &str, _did: &str) -> Result<SignedCommit> {
+            Err(DaemonError::Xrpc("unused".to_string()))
+        }
+        async fn list_blobs(
+            &self,
+            _space: &str,
+            did: &str,
+            cursor: Option<&str>,
+        ) -> Result<rsky_lexicon::com::atproto::space::ListBlobsOutput> {
+            Ok(rsky_lexicon::com::atproto::space::ListBlobsOutput {
+                cids: vec![format!("{did}-{}", cursor.unwrap_or("0"))],
+                cursor: cursor.is_none().then(|| "1".to_string()),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_blobs_walks_every_repo_and_blob_page() {
+        let _guard = trace_guard();
+        let host = PagedSpaceHost::new(vec![
+            ListReposOutput {
+                cursor: None,
+                repos: vec![repo_ref("did:plc:one", "3a", None)],
+            },
+            ListReposOutput {
+                cursor: None,
+                repos: vec![repo_ref("did:plc:two", "3a", None)],
+            },
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(
+            crate::sqlite_index::SqliteIndex::open(dir.path().join("i.db").to_str().unwrap())
+                .unwrap(),
+        );
+        let index = db.for_space(SPACE);
+        index
+            .update_blob_ledger("did:plc:one", COLL, "3ka", &["gone".to_string()])
+            .await
+            .unwrap();
+        for enabled in [false, true] {
+            let seen =
+                reconcile_blobs_once(&host, &PagedBlobHost, &index, SPACE, "sc.jwt", enabled)
+                    .await
+                    .unwrap();
+            assert_eq!(seen, 2);
+        }
+        let memory = InMemoryIndex::new();
+        reconcile_blobs_once(&host, &PagedBlobHost, &memory, SPACE, "sc.jwt", false)
+            .await
+            .unwrap();
+        assert_eq!(
+            index.blob_ledger("did:plc:one").await.unwrap()[0].state,
+            "pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_member_without_list_blobs_does_not_fail_the_sweep() {
+        let _guard = trace_guard();
+        let a = author();
+        let host = PagedSpaceHost::new(vec![ListReposOutput {
+            cursor: None,
+            repos: vec![repo_ref(AUTHOR, "3a", None)],
+        }]);
+        let index = InMemoryIndex::new();
+        index.save_head(AUTHOR, "3a", &LtHash::new()).await.unwrap();
+        let client: Arc<dyn RepoHostClient> = Arc::new(ScriptedRepoHost(HashMap::new()));
+        let make_repo_host: RepoHostFactory = Box::new(move |_| client.clone());
+        assert!(
+            sweep(
+                &options(1),
+                &host,
+                &StaticCredential("sc.jwt".to_string()),
+                &make_repo_host,
+                &index,
+                &FixedKey(a.did_key.clone()),
+            )
+            .await
         );
     }
 
