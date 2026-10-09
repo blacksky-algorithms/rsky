@@ -367,6 +367,95 @@ mod tests {
         assert_eq!(reencoded, bytes);
     }
 
+    /// Bytes and raw links read from a record's DAG-CBOR take their data
+    /// model JSON forms, `{"$bytes": base64}` and `{"$link": cid}`, when the
+    /// record is served as JSON; a bare integer array is not valid atproto
+    /// data.
+    #[test]
+    fn cbor_bytes_and_links_serialize_to_their_json_forms() {
+        let cid: Cid = "bafkreiey6e2xp4ncufvsyfmubucbsz5xujbc7lguospuziohtgfdik3pr4"
+            .parse()
+            .unwrap();
+        let record = Ipld::Map(BTreeMap::from([
+            (
+                "$type".to_string(),
+                Ipld::String("com.example.declaration".to_string()),
+            ),
+            ("currentKey".to_string(), Ipld::Bytes(vec![1, 2, 3, 4])),
+            ("prev".to_string(), Ipld::Link(cid)),
+        ]));
+        let bytes = serde_ipld_dagcbor::to_vec(&record).unwrap();
+        let parsed = cbor_to_lex_record(bytes).unwrap();
+        let json = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "$type": "com.example.declaration",
+                "currentKey": {"$bytes": "AQIDBA"},
+                "prev": {"$link": cid.to_string()},
+            })
+        );
+    }
+
+    /// Only a tag-42 value is a link: a byte string whose bytes happen to
+    /// form a valid CID is still bytes, in CBOR and in the JSON served.
+    #[test]
+    fn cid_shaped_bytes_stay_bytes() {
+        let cid: Cid = "bafkreiey6e2xp4ncufvsyfmubucbsz5xujbc7lguospuziohtgfdik3pr4"
+            .parse()
+            .unwrap();
+        let record = Ipld::Map(BTreeMap::from([(
+            "key".to_string(),
+            Ipld::Bytes(cid.to_bytes()),
+        )]));
+        let bytes = serde_ipld_dagcbor::to_vec(&record).unwrap();
+        assert!(!bytes.windows(2).any(|window| window == [0xd8, 0x2a]));
+        let parsed = cbor_to_lex_record(bytes.clone()).unwrap();
+        assert_eq!(
+            parsed.get("key"),
+            Some(&Lex::Ipld(Ipld::Bytes(cid.to_bytes())))
+        );
+        let json = serde_json::to_value(&parsed).unwrap();
+        assert!(json["key"]["$bytes"].is_string());
+        let reencoded = serde_ipld_dagcbor::to_vec(&lex_to_ipld(Lex::Map(parsed))).unwrap();
+        assert_eq!(reencoded, bytes);
+    }
+
+    /// The write direction: `$bytes` and `$link` objects in a JSON record body
+    /// must encode as a CBOR byte string and a tag-42 link, so the block and
+    /// its CID match what the client and every other implementation compute.
+    #[test]
+    fn json_bytes_and_links_encode_natively_and_round_trip() {
+        let cid: Cid = "bafkreiey6e2xp4ncufvsyfmubucbsz5xujbc7lguospuziohtgfdik3pr4"
+            .parse()
+            .unwrap();
+        let json = serde_json::json!({
+            "$type": "com.example.declaration",
+            "currentKey": {"$bytes": "AQIDBA=="},
+            "prev": {"$link": cid.to_string()},
+            "nested": [{"$bytes": "AQID"}],
+        });
+        let record: RepoRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            record.get("currentKey"),
+            Some(&Lex::Ipld(Ipld::Bytes(vec![1, 2, 3, 4])))
+        );
+        assert_eq!(record.get("prev"), Some(&Lex::Ipld(Ipld::Link(cid))));
+        let bytes = serde_ipld_dagcbor::to_vec(&lex_to_ipld(Lex::Map(record.clone()))).unwrap();
+        // tag 42 for the link and a 4-byte byte string for the key
+        assert!(bytes.windows(2).any(|window| window == [0xd8, 0x2a]));
+        assert!(bytes.windows(5).any(|window| window == [0x44, 1, 2, 3, 4]));
+        let reparsed = cbor_to_lex_record(bytes.clone()).unwrap();
+        assert_eq!(reparsed.get("currentKey"), record.get("currentKey"));
+        assert_eq!(reparsed.get("prev"), record.get("prev"));
+        let reencoded = serde_ipld_dagcbor::to_vec(&lex_to_ipld(Lex::Map(reparsed))).unwrap();
+        assert_eq!(reencoded, bytes);
+        // an object that is not a bytes or link object stays a map
+        let other: RepoRecord =
+            serde_json::from_value(serde_json::json!({"k": {"$bytes": 5}})).unwrap();
+        assert!(matches!(other.get("k"), Some(Lex::Ipld(Ipld::Map(_)))));
+    }
+
     /// A blob ref decoded from real DAG-CBOR (map with a tag-42 link) must
     /// come out as `Lex::Blob`, or record-blob associations are silently
     /// lost on every CAR import.
