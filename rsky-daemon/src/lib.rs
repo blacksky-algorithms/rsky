@@ -13,6 +13,7 @@
 //!   sync cannot proceed.
 //! - [`xrpc`] / [`repohost`] — HTTP clients for the space host and members'
 //!   repo hosts.
+//! - [`identity`] — DID-document lookups: signing keys and PDS endpoints.
 //! - [`credentials`] — delegation-token → space-credential lifecycle.
 //! - [`notify`] — the inbound `notifyWrite` / `notifySpaceDeleted` listener.
 //! - [`runner`] — the loop composing all of the above.
@@ -25,6 +26,7 @@ pub mod dpop;
 pub mod engine;
 pub mod error;
 pub mod feeds;
+pub mod identity;
 pub mod index;
 pub mod journal;
 pub mod notify;
@@ -50,12 +52,13 @@ pub use feeds::{
     FeedsProjector, HttpProjectionIngress, ProjectRecord, ProjectRecordsRequest, ProjectionIngress,
     ProjectionOperation, SpaceLifecycleAcker,
 };
+pub use identity::{DidResolver, PDS_ENDPOINT_TTL};
 pub use index::{InMemoryIndex, IndexMutation, JournaledBatch, SpaceIndex};
 pub use journal::{drain_all, drain_all_sweep, JournalConsumer, SharedJournalConsumer};
 pub use notify::{router as notify_router, NotifyState, WriteNotice};
 pub use projection::Projector;
 pub use recovery::recover_repo;
-pub use repohost::{HttpRepoHost, OplogPage, RepoHostClient};
+pub use repohost::{HttpRepoHost, OplogPage, RepoHostClient, ResolvingRepoHost};
 pub use router::{Router, SyncEvent};
 pub use runner::{
     run, run_multi, sync_repo_healing, sync_space_once, MultiRunnerOptions, RunnerOptions,
@@ -65,4 +68,4 @@ pub use spaces::{
     CombinedSource, HttpSpaceSource, SpaceRegistry, SpaceSource, SpaceTarget, StaticSpaces,
 };
 pub use sqlite_index::{SpaceScopedIndex, SqliteIndex};
-pub use xrpc::{HttpSpaceHost, SpaceHostClient};
+pub use xrpc::{HttpSpaceHost, ResolvingSpaceHost, SpaceHostClient};

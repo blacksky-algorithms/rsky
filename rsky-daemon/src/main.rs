@@ -7,65 +7,15 @@ use rsky_daemon::engine::CommitKeyResolver;
 use rsky_daemon::runner::SpaceWorkerParts;
 use rsky_daemon::{
     notify_router, run_multi, AppviewProjector, AuthCredentialProvider, AuthSpaceCredentialSource,
-    CombinedSource, CredentialSource, DaemonError, FeedsProjector, HttpProjectionIngress,
-    HttpRepoHost, HttpSpaceHost, HttpSpaceSource, InMemoryIndex, InternalCredentialProvider,
-    JournalConsumer, MultiRunnerOptions, NotifyState, Result, Router, SharedJournalConsumer,
-    SpaceCredentialSource, SpaceIndex, SpaceLifecycleAcker, SpaceRegistry, SqliteIndex,
-    StaticCredential, StaticSpaces,
+    CombinedSource, CredentialSource, DidResolver, FeedsProjector, HttpProjectionIngress,
+    HttpSpaceHost, HttpSpaceSource, InMemoryIndex, InternalCredentialProvider, JournalConsumer,
+    MultiRunnerOptions, NotifyState, ResolvingRepoHost, ResolvingSpaceHost, Result, Router,
+    SharedJournalConsumer, SpaceCredentialSource, SpaceHostClient, SpaceIndex, SpaceLifecycleAcker,
+    SpaceRegistry, SqliteIndex, StaticCredential, StaticSpaces, PDS_ENDPOINT_TTL,
 };
-use rsky_identity::did::atproto_data::{get_did_key_from_multibase, VerificationMaterial};
-use rsky_identity::types::{IdentityResolverOpts, MemoryCache};
-use rsky_identity::IdResolver;
 use rsky_space::space_id::SpaceId;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
-
-/// Resolves an account's `#atproto` signing key from its DID document.
-struct DidKeyResolver {
-    resolver: tokio::sync::Mutex<IdResolver>,
-}
-
-impl DidKeyResolver {
-    fn new(plc_url: Option<String>) -> Self {
-        Self {
-            resolver: tokio::sync::Mutex::new(IdResolver::new(IdentityResolverOpts {
-                timeout: None,
-                plc_url,
-                did_cache: Some(std::sync::Arc::new(MemoryCache::new(None, None))),
-                backup_nameservers: None,
-            })),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl CommitKeyResolver for DidKeyResolver {
-    async fn signing_key(&self, did: &str) -> Result<String> {
-        let doc = self
-            .resolver
-            .lock()
-            .await
-            .did
-            .ensure_resolve(&did.to_string(), None)
-            .await
-            .map_err(|e| DaemonError::KeyResolution(e.to_string()))?;
-        let method = doc
-            .verification_method
-            .unwrap_or_default()
-            .into_iter()
-            .find(|m| m.id == format!("{did}#atproto") || m.id == "#atproto")
-            .ok_or_else(|| DaemonError::KeyResolution(format!("no #atproto key for {did}")))?;
-        let multibase = method.public_key_multibase.ok_or_else(|| {
-            DaemonError::KeyResolution(format!("no publicKeyMultibase for {did}"))
-        })?;
-        get_did_key_from_multibase(VerificationMaterial {
-            r#type: method.r#type,
-            public_key_multibase: multibase,
-        })
-        .map_err(|e| DaemonError::KeyResolution(e.to_string()))?
-        .ok_or_else(|| DaemonError::KeyResolution(format!("unsupported key type for {did}")))
-    }
-}
 
 /// The projection destinations this process was configured with, if any.
 struct ProjectionConfig {
@@ -146,7 +96,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         &cfg.dpop_key_path,
     )?);
     let host = Arc::new(HttpSpaceHost::new(&cfg.space_host_url, dpop.clone()));
-    let keys: Arc<dyn CommitKeyResolver> = Arc::new(DidKeyResolver::new(cfg.plc_url()));
+    let resolver = Arc::new(DidResolver::new(cfg.plc_url(), PDS_ENDPOINT_TTL));
+    let keys: Arc<dyn CommitKeyResolver> = resolver.clone();
+    let space_hosts: Arc<dyn SpaceHostClient> = Arc::new(ResolvingSpaceHost::new(
+        resolver.clone(),
+        &cfg.space_host_url,
+        dpop.clone(),
+    ));
 
     let db = if cfg.index_db_path.is_empty() {
         None
@@ -177,7 +133,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Some(Arc::new(AuthCredentialProvider::new(
             &cfg.auth_url,
             &cfg.auth_key,
-            host.clone(),
+            space_hosts.clone(),
         )))
     } else {
         None
@@ -270,11 +226,17 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             };
             let base = repo_host_base.clone();
             let proof = dpop_for_factory.clone();
+            let repo_resolver = resolver.clone();
             let (projectors, acker) = projection.consumers(space)?;
             Ok((
                 creds,
                 Box::new(move |credential| {
-                    Arc::new(HttpRepoHost::new(base.clone(), credential, proof.clone()))
+                    Arc::new(ResolvingRepoHost::new(
+                        repo_resolver.clone(),
+                        &base,
+                        credential,
+                        proof.clone(),
+                    ))
                 }),
                 index,
                 projectors,
@@ -294,7 +256,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         source,
         registry,
         factory,
-        host,
+        space_hosts,
         keys,
         notify_rx,
         refresh_rx,

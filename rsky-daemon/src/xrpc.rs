@@ -11,6 +11,8 @@ use serde::Deserialize;
 
 use crate::dpop::DpopSigner;
 use crate::error::{DaemonError, Result};
+use crate::identity::DidResolver;
+use rsky_space::space_id::SpaceId;
 use std::sync::Arc;
 
 pub const XRPC_TIMEOUT_SECS: u64 = 30;
@@ -215,6 +217,79 @@ impl SpaceHostClient for HttpSpaceHost {
     }
 }
 
+/// Sends each space's requests to the PDS named by its authority's DID
+/// document, or to `fallback` when that cannot be resolved.
+pub struct ResolvingSpaceHost {
+    resolver: Arc<DidResolver>,
+    fallback: String,
+    http: reqwest::Client,
+    dpop: Arc<DpopSigner>,
+}
+
+impl ResolvingSpaceHost {
+    pub fn new(resolver: Arc<DidResolver>, fallback: &str, dpop: Arc<DpopSigner>) -> Self {
+        Self {
+            resolver,
+            fallback: fallback.trim_end_matches('/').to_string(),
+            http: http_client(),
+            dpop,
+        }
+    }
+
+    async fn host(&self, space: &str) -> HttpSpaceHost {
+        let endpoint = match SpaceId::parse(space) {
+            Ok(id) => self.resolver.pds_endpoint(&id.authority).await,
+            Err(_) => None,
+        };
+        HttpSpaceHost {
+            base_url: endpoint.unwrap_or_else(|| self.fallback.clone()),
+            http: self.http.clone(),
+            dpop: self.dpop.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl SpaceHostClient for ResolvingSpaceHost {
+    async fn get_space_credential(
+        &self,
+        space: &str,
+        delegation_token: &str,
+        client_attestation: Option<&str>,
+    ) -> Result<String> {
+        self.host(space)
+            .await
+            .get_space_credential(space, delegation_token, client_attestation)
+            .await
+    }
+
+    async fn list_repos(
+        &self,
+        space: &str,
+        credential: &str,
+        cursor: Option<&str>,
+        limit: Option<i64>,
+    ) -> Result<ListReposOutput> {
+        self.host(space)
+            .await
+            .list_repos(space, credential, cursor, limit)
+            .await
+    }
+
+    async fn register_notify(
+        &self,
+        space: &str,
+        credential: &str,
+        endpoint: &str,
+        service: Option<&str>,
+    ) -> Result<DateTime<Utc>> {
+        self.host(space)
+            .await
+            .register_notify(space, credential, endpoint, service)
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,5 +446,113 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, DaemonError::Xrpc(_)));
+    }
+}
+
+#[cfg(test)]
+mod resolving_tests {
+    use super::*;
+    use crate::identity::tests::plc_serving;
+    use crate::identity::PDS_ENDPOINT_TTL;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn space_host_answering(credential: &str) -> MockServer {
+        let host = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/xrpc/com.atproto.space.getSpaceCredential"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"credential": credential})),
+            )
+            .mount(&host)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.space.listRepos"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"repos": []})),
+            )
+            .mount(&host)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/xrpc/com.atproto.space.registerNotify"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"expiresAt": "2030-01-01T00:00:00Z"})),
+            )
+            .mount(&host)
+            .await;
+        host
+    }
+
+    async fn paths(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.url.path().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn each_space_goes_to_its_authoritys_pds_or_the_fallback() {
+        let one = space_host_answering("from-one").await;
+        let two = space_host_answering("from-two").await;
+        let fallback = space_host_answering("from-fallback").await;
+        let plc = plc_serving(&[
+            ("did:plc:one", Some(&one.uri())),
+            ("did:plc:two", Some(&format!("{}/", two.uri()))),
+            ("did:plc:nopds", None),
+        ])
+        .await;
+        let host = ResolvingSpaceHost::new(
+            Arc::new(DidResolver::new(Some(plc.uri()), PDS_ENDPOINT_TTL)),
+            &format!("{}/", fallback.uri()),
+            Arc::new(DpopSigner::generate().unwrap()),
+        );
+        let space =
+            |authority: &str| format!("at://{authority}/space/community.blacksky.feed/main");
+        assert_eq!(
+            host.get_space_credential(&space("did:plc:one"), "dt", None)
+                .await
+                .unwrap(),
+            "from-one"
+        );
+        assert_eq!(
+            host.get_space_credential(&space("did:plc:two"), "dt", None)
+                .await
+                .unwrap(),
+            "from-two"
+        );
+        assert_eq!(
+            host.get_space_credential(&space("did:plc:nopds"), "dt", None)
+                .await
+                .unwrap(),
+            "from-fallback"
+        );
+        assert_eq!(
+            host.get_space_credential("not a space", "dt", None)
+                .await
+                .unwrap(),
+            "from-fallback"
+        );
+
+        host.list_repos(&space("did:plc:two"), "sc", None, None)
+            .await
+            .unwrap();
+        host.register_notify(&space("did:plc:two"), "sc", "https://d/notify", None)
+            .await
+            .unwrap();
+        assert_eq!(paths(&one).await.len(), 1);
+        assert_eq!(
+            paths(&two).await,
+            vec![
+                "/xrpc/com.atproto.space.getSpaceCredential",
+                "/xrpc/com.atproto.space.listRepos",
+                "/xrpc/com.atproto.space.registerNotify",
+            ]
+        );
+        assert_eq!(paths(&fallback).await.len(), 2);
     }
 }
