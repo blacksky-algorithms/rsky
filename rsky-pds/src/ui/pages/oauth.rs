@@ -107,6 +107,17 @@ pub struct ReactivatePage {
     pub cancel_action: String,
 }
 
+/// The cookie probe: sets the test cookie and sends the browser straight
+/// back, by script where there is one and by the button otherwise.
+#[derive(Template)]
+#[template(path = "oauth/cookie_probe.html")]
+pub struct CookieProbePage {
+    pub shell: PageShell,
+    pub continue_action: String,
+    pub continue_params: Vec<(String, String)>,
+    pub submit_script: String,
+}
+
 #[derive(Template)]
 #[template(path = "oauth/cookie_error.html")]
 pub struct CookieErrorPage {

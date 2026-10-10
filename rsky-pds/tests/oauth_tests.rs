@@ -1935,8 +1935,9 @@ async fn accept_request(client: &Client, request_uri: &str, session: &AuthorizeS
 }
 
 /// An iOS browser is sent through a cookie probe before the request is
-/// bound to a device; a browser that never returns the probe cookie sends
-/// the client an error instead of looping.
+/// bound to a device: a self-submitting page first, an error page with one
+/// more try if the cookie did not survive, and an error to the client if
+/// it still does not, instead of looping.
 #[tokio::test]
 async fn oauth_cookie_probe_on_ios() {
     let (_dir, client) = get_oauth_client().await;
@@ -1958,35 +1959,81 @@ async fn oauth_cookie_probe_on_ios() {
     assert_eq!(response.status(), Status::Ok);
     assert_eq!(
         response_cookie(&response, "cookie-test").as_deref(),
-        Some("1")
+        Some("testing")
     );
     // no device is created yet; the only device-id cookie in the answer is
     // the removal of the one at the old path
     assert_eq!(response_cookie(&response, "device-id").as_deref(), Some(""));
+    let csp = response
+        .headers()
+        .get_one("Content-Security-Policy")
+        .unwrap()
+        .to_string();
+    assert!(csp.contains("script-src 'sha256-"), "{csp}");
     let html = response.into_string().await.unwrap();
-    assert!(html.contains("Cookie Error"), "{html}");
+    assert!(!html.contains("Cookie Error"), "{html}");
     assert!(html.contains("name=\"redirect-test\" value=\"1\""));
     assert!(html.contains(">Continue</button>"));
+    assert!(html.contains("<script>document.forms[0].submit()</script>"));
 
-    // the probe cookie came back: the normal page
+    // the probe cookie came back: the normal page, and no probe next time
     let response = client
         .get(format!(
             "{}&redirect-test=1",
             authorize_path(LOOPBACK_CLIENT_ID, &request_uri)
         ))
         .header(ios())
-        .cookie(("cookie-test", "1"))
+        .cookie(("cookie-test", "testing"))
         .dispatch()
         .await;
     assert_eq!(response.status(), Status::Ok);
+    let passed = response.cookies().get("cookie-test").cloned().unwrap();
+    assert_eq!(passed.value(), "succeeded");
+    assert!(passed.max_age().is_some());
+    let device = response_cookie(&response, "device-id").unwrap();
     let html = response.into_string().await.unwrap();
     assert!(html.contains(">Welcome</h1>"), "{html}");
 
-    // it did not: the client learns the flow cannot continue
+    // a browser that passed before, or already has a device, is not probed
+    for cookie in [
+        ("cookie-test", "succeeded".to_string()),
+        ("device-id", device),
+    ] {
+        let (request_uri, _) = run_par(&client, &key).await;
+        let response = client
+            .get(authorize_path(LOOPBACK_CLIENT_ID, &request_uri))
+            .header(ios())
+            .cookie(cookie)
+            .dispatch()
+            .await;
+        assert_eq!(response.status(), Status::Ok);
+        let html = response.into_string().await.unwrap();
+        assert!(html.contains(">Welcome</h1>"), "{html}");
+    }
+
+    // it did not come back: the error page offers one more try
     let (request_uri, _) = run_par(&client, &key).await;
     let response = client
         .get(format!(
             "{}&redirect-test=1",
+            authorize_path(LOOPBACK_CLIENT_ID, &request_uri)
+        ))
+        .header(ios())
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    assert_eq!(
+        response_cookie(&response, "cookie-test").as_deref(),
+        Some("testing")
+    );
+    let html = response.into_string().await.unwrap();
+    assert!(html.contains("Cookie Error"), "{html}");
+    assert!(html.contains("name=\"redirect-test\" value=\"2\""));
+
+    // still nothing: the client learns the flow cannot continue
+    let response = client
+        .get(format!(
+            "{}&redirect-test=2",
             authorize_path(LOOPBACK_CLIENT_ID, &request_uri)
         ))
         .header(ios())
@@ -2002,7 +2049,7 @@ async fn oauth_cookie_probe_on_ios() {
     // and once the request is gone, the page says so
     let response = client
         .get(format!(
-            "{}&redirect-test=1",
+            "{}&redirect-test=2",
             authorize_path(LOOPBACK_CLIENT_ID, &request_uri)
         ))
         .header(ios())
