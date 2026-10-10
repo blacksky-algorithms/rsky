@@ -4,9 +4,12 @@
 
 use super::shell::PageShell;
 use askama::Template;
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 use rocket::http::{ContentType, Header, Status};
 use rocket::request::Request;
 use rocket::response::{Responder, Response};
+use sha2::{Digest, Sha256};
 use std::io::Cursor;
 
 pub struct UiHtml {
@@ -19,7 +22,16 @@ pub struct UiHtml {
 /// hCaptcha needs its own origins when a page embeds it.
 pub const HCAPTCHA_ORIGINS: &str = "https://hcaptcha.com https://*.hcaptcha.com";
 
-pub fn content_security_policy(shell: &PageShell, hcaptcha: bool) -> String {
+/// The one inline script the pages carry: the cookie probe's self-submit.
+pub const FORM_SUBMIT_SCRIPT: &str = "document.forms[0].submit()";
+
+/// `inline_script` is allowed by hash, so a page may run exactly that
+/// script and nothing else.
+pub fn content_security_policy(
+    shell: &PageShell,
+    hcaptcha: bool,
+    inline_script: Option<&str>,
+) -> String {
     let mut directives = vec![
         "default-src 'none'".to_string(),
         format!("base-uri {}", shell.origin()),
@@ -41,6 +53,10 @@ pub fn content_security_policy(shell: &PageShell, hcaptcha: bool) -> String {
             shell.branding_css_sha256
         ));
     }
+    if let Some(script) = inline_script {
+        let hash = STANDARD.encode(Sha256::digest(script.as_bytes()));
+        directives.push(format!("script-src 'sha256-{hash}'"));
+    }
     if shell.hsts {
         directives.push("upgrade-insecure-requests".to_string());
     }
@@ -57,6 +73,26 @@ pub fn render_page_with<T: Template>(
     template: &T,
     hcaptcha: bool,
 ) -> UiHtml {
+    render(status, shell, template, hcaptcha, None)
+}
+
+/// A page whose markup carries `inline_script`, allowed by its hash.
+pub fn render_page_with_script<T: Template>(
+    status: Status,
+    shell: &PageShell,
+    template: &T,
+    inline_script: &str,
+) -> UiHtml {
+    render(status, shell, template, false, Some(inline_script))
+}
+
+fn render<T: Template>(
+    status: Status,
+    shell: &PageShell,
+    template: &T,
+    hcaptcha: bool,
+    inline_script: Option<&str>,
+) -> UiHtml {
     let html = template.render().unwrap_or_else(|error| {
         tracing::error!(%error, "page template failed to render");
         "<!doctype html><title>Error</title><p>Something went wrong.</p>".to_string()
@@ -64,7 +100,7 @@ pub fn render_page_with<T: Template>(
     UiHtml {
         status,
         html,
-        csp: content_security_policy(shell, hcaptcha),
+        csp: content_security_policy(shell, hcaptcha, inline_script),
         hsts: shell.hsts,
     }
 }
@@ -172,6 +208,16 @@ mod tests {
         )
     }
 
+    #[rocket::get("/scripted")]
+    fn scripted() -> UiHtml {
+        render_page_with_script(
+            Status::Ok,
+            &shell("https://pds.test"),
+            &Tiny { text: "s".into() },
+            FORM_SUBMIT_SCRIPT,
+        )
+    }
+
     #[rocket::get("/plain")]
     fn plain() -> UiHtml {
         render_page_with(
@@ -184,8 +230,8 @@ mod tests {
 
     #[test]
     fn pages_carry_the_reference_headers() {
-        let client =
-            Client::tracked(rocket::build().mount("/", routes![page, plain])).expect("rocket");
+        let client = Client::tracked(rocket::build().mount("/", routes![page, plain, scripted]))
+            .expect("rocket");
         let response = client.get("/page").dispatch();
         assert_eq!(response.status(), Status::Ok);
         let h = response.headers();
@@ -219,5 +265,17 @@ mod tests {
         assert!(csp.contains("script-src https://hcaptcha.com https://*.hcaptcha.com"));
         assert!(csp.contains("frame-src https://hcaptcha.com"));
         assert!(!csp.contains("upgrade-insecure-requests"));
+
+        // the probe page may run its own submit script and nothing else
+        let response = client.get("/scripted").dispatch();
+        let csp = response
+            .headers()
+            .get_one("Content-Security-Policy")
+            .unwrap()
+            .to_string();
+        let hash = STANDARD.encode(Sha256::digest(FORM_SUBMIT_SCRIPT.as_bytes()));
+        let expected = format!("script-src 'sha256-{hash}'");
+        assert!(csp.contains(&expected), "{csp}");
+        assert!(!csp.contains("hcaptcha"));
     }
 }

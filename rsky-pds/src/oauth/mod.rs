@@ -30,6 +30,7 @@ pub const COOKIE_TEST: &str = "cookie-test";
 /// site; a cookie still carrying it is expired when seen next to the new one.
 const LEGACY_DEVICE_COOKIE_PATH: &str = "/oauth";
 const DEVICE_COOKIE_MAX_AGE: Duration = Duration::days(365);
+const COOKIE_TEST_PASSED_MAX_AGE: Duration = Duration::days(31);
 
 /// Expands `include:` permission sets into a granted scope's effective grants,
 /// so the issued access token's `scope` claim carries the resolved `space:`
@@ -197,11 +198,23 @@ pub fn device_cookie(device_id: &str, session_id: &str, secure: bool) -> Cookie<
 
 /// The probe cookie for browsers that may refuse cookies.
 pub fn cookie_test_cookie(secure: bool) -> Cookie<'static> {
-    Cookie::build((COOKIE_TEST, "1"))
+    Cookie::build((COOKIE_TEST, "testing"))
         .http_only(true)
         .secure(secure)
         .same_site(SameSite::Lax)
         .path("/")
+        .build()
+}
+
+/// Remembers that this browser kept the probe cookie, so it is not probed
+/// again for a month.
+pub fn cookie_test_passed_cookie(secure: bool) -> Cookie<'static> {
+    Cookie::build((COOKIE_TEST, "succeeded"))
+        .http_only(true)
+        .secure(secure)
+        .same_site(SameSite::Lax)
+        .path("/")
+        .max_age(COOKIE_TEST_PASSED_MAX_AGE)
         .build()
 }
 
@@ -365,8 +378,14 @@ mod configuration_tests {
         assert_eq!(device_cookie("dev-1", "ses-1", false).secure(), Some(false));
         let probe = cookie_test_cookie(false);
         assert_eq!(probe.name(), COOKIE_TEST);
+        assert_eq!(probe.value(), "testing");
         assert_eq!(probe.path(), Some("/"));
         assert_eq!(probe.max_age(), None);
+        let passed = cookie_test_passed_cookie(true);
+        assert_eq!(passed.name(), COOKIE_TEST);
+        assert_eq!(passed.value(), "succeeded");
+        assert_eq!(passed.secure(), Some(true));
+        assert_eq!(passed.max_age(), Some(COOKIE_TEST_PASSED_MAX_AGE));
         assert_eq!(
             legacy_device_cookie_removal(),
             "device-id=; Path=/oauth; Max-Age=0; HttpOnly; SameSite=Lax"
