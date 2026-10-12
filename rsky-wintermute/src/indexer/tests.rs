@@ -54,6 +54,8 @@ mod indexer_tests {
             "status",
             "verification",
             "notification",
+            "calendar_event",
+            "calendar_rsvp",
         ];
 
         // post_agg is keyed by post uri, so it must go before the posts do.
@@ -3265,6 +3267,542 @@ mod indexer_tests {
 
         for did in [author, liker] {
             cleanup_test_data(&pool, did).await;
+        }
+    }
+
+    mod calendar_tests {
+        use super::{cleanup_test_data, setup_test_pool};
+        use crate::indexer::IndexerManager;
+        use crate::types::{IndexJob, WriteAction};
+        use chrono::{DateTime, TimeDelta, Utc};
+        use serde_json::json;
+
+        const HOST: &str = "did:plc:wintermute-test-cal-host";
+        const ANA: &str = "did:plc:wintermute-test-cal-ana";
+        const BEN: &str = "did:plc:wintermute-test-cal-ben";
+        const CAL: &str = "did:plc:wintermute-test-cal-cal";
+        const EVENT: &str = "community.lexicon.calendar.event";
+        const RSVP: &str = "community.lexicon.calendar.rsvp";
+        const GOING: &str = "community.lexicon.calendar.rsvp#going";
+        const NOTGOING: &str = "community.lexicon.calendar.rsvp#notgoing";
+        const INTERESTED: &str = "community.lexicon.calendar.rsvp#interested";
+        const CANCELLED: &str = "community.lexicon.calendar.event#cancelled";
+        static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+        fn now() -> DateTime<Utc> {
+            DateTime::parse_from_rfc3339("2026-09-26T12:00:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        }
+
+        fn indexed_at() -> String {
+            now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        }
+
+        fn tid(hours_ago: i64, clock: u64) -> String {
+            crate::indexer::calendar::tests::tid_at(now() - TimeDelta::hours(hours_ago), clock)
+        }
+
+        fn event_record(status: Option<&str>) -> serde_json::Value {
+            let mut record = json!({
+                "$type": EVENT,
+                "name": "Block party",
+                "startsAt": "2026-10-01T19:00:00-04:00",
+                "createdAt": "2026-09-20T00:00:00.000Z",
+            });
+            if let Some(status) = status {
+                record["status"] = json!(status);
+            }
+            record
+        }
+
+        fn rsvp_record(event_uri: &str, status: &str) -> serde_json::Value {
+            json!({
+                "$type": RSVP,
+                "subject": {"uri": event_uri, "cid": "bafyevent"},
+                "status": status,
+            })
+        }
+
+        fn job(
+            did: &str,
+            collection: &str,
+            rkey: &str,
+            action: WriteAction,
+            rev: &str,
+            record: Option<serde_json::Value>,
+        ) -> IndexJob {
+            IndexJob {
+                uri: format!("at://{did}/{collection}/{rkey}"),
+                cid: format!("bafy{rev}"),
+                action,
+                record,
+                indexed_at: indexed_at(),
+                rev: rev.to_owned(),
+                provenance: None,
+            }
+        }
+
+        async fn cleanup(pool: &deadpool_postgres::Pool) {
+            for did in [HOST, ANA, BEN, CAL] {
+                cleanup_test_data(pool, did).await;
+            }
+        }
+
+        async fn rsvp_row(
+            pool: &deadpool_postgres::Pool,
+            creator: &str,
+        ) -> Vec<(String, String, String)> {
+            let client = pool.get().await.unwrap();
+            client
+                .query(
+                    "SELECT uri, subject, status FROM calendar_rsvp WHERE creator = $1",
+                    &[&creator],
+                )
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| (row.get(0), row.get(1), row.get(2)))
+                .collect()
+        }
+
+        async fn notifications(
+            pool: &deadpool_postgres::Pool,
+            reason: &str,
+        ) -> Vec<(String, String)> {
+            let client = pool.get().await.unwrap();
+            let mut rows: Vec<(String, String)> = client
+                .query(
+                    "SELECT did, author FROM notification WHERE reason = $1 AND (did = ANY($2) OR author = ANY($2))",
+                    &[&reason, &vec![HOST, ANA, BEN, CAL]],
+                )
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| (row.get(0), row.get(1)))
+                .collect();
+            rows.sort();
+            rows
+        }
+
+        #[tokio::test]
+        async fn event_rows_follow_create_update_delete() {
+            let _serial = SERIAL.lock().await;
+            let pool = setup_test_pool();
+            cleanup(&pool).await;
+            let rkey = tid(1, 0);
+
+            let create = job(
+                HOST,
+                EVENT,
+                &rkey,
+                WriteAction::Create,
+                "3a",
+                Some(event_record(None)),
+            );
+            IndexerManager::process_job(&pool, &create, false)
+                .await
+                .unwrap();
+            let client = pool.get().await.unwrap();
+            let row = client
+                .query_one(
+                    "SELECT \"startsAt\", status FROM calendar_event WHERE creator = $1",
+                    &[&HOST],
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                row.get::<_, Option<String>>(0).as_deref(),
+                Some("2026-10-01T23:00:00.000Z")
+            );
+            assert_eq!(row.get::<_, Option<String>>(1), None);
+
+            let mut bad_time = event_record(Some("community.lexicon.calendar.event#scheduled"));
+            bad_time["startsAt"] = json!("soon");
+            let update = job(
+                HOST,
+                EVENT,
+                &rkey,
+                WriteAction::Update,
+                "3b",
+                Some(bad_time),
+            );
+            IndexerManager::process_job(&pool, &update, false)
+                .await
+                .unwrap();
+            let row = client
+                .query_one(
+                    "SELECT \"startsAt\", status FROM calendar_event WHERE creator = $1",
+                    &[&HOST],
+                )
+                .await
+                .unwrap();
+            assert_eq!(row.get::<_, Option<String>>(0), None);
+            assert_eq!(
+                row.get::<_, Option<String>>(1).as_deref(),
+                Some("community.lexicon.calendar.event#scheduled")
+            );
+
+            let delete = job(HOST, EVENT, &rkey, WriteAction::Delete, "3c", None);
+            IndexerManager::process_job(&pool, &delete, false)
+                .await
+                .unwrap();
+            let count: i64 = client
+                .query_one(
+                    "SELECT count(*) FROM calendar_event WHERE creator = $1",
+                    &[&HOST],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(count, 0);
+            cleanup(&pool).await;
+        }
+
+        #[tokio::test]
+        async fn latest_rsvp_write_wins_and_subject_changes_move_the_row() {
+            let _serial = SERIAL.lock().await;
+            let pool = setup_test_pool();
+            cleanup(&pool).await;
+            let event_a = format!("at://{HOST}/{EVENT}/{}", tid(48, 1));
+            let event_b = format!("at://{HOST}/{EVENT}/{}", tid(48, 2));
+            let older = tid(5, 0);
+            let newer = tid(2, 0);
+            let older_uri = format!("at://{ANA}/{RSVP}/{older}");
+            let newer_uri = format!("at://{ANA}/{RSVP}/{newer}");
+
+            let write = |rkey: &str, action, rev: &str, subject: &str, status: &str| {
+                job(
+                    ANA,
+                    RSVP,
+                    rkey,
+                    action,
+                    rev,
+                    Some(rsvp_record(subject, status)),
+                )
+            };
+            for rsvp in [
+                write(&older, WriteAction::Create, "3a", &event_a, GOING),
+                write(&newer, WriteAction::Create, "3b", &event_a, INTERESTED),
+            ] {
+                IndexerManager::process_job(&pool, &rsvp, false)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                rsvp_row(&pool, ANA).await,
+                vec![(newer_uri, event_a.clone(), INTERESTED.to_owned())]
+            );
+
+            let edit_older = write(&older, WriteAction::Update, "3c", &event_a, NOTGOING);
+            IndexerManager::process_job(&pool, &edit_older, false)
+                .await
+                .unwrap();
+            assert_eq!(
+                rsvp_row(&pool, ANA).await,
+                vec![(older_uri.clone(), event_a.clone(), NOTGOING.to_owned())]
+            );
+
+            let moved = write(&older, WriteAction::Update, "3d", &event_b, GOING);
+            IndexerManager::process_job(&pool, &moved, false)
+                .await
+                .unwrap();
+            assert_eq!(
+                rsvp_row(&pool, ANA).await,
+                vec![(older_uri, event_b, GOING.to_owned())]
+            );
+
+            let delete = job(ANA, RSVP, &older, WriteAction::Delete, "3e", None);
+            IndexerManager::process_job(&pool, &delete, false)
+                .await
+                .unwrap();
+            assert_eq!(rsvp_row(&pool, ANA).await, vec![]);
+
+            let not_an_event = rsvp_record(&format!("at://{HOST}/app.bsky.feed.post/abc"), GOING);
+            IndexerManager::process_job(
+                &pool,
+                &job(
+                    ANA,
+                    RSVP,
+                    &tid(1, 3),
+                    WriteAction::Create,
+                    "3e",
+                    Some(not_an_event),
+                ),
+                false,
+            )
+            .await
+            .unwrap();
+            let mut missing_status = rsvp_record(&event_a, GOING);
+            missing_status.as_object_mut().unwrap().remove("status");
+            IndexerManager::process_job(
+                &pool,
+                &job(
+                    ANA,
+                    RSVP,
+                    &tid(1, 4),
+                    WriteAction::Create,
+                    "3f",
+                    Some(missing_status),
+                ),
+                false,
+            )
+            .await
+            .unwrap();
+            IndexerManager::process_job(
+                &pool,
+                &job(
+                    ANA,
+                    RSVP,
+                    &tid(1, 5),
+                    WriteAction::Create,
+                    "3g",
+                    Some(json!({"subject": "nope", "status": GOING})),
+                ),
+                false,
+            )
+            .await
+            .unwrap();
+            IndexerManager::process_job(
+                &pool,
+                &job(
+                    ANA,
+                    RSVP,
+                    &tid(1, 6),
+                    WriteAction::Create,
+                    "3h",
+                    Some(json!({"subject": {"uri": "not a uri"}, "status": GOING})),
+                ),
+                false,
+            )
+            .await
+            .unwrap();
+            assert_eq!(rsvp_row(&pool, ANA).await, vec![]);
+            cleanup(&pool).await;
+        }
+
+        #[tokio::test]
+        async fn rsvps_strip_nul_bytes_and_drop_when_updated_out_of_shape() {
+            let _serial = SERIAL.lock().await;
+            let pool = setup_test_pool();
+            cleanup(&pool).await;
+            let event = format!("at://{HOST}/{EVENT}/{}", tid(48, 1));
+            let rkey = tid(1, 0);
+            let nul_status = "community.lexicon.calendar.rsvp#go\u{0}ing";
+            let create = job(
+                ANA,
+                RSVP,
+                &rkey,
+                WriteAction::Create,
+                "3a",
+                Some(rsvp_record(&event, nul_status)),
+            );
+            IndexerManager::process_job(&pool, &create, false)
+                .await
+                .unwrap();
+            let uri = format!("at://{ANA}/{RSVP}/{rkey}");
+            assert_eq!(
+                rsvp_row(&pool, ANA).await,
+                vec![(uri, event.clone(), GOING.to_owned())]
+            );
+
+            let mut no_status = rsvp_record(&event, GOING);
+            no_status.as_object_mut().unwrap().remove("status");
+            let update = job(ANA, RSVP, &rkey, WriteAction::Update, "3b", Some(no_status));
+            IndexerManager::process_job(&pool, &update, false)
+                .await
+                .unwrap();
+            assert_eq!(rsvp_row(&pool, ANA).await, vec![]);
+
+            let recreate = job(
+                ANA,
+                RSVP,
+                &rkey,
+                WriteAction::Update,
+                "3c",
+                Some(rsvp_record(&event, GOING)),
+            );
+            IndexerManager::process_job(&pool, &recreate, false)
+                .await
+                .unwrap();
+            assert_eq!(rsvp_row(&pool, ANA).await.len(), 1);
+            let post_subject =
+                rsvp_record(&format!("at://{HOST}/app.bsky.feed.post/3kpost"), GOING);
+            let retarget = job(
+                ANA,
+                RSVP,
+                &rkey,
+                WriteAction::Update,
+                "3d",
+                Some(post_subject),
+            );
+            IndexerManager::process_job(&pool, &retarget, false)
+                .await
+                .unwrap();
+            assert_eq!(rsvp_row(&pool, ANA).await, vec![]);
+
+            let not_tid = job(
+                CAL,
+                RSVP,
+                "self",
+                WriteAction::Create,
+                "3a",
+                Some(rsvp_record(&event, GOING)),
+            );
+            IndexerManager::process_job(&pool, &not_tid, false)
+                .await
+                .unwrap();
+            assert_eq!(rsvp_row(&pool, CAL).await.len(), 1);
+
+            let mut nul_event = event_record(Some(CANCELLED));
+            nul_event["status"] = json!("community.lexicon.calendar.event#cancel\u{0}led");
+            let event_job = job(
+                HOST,
+                EVENT,
+                &tid(48, 3),
+                WriteAction::Create,
+                "3a",
+                Some(nul_event),
+            );
+            IndexerManager::process_job(&pool, &event_job, false)
+                .await
+                .unwrap();
+            let client = pool.get().await.unwrap();
+            let status: Option<String> = client
+                .query_one(
+                    "SELECT status FROM calendar_event WHERE creator = $1",
+                    &[&HOST],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(status.as_deref(), Some(CANCELLED));
+            cleanup(&pool).await;
+        }
+
+        #[tokio::test]
+        async fn batch_path_indexes_cancellations_and_deletes_without_notifying() {
+            let _serial = SERIAL.lock().await;
+            let pool = setup_test_pool();
+            cleanup(&pool).await;
+            let rkey = tid(48, 1);
+            let event = format!("at://{HOST}/{EVENT}/{rkey}");
+            let batch = |jobs: Vec<IndexJob>| {
+                jobs.into_iter()
+                    .enumerate()
+                    .map(|(i, job)| (format!("k{i}-{}", job.uri).into_bytes(), job))
+                    .collect::<Vec<_>>()
+            };
+            let setup = batch(vec![
+                job(
+                    HOST,
+                    EVENT,
+                    &rkey,
+                    WriteAction::Create,
+                    "3a",
+                    Some(event_record(None)),
+                ),
+                job(
+                    ANA,
+                    RSVP,
+                    &tid(40, 0),
+                    WriteAction::Create,
+                    "3a",
+                    Some(rsvp_record(&event, GOING)),
+                ),
+                job(
+                    BEN,
+                    RSVP,
+                    &tid(40, 1),
+                    WriteAction::Create,
+                    "3a",
+                    Some(rsvp_record(
+                        &event,
+                        "community.lexicon.calendar.rsvp#interested",
+                    )),
+                ),
+                job(
+                    CAL,
+                    RSVP,
+                    &tid(40, 2),
+                    WriteAction::Create,
+                    "3a",
+                    Some(rsvp_record(&event, NOTGOING)),
+                ),
+                job(
+                    HOST,
+                    RSVP,
+                    &tid(40, 3),
+                    WriteAction::Create,
+                    "3b",
+                    Some(rsvp_record(&event, GOING)),
+                ),
+            ]);
+            let (results, failed) =
+                IndexerManager::process_jobs_batch(&pool, &setup, false, false).await;
+            assert!(!failed);
+            assert!(results.iter().all(|(_, r)| r.is_ok()), "{results:?}");
+
+            for rev in ["3c", "3d"] {
+                let cancel = batch(vec![job(
+                    HOST,
+                    EVENT,
+                    &rkey,
+                    WriteAction::Update,
+                    rev,
+                    Some(event_record(Some(CANCELLED))),
+                )]);
+                let (results, failed) =
+                    IndexerManager::process_jobs_batch(&pool, &cancel, false, false).await;
+                assert!(!failed);
+                assert!(results.iter().all(|(_, r)| r.is_ok()), "{results:?}");
+            }
+            let cancelled: Option<String> = pool
+                .get()
+                .await
+                .unwrap()
+                .query_one(
+                    "SELECT status FROM calendar_event WHERE uri = $1",
+                    &[&event],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(cancelled.as_deref(), Some(CANCELLED));
+
+            let born_cancelled = batch(vec![job(
+                HOST,
+                EVENT,
+                &tid(48, 2),
+                WriteAction::Create,
+                "3e",
+                Some(event_record(Some(CANCELLED))),
+            )]);
+            IndexerManager::process_jobs_batch(&pool, &born_cancelled, false, false).await;
+            assert_eq!(notifications(&pool, "event-cancelled").await, vec![]);
+            assert_eq!(notifications(&pool, "event-rsvp").await, vec![]);
+
+            let deletes = batch(vec![
+                job(HOST, EVENT, &rkey, WriteAction::Delete, "3f", None),
+                job(ANA, RSVP, &tid(40, 0), WriteAction::Delete, "3b", None),
+            ]);
+            let (results, failed) =
+                IndexerManager::process_jobs_batch(&pool, &deletes, false, false).await;
+            assert!(!failed);
+            assert!(results.iter().all(|(_, r)| r.is_ok()), "{results:?}");
+            let client = pool.get().await.unwrap();
+            let events: i64 = client
+                .query_one(
+                    "SELECT count(*) FROM calendar_event WHERE uri = $1",
+                    &[&event],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(events, 0);
+            assert_eq!(rsvp_row(&pool, ANA).await, vec![]);
+            assert_eq!(rsvp_row(&pool, BEN).await.len(), 1);
+            cleanup(&pool).await;
         }
     }
 }

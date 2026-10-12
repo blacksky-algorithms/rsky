@@ -7,6 +7,8 @@
 -- columns, defaults, sequences, primary keys, unique/foreign-key constraints,
 -- indexes, the notification push trigger and the algo_whats_hot materialized view.
 -- No rows (kysely_migration is empty on purpose).
+-- calendar_event and calendar_rsvp were added by hand to
+-- match migration _20260925T120000000Z.
 --
 -- Production runs with search_path=bsky; here every `bsky.` qualifier has been
 -- stripped so the objects land in `public` and the tests' default
@@ -225,6 +227,34 @@ CREATE TABLE bookmark (
     "subjectUri" character varying NOT NULL,
     "subjectCid" character varying NOT NULL,
     "indexedAt" character varying NOT NULL
+);
+
+--
+-- Name: calendar_event; Type: TABLE
+--
+
+CREATE TABLE calendar_event (
+    uri character varying NOT NULL,
+    cid character varying NOT NULL,
+    creator character varying NOT NULL,
+    "startsAt" character varying,
+    status character varying,
+    "indexedAt" character varying NOT NULL
+);
+
+--
+-- Name: calendar_rsvp; Type: TABLE
+--
+
+CREATE TABLE calendar_rsvp (
+    creator character varying NOT NULL,
+    subject character varying NOT NULL,
+    uri character varying NOT NULL,
+    cid character varying NOT NULL,
+    "subjectCid" character varying,
+    status character varying NOT NULL,
+    "indexedAt" character varying NOT NULL,
+    "sortAt" character varying NOT NULL
 );
 
 --
@@ -1158,6 +1188,27 @@ ALTER TABLE ONLY bookmark
     ADD CONSTRAINT bookmark_unique_uri_creator UNIQUE ("subjectUri", creator);
 
 --
+-- Name: calendar_event calendar_event_pkey; Type: CONSTRAINT
+--
+
+ALTER TABLE ONLY calendar_event
+    ADD CONSTRAINT calendar_event_pkey PRIMARY KEY (uri);
+
+--
+-- Name: calendar_rsvp calendar_rsvp_pkey; Type: CONSTRAINT
+--
+
+ALTER TABLE ONLY calendar_rsvp
+    ADD CONSTRAINT calendar_rsvp_pkey PRIMARY KEY (creator, subject);
+
+--
+-- Name: calendar_rsvp calendar_rsvp_uri_key; Type: CONSTRAINT
+--
+
+ALTER TABLE ONLY calendar_rsvp
+    ADD CONSTRAINT calendar_rsvp_uri_key UNIQUE (uri);
+
+--
 -- Name: community_post community_post_pkey; Type: CONSTRAINT
 --
 
@@ -1626,6 +1677,24 @@ CREATE INDEX algo_whats_hot_view_cursor_idx ON algo_whats_hot_view USING btree (
 --
 
 CREATE UNIQUE INDEX algo_whats_hot_view_uri_idx ON algo_whats_hot_view USING btree (uri);
+
+--
+-- Name: calendar_event_creator_starts_at_idx; Type: INDEX
+--
+
+CREATE INDEX calendar_event_creator_starts_at_idx ON calendar_event USING btree (creator, "startsAt", uri);
+
+--
+-- Name: calendar_event_starts_at_idx; Type: INDEX
+--
+
+CREATE INDEX calendar_event_starts_at_idx ON calendar_event USING btree ("startsAt");
+
+--
+-- Name: calendar_rsvp_subject_status_sort_at_idx; Type: INDEX
+--
+
+CREATE INDEX calendar_rsvp_subject_status_sort_at_idx ON calendar_rsvp USING btree (subject, status, "sortAt", uri);
 
 --
 -- Name: community_post_creator_sort_idx; Type: INDEX
