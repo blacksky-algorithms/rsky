@@ -457,6 +457,16 @@ async fn author_feed_munge_leaves_foreign_feeds_untouched() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn author_feed_munge_passes_through_a_body_without_a_feed() {
+    let (_dir, viewer) = test_viewer().await;
+    let original = json!({ "unexpected": true });
+    let local = local_records(None, vec![]);
+    let munged =
+        get_author_feed_munge(viewer, original.clone(), local, TEST_DID.to_owned()).unwrap();
+    assert_eq!(munged, original);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn author_feed_munge_updates_author_and_inserts_local_posts() {
     let (_dir, viewer) = test_viewer().await;
     let upstream_uri = format!("at://{TEST_DID}/app.bsky.feed.post/upstream");
@@ -1019,11 +1029,17 @@ fn find_posts_in_thread_matches_the_anchor_or_its_root() {
         ),
         post_descript("d", post_record("not a reply"), "2024-01-02T00:00:00.000Z"),
     ];
-    let found: Vec<String> = feed_json::find_posts_in_thread(&anchor, posts)
+    let found: Vec<(String, String)> = feed_json::find_posts_in_thread(&anchor, posts)
         .into_iter()
-        .map(|p| p.uri.get_rkey())
+        .map(|(parent, p)| (parent, p.uri.get_rkey()))
         .collect();
-    assert_eq!(found, vec!["a", "b"]);
+    assert_eq!(
+        found,
+        vec![
+            (anchor_uri.clone(), "a".to_owned()),
+            (anchor_uri, "b".to_owned())
+        ]
+    );
 }
 
 // Embed formatting

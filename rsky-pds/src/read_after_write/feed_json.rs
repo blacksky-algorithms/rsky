@@ -78,21 +78,25 @@ pub fn is_thread_view_post(node: &Value) -> bool {
     str_at(node, "/$type") == Some(THREAD_VIEW_POST)
 }
 
-/// Local replies that belong to this thread: replies rooted at the anchor, or
-/// sharing the anchor's own root when the anchor is itself a reply.
+/// Local replies that belong to this thread, each with the uri of the post
+/// it answers: replies rooted at the anchor, or sharing the anchor's own root
+/// when the anchor is itself a reply.
 pub fn find_posts_in_thread(
     thread: &Value,
     posts: Vec<RecordDescript<Post>>,
-) -> Vec<RecordDescript<Post>> {
+) -> Vec<(String, RecordDescript<Post>)> {
     let anchor = str_at(thread, "/post/uri");
     let root = str_at(thread, "/post/record/reply/root/uri");
     posts
         .into_iter()
-        .filter(|post| {
-            post.record.reply.as_ref().is_some_and(|reply| {
-                let reply_root = Some(reply.root.uri.as_str());
-                reply_root == anchor || reply_root == root
-            })
+        .filter_map(|post| {
+            let reply = post.record.reply.as_ref()?;
+            let reply_root = Some(reply.root.uri.as_str());
+            if reply_root != anchor && reply_root != root {
+                return None;
+            }
+            let parent_uri = reply.parent.uri.clone();
+            Some((parent_uri, post))
         })
         .collect()
 }

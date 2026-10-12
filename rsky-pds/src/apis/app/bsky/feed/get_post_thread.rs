@@ -216,15 +216,7 @@ pub async fn add_posts_to_thread(
     mut thread: Value,
     posts: Vec<RecordDescript<Post>>,
 ) -> Result<Value> {
-    for record in feed_json::find_posts_in_thread(&thread, posts) {
-        let Some(parent_uri) = record
-            .record
-            .reply
-            .as_ref()
-            .map(|reply| reply.parent.uri.clone())
-        else {
-            continue;
-        };
+    for (parent_uri, record) in feed_json::find_posts_in_thread(&thread, posts) {
         if let Some(node) = thread_post_view(local_viewer, record).await? {
             feed_json::graft_reply(&mut thread, &parent_uri, &node);
         }
