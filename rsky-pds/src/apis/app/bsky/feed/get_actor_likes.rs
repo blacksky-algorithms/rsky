@@ -4,6 +4,7 @@ use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::scope::{RpcProxy, Scoped};
 use crate::config::ServerConfig;
+use crate::read_after_write::feed_json;
 use crate::read_after_write::types::LocalRecords;
 use crate::read_after_write::util::{handle_read_after_write, ReadAfterWriteResponse};
 use crate::read_after_write::viewer::LocalViewer;
@@ -11,7 +12,7 @@ use crate::xrpc_server::types::HandlerPipeThrough;
 use crate::SharedLocalViewer;
 use anyhow::Result;
 use rocket::State;
-use rsky_lexicon::app::bsky::feed::{AuthorFeed, FeedViewPost, PostView};
+use serde_json::Value;
 
 const METHOD_NSID: &str = "app.bsky.feed.getActorLikes";
 
@@ -26,7 +27,7 @@ pub async fn inner_get_actor_likes(
     state_local_viewer: &State<SharedLocalViewer>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
-) -> Result<ReadAfterWriteResponse<AuthorFeed>> {
+) -> Result<ReadAfterWriteResponse<Value>> {
     let requester: Option<String> = auth.did_opt().await?;
     match requester {
         None => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
@@ -62,7 +63,7 @@ pub async fn get_actor_likes(
     cfg: &State<ServerConfig>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
-) -> Result<ReadAfterWriteResponse<AuthorFeed>, ApiError> {
+) -> Result<ReadAfterWriteResponse<Value>, ApiError> {
     if let Some(limit) = limit {
         if limit > 100 {
             return Err(ApiError::InvalidRequest("invalid limit".to_string()));
@@ -94,68 +95,19 @@ pub async fn get_actor_likes(
 
 pub fn get_author_munge(
     local_viewer: LocalViewer,
-    original: AuthorFeed,
+    mut original: Value,
     local: LocalRecords,
     requester: String,
-) -> Result<AuthorFeed> {
-    let feed = original.feed;
-    match local.profile {
-        None => Ok(AuthorFeed {
-            cursor: original.cursor,
-            feed,
-        }),
-        Some(profile) => {
-            let feed = feed
-                .into_iter()
-                .map(|item| {
-                    if item.post.author.did == requester {
-                        let FeedViewPost {
-                            post,
-                            reply,
-                            reason,
-                            feed_context,
-                        } = item;
-                        let PostView {
-                            uri,
-                            cid,
-                            author,
-                            record,
-                            embed,
-                            reply_count,
-                            repost_count,
-                            like_count,
-                            indexed_at,
-                            viewer,
-                            labels,
-                        } = post;
-                        FeedViewPost {
-                            reply,
-                            reason,
-                            feed_context,
-                            post: PostView {
-                                uri,
-                                cid,
-                                author: local_viewer
-                                    .update_profile_view_basic(author, profile.record.clone()),
-                                record,
-                                embed,
-                                reply_count,
-                                repost_count,
-                                like_count,
-                                indexed_at,
-                                viewer,
-                                labels,
-                            },
-                        }
-                    } else {
-                        item
-                    }
-                })
-                .collect::<Vec<FeedViewPost>>();
-            Ok(AuthorFeed {
-                cursor: original.cursor,
-                feed,
-            })
+) -> Result<Value> {
+    if let Some(profile) = local.profile {
+        if let Some(feed) = original.get_mut("feed").and_then(Value::as_array_mut) {
+            for item in feed
+                .iter_mut()
+                .filter(|item| feed_json::str_at(item, "/post/author/did") == Some(&requester))
+            {
+                local_viewer.overlay_profile_basic(item, &profile.record);
+            }
         }
     }
+    Ok(original)
 }

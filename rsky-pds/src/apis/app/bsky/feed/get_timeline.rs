@@ -11,7 +11,7 @@ use crate::xrpc_server::types::HandlerPipeThrough;
 use crate::SharedLocalViewer;
 use anyhow::Result;
 use rocket::State;
-use rsky_lexicon::app::bsky::feed::AuthorFeed;
+use serde_json::Value;
 
 const METHOD_NSID: &str = "app.bsky.feed.getTimeline";
 
@@ -26,7 +26,7 @@ pub async fn inner_get_timeline(
     state_local_viewer: &State<SharedLocalViewer>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
-) -> Result<ReadAfterWriteResponse<AuthorFeed>> {
+) -> Result<ReadAfterWriteResponse<Value>> {
     let requester: Option<String> = auth.did_opt().await?;
     match requester {
         None => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
@@ -63,7 +63,7 @@ pub async fn get_timeline(
     cfg: &State<ServerConfig>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
-) -> Result<ReadAfterWriteResponse<AuthorFeed>, ApiError> {
+) -> Result<ReadAfterWriteResponse<Value>, ApiError> {
     if let Some(limit) = limit {
         if !(1..=100).contains(&limit) {
             return Err(ApiError::InvalidRequest("invalid limit".to_string()));
@@ -94,15 +94,17 @@ pub async fn get_timeline(
 
 pub fn get_timeline_munge(
     local_viewer: LocalViewer,
-    original: AuthorFeed,
+    mut original: Value,
     local: LocalRecords,
     _requester: String,
-) -> Result<AuthorFeed> {
+) -> Result<Value> {
+    let Some(feed) = original.get_mut("feed").and_then(Value::as_array_mut) else {
+        return Ok(original);
+    };
+    let feed = std::mem::take(feed);
     let feed = futures::executor::block_on(
-        local_viewer.format_and_insert_posts_in_feed(original.feed, local.posts),
+        local_viewer.format_and_insert_posts_in_feed(feed, local.posts),
     )?;
-    Ok(AuthorFeed {
-        cursor: original.cursor,
-        feed,
-    })
+    original["feed"] = Value::Array(feed);
+    Ok(original)
 }
