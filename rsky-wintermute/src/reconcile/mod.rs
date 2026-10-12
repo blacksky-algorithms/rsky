@@ -259,8 +259,11 @@ pub async fn record_progress(
     Ok(())
 }
 
-/// Records the commit an event delivered, the acknowledgement a recovery
-/// waits for, and raises the progress bound to its revision.
+/// Records the commit an event delivered and raises the progress bound.
+///
+/// The commit is the acknowledgement a recovery waits for. Its revision is
+/// also published to `actor_sync`, which the appview stamps on its responses
+/// so a PDS can tell which of its writes are still pending.
 pub async fn record_commit_progress(
     client: &Client,
     did: &str,
@@ -276,6 +279,18 @@ pub async fn record_commit_progress(
                last_commit_cid = EXCLUDED.last_commit_cid, \
                last_commit_rev = EXCLUDED.last_commit_rev, \
                updated_at = now()",
+            &[&did, &rev, &commit_cid],
+        )
+        .await?;
+    client
+        .execute(
+            "INSERT INTO actor_sync (did, \"commitCid\", \"repoRev\") \
+             VALUES ($1, $3, $2) \
+             ON CONFLICT (did) DO UPDATE SET \
+               \"commitCid\" = EXCLUDED.\"commitCid\", \
+               \"repoRev\" = EXCLUDED.\"repoRev\" \
+             WHERE actor_sync.\"repoRev\" IS NULL \
+               OR EXCLUDED.\"repoRev\" > actor_sync.\"repoRev\"",
             &[&did, &rev, &commit_cid],
         )
         .await?;

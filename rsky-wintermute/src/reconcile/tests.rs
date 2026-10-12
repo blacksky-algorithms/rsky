@@ -10,7 +10,7 @@ use super::workflow::{
 use super::{Admission, Gate, GateMode, Provenance, Source, progress_of};
 use crate::indexer::IndexerManager;
 use crate::types::{IndexJob, WriteAction};
-use deadpool_postgres::Pool;
+use deadpool_postgres::{Client, Pool};
 use rsky_repo::block_map::BlockMap;
 use rsky_repo::repo::Repo;
 use rsky_repo::storage::memory_blockstore::MemoryBlockstore;
@@ -38,6 +38,11 @@ CREATE TABLE IF NOT EXISTS record (
     \"indexedAt\" varchar NOT NULL,
     rev varchar,
     \"takedownRef\" varchar
+);
+CREATE TABLE IF NOT EXISTS actor_sync (
+    did varchar PRIMARY KEY,
+    \"commitCid\" varchar NOT NULL,
+    \"repoRev\" varchar
 );
 CREATE TABLE IF NOT EXISTS duplicate_record (
     uri varchar PRIMARY KEY,
@@ -67,6 +72,7 @@ async fn reset_actor(pool: &Pool, did: &str) {
     for statement in [
         "DELETE FROM record WHERE did = $1",
         "DELETE FROM actor WHERE did = $1",
+        "DELETE FROM actor_sync WHERE did = $1",
         "DELETE FROM wintermute.did_progress WHERE did = $1",
         "DELETE FROM wintermute.did_generation WHERE did = $1",
         "DELETE FROM wintermute.reconcile_fence WHERE did = $1",
@@ -75,6 +81,17 @@ async fn reset_actor(pool: &Pool, did: &str) {
     ] {
         client.execute(statement, &[&did]).await.unwrap();
     }
+}
+
+async fn actor_sync_of(client: &Client, did: &str) -> Option<(String, String)> {
+    client
+        .query_opt(
+            "SELECT \"commitCid\", \"repoRev\" FROM actor_sync WHERE did = $1",
+            &[&did],
+        )
+        .await
+        .unwrap()
+        .map(|row| (row.get(0), row.get(1)))
 }
 
 fn keypair() -> Keypair {
@@ -358,6 +375,26 @@ async fn the_gate_admits_defers_and_refuses_by_rule() {
     let progress = progress_of(&client, did).await.unwrap().unwrap();
     assert_eq!(progress.max_rev, "3d");
     assert_eq!(progress.last_commit_cid.as_deref(), Some("bafycommit"));
+    // the commit is published to readers, and a late older commit cannot
+    // move it backwards
+    assert_eq!(
+        actor_sync_of(&client, did).await,
+        Some(("bafycommit".to_owned(), "3d".to_owned()))
+    );
+    super::record_commit_progress(&client, did, "3b", "bafyolder")
+        .await
+        .unwrap();
+    assert_eq!(
+        actor_sync_of(&client, did).await,
+        Some(("bafycommit".to_owned(), "3d".to_owned()))
+    );
+    super::record_commit_progress(&client, did, "3e", "bafynewer")
+        .await
+        .unwrap();
+    assert_eq!(
+        actor_sync_of(&client, did).await,
+        Some(("bafynewer".to_owned(), "3e".to_owned()))
+    );
     assert_eq!(super::generation_of(&client, did).await.unwrap(), Some(1));
     assert_eq!(
         super::current_generation(&pool, did).await.unwrap(),
