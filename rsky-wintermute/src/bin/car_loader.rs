@@ -524,6 +524,8 @@ fn collection_tables(collection: &str) -> &'static [(&'static str, &'static str)
         "app.bsky.labeler.service" => &[("labeler", "uri")],
         "app.bsky.graph.starterpack" => &[("starter_pack", "uri")],
         "app.bsky.graph.verification" => &[("verification", "uri")],
+        "community.lexicon.calendar.event" => &[("calendar_event", "uri")],
+        "community.lexicon.calendar.rsvp" => &[("calendar_rsvp", "uri")],
         _ => &[],
     }
 }

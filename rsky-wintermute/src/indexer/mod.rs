@@ -1,4 +1,5 @@
 pub(crate) mod bulk;
+mod calendar;
 mod tests;
 
 use crate::SHUTDOWN;
@@ -1561,6 +1562,28 @@ impl IndexerManager {
                         )
                         .await?;
                     }
+                    calendar::EVENT_COLLECTION => {
+                        calendar::index_event(
+                            client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
+                    calendar::RSVP_COLLECTION => {
+                        calendar::index_rsvp(
+                            client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
                     _ => {}
                 }
             }
@@ -1636,6 +1659,12 @@ impl IndexerManager {
                     }
                     "community.blacksky.feed.post" => {
                         Self::delete_community_post(client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    calendar::EVENT_COLLECTION => {
+                        calendar::delete_event(client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    calendar::RSVP_COLLECTION => {
+                        calendar::delete_rsvp(client, did.as_str(), rkey.as_str()).await?;
                     }
                     _ => {}
                 }
@@ -2225,6 +2254,8 @@ impl IndexerManager {
             "app.bsky.actor.status" => Self::delete_status(client, did, rkey).await,
             "app.bsky.graph.verification" => Self::delete_verification(client, did, rkey).await,
             "community.blacksky.feed.post" => Self::delete_community_post(client, did, rkey).await,
+            calendar::EVENT_COLLECTION => calendar::delete_event(client, did, rkey).await,
+            calendar::RSVP_COLLECTION => calendar::delete_rsvp(client, did, rkey).await,
             _ => Ok(()),
         }
     }
@@ -2710,6 +2741,12 @@ impl IndexerManager {
             }
             "community.blacksky.feed.post" => {
                 Self::index_community_post_stub(client, did, rkey, cid, indexed_at).await
+            }
+            calendar::EVENT_COLLECTION => {
+                calendar::index_event(client, did, rkey, record, cid, indexed_at).await
+            }
+            calendar::RSVP_COLLECTION => {
+                calendar::index_rsvp(client, did, rkey, record, cid, indexed_at).await
             }
             _ => Ok(()),
         }
