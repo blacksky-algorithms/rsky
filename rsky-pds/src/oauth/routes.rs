@@ -1,7 +1,8 @@
 use super::body::OAuthBody;
 use super::{
-    cookie_test_cookie, csrf_token, device_cookie, ensure_device_session, now_secs, DeviceSession,
-    SharedOAuthProvider, COOKIE_TEST,
+    cookie_test_cookie, cookie_test_passed_cookie, csrf_token, device_cookie,
+    ensure_device_session, now_secs, DeviceSession, SharedOAuthProvider, COOKIE_TEST,
+    DEVICE_COOKIE,
 };
 use crate::account::signup::{
     create_and_sign_in, sign_up_page, SignUpContext, SignUpFormData, SignUpServices, SignUpValues,
@@ -17,10 +18,11 @@ use crate::permission_set::SharedPermissionSets;
 use crate::ui::client::client_view;
 use crate::ui::pages::oauth::SignUpStep;
 use crate::ui::pages::oauth::{
-    ConsentPage, CookieErrorPage, ErrorPage, ReactivatePage, SignInPage, SignInView, WelcomePage,
+    ConsentPage, CookieErrorPage, CookieProbePage, ErrorPage, ReactivatePage, SignInPage,
+    SignInView, WelcomePage,
 };
 use crate::ui::pages::AccountCardView;
-use crate::ui::respond::{render_page, UiHtml};
+use crate::ui::respond::{render_page, render_page_with_script, UiHtml, FORM_SUBMIT_SCRIPT};
 use crate::ui::scopes::{permission_groups, IncludeSetView};
 use crate::ui::shell::PageShell;
 use crate::ui::technical::technical_items;
@@ -813,23 +815,50 @@ pub async fn oauth_authorize(
         ));
     };
     let now = now_secs();
-    // browsers known to drop cookies in some embedded contexts are asked
-    // to come back once with a probe cookie before anything is bound to
-    // this device
-    if is_ios(info.user_agent.as_deref()) && jar.get(COOKIE_TEST).is_none() {
-        if query.redirect_test.is_none() {
-            jar.add(cookie_test_cookie(shared.secure_cookies));
-            let page = CookieErrorPage {
-                shell: (**shell).clone(),
-                cookie_message: CookieErrorPage::message(&shell.hostname),
-                continue_action: AUTHORIZE_PATH.to_string(),
-                continue_params: vec![
-                    ("client_id".to_string(), client_id),
-                    ("request_uri".to_string(), request_uri),
-                    ("redirect-test".to_string(), "1".to_string()),
-                ],
-            };
-            return Err(render_page(Status::Ok, shell, &page));
+    // iOS sometimes drops cookies set while a page renders, even inside an
+    // ASWebAuthenticationSession, so as the reference does the browser is
+    // sent back to this route once with a probe cookie before anything is
+    // bound to a device: silently when it keeps the cookie, with an error
+    // page and one more try when it does not
+    let probing = is_ios(info.user_agent.as_deref()) && jar.get(DEVICE_COOKIE).is_none();
+    let continue_params = |redirect_test: &str| {
+        vec![
+            ("client_id".to_string(), client_id.clone()),
+            ("request_uri".to_string(), request_uri.clone()),
+            ("redirect-test".to_string(), redirect_test.to_string()),
+        ]
+    };
+    if probing && jar.get(COOKIE_TEST).is_some() && query.redirect_test.is_some() {
+        jar.add(cookie_test_passed_cookie(shared.secure_cookies));
+    }
+    if probing && jar.get(COOKIE_TEST).is_none() {
+        match query.redirect_test.as_deref() {
+            None => {
+                jar.add(cookie_test_cookie(shared.secure_cookies));
+                let page = CookieProbePage {
+                    shell: (**shell).clone(),
+                    continue_action: AUTHORIZE_PATH.to_string(),
+                    continue_params: continue_params("1"),
+                    submit_script: FORM_SUBMIT_SCRIPT.to_string(),
+                };
+                return Err(render_page_with_script(
+                    Status::Ok,
+                    shell,
+                    &page,
+                    FORM_SUBMIT_SCRIPT,
+                ));
+            }
+            Some("1") => {
+                jar.add(cookie_test_cookie(shared.secure_cookies));
+                let page = CookieErrorPage {
+                    shell: (**shell).clone(),
+                    cookie_message: CookieErrorPage::message(&shell.hostname),
+                    continue_action: AUTHORIZE_PATH.to_string(),
+                    continue_params: continue_params("2"),
+                };
+                return Err(render_page(Status::Ok, shell, &page));
+            }
+            Some(_) => {}
         }
         let session = device_session(shell, shared, jar, &info, now).await?;
         return match shared

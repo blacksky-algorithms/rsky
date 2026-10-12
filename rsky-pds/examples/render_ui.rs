@@ -11,7 +11,8 @@ use rsky_pds::ui::pages::account::{
     Section,
 };
 use rsky_pds::ui::pages::oauth::{
-    ConsentPage, CookieErrorPage, ErrorPage, ReactivatePage, SignInPage, SignInView, WelcomePage,
+    ConsentPage, CookieErrorPage, CookieProbePage, ErrorPage, ReactivatePage, SignInPage,
+    SignInView, WelcomePage,
 };
 use rsky_pds::ui::pages::AccountCardView;
 use rsky_pds::ui::scopes::{permission_groups, IncludeSetView};
@@ -206,6 +207,20 @@ fn main() {
         .render(),
     );
     write(
+        "cookie_probe",
+        CookieProbePage {
+            shell: shell(),
+            continue_action: "/oauth/authorize".to_string(),
+            continue_params: vec![
+                ("client_id".to_string(), CLIENT_ID.to_string()),
+                ("request_uri".to_string(), REQUEST_URI.to_string()),
+                ("redirect-test".to_string(), "1".to_string()),
+            ],
+            submit_script: rsky_pds::ui::respond::FORM_SUBMIT_SCRIPT.to_string(),
+        }
+        .render(),
+    );
+    write(
         "cookie_error",
         CookieErrorPage {
             shell: shell(),
@@ -214,7 +229,7 @@ fn main() {
             continue_params: vec![
                 ("client_id".to_string(), CLIENT_ID.to_string()),
                 ("request_uri".to_string(), REQUEST_URI.to_string()),
-                ("redirect-test".to_string(), "1".to_string()),
+                ("redirect-test".to_string(), "2".to_string()),
             ],
         }
         .render(),
