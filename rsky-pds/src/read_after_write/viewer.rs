@@ -1,6 +1,7 @@
 use crate::account_manager::helpers::auth::ServiceJwtParams;
 use crate::account_manager::AccountManager;
 use crate::actor_store::ActorStoreReader;
+use crate::read_after_write::feed_json;
 use crate::read_after_write::types::{LocalRecords, RecordDescript};
 use crate::read_after_write::util;
 use crate::xrpc_server::auth::create_service_auth_headers;
@@ -37,11 +38,12 @@ use rsky_lexicon::app::bsky::embed::record_with_media::{
     RecordWithMedia, View as RecordWithMediaView,
 };
 use rsky_lexicon::app::bsky::embed::{record, EmbedViews, Embeds, MediaUnion, MediaViewUnion};
-use rsky_lexicon::app::bsky::feed::{FeedViewPost, GeneratorView, Post, PostView};
+use rsky_lexicon::app::bsky::feed::{GeneratorView, Post, PostView};
 use rsky_lexicon::app::bsky::graph::ListView;
 use rsky_repo::types::Ids;
 use rsky_syntax::aturi::AtUri;
 use rsky_syntax::handle::INVALID_HANDLE;
+use serde_json::{json, Value};
 use std::str::FromStr;
 
 pub type Agent = AtpServiceClient<ReqwestClient>;
@@ -201,16 +203,16 @@ impl LocalViewer {
 
     pub async fn format_and_insert_posts_in_feed(
         &self,
-        mut feed: Vec<FeedViewPost>,
+        mut feed: Vec<Value>,
         posts: Vec<RecordDescript<Post>>,
-    ) -> Result<Vec<FeedViewPost>> {
+    ) -> Result<Vec<Value>> {
         if posts.is_empty() {
             return Ok(feed);
         }
-        let last_time: String = match feed.last() {
-            None => beginning_of_time(),
-            Some(feed_post) => feed_post.post.indexed_at.clone(),
-        };
+        let last_time: String = feed
+            .last()
+            .and_then(|item| feed_json::str_at(item, "/post/indexedAt"))
+            .map_or_else(beginning_of_time, str::to_owned);
         let mut in_feed = posts
             .into_iter()
             .filter(|p| p.indexed_at > last_time)
@@ -223,23 +225,23 @@ impl LocalViewer {
             .await
             .into_iter()
             .collect::<Result<Vec<Option<PostView>>>>()?;
-        let formatted: Vec<PostView> = maybe_formatted.into_iter().flatten().collect();
-        for post in formatted {
-            let idx = feed
-                .iter()
-                .position(|fi| fi.post.indexed_at < post.indexed_at);
-            let feed_view_post = FeedViewPost {
-                post,
-                reply: None,
-                reason: None,
-                feed_context: None,
-            };
-            match idx {
-                None => feed.push(feed_view_post),
-                Some(idx) => feed.insert(idx, feed_view_post),
-            }
+        for post in maybe_formatted.into_iter().flatten() {
+            let item = json!({ "post": serde_json::to_value(post)? });
+            feed_json::insert_feed_item(&mut feed, item);
         }
         Ok(feed)
+    }
+
+    /// Refresh the author of a feed item from a pending profile write, touching
+    /// only the two keys that write can change.
+    pub fn overlay_profile_basic(&self, item: &mut Value, record: &Profile) {
+        let avatar = record.avatar.as_ref().and_then(|avatar| {
+            avatar
+                .r#ref
+                .as_ref()
+                .map(|r#ref| self.get_image_url("avatar".to_string(), r#ref.to_string()))
+        });
+        feed_json::overlay_author(item, record.display_name.as_deref(), avatar.as_deref());
     }
 
     pub async fn get_post(&self, descript: RecordDescript<Post>) -> Result<Option<PostView>> {

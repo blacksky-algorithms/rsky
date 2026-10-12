@@ -5,6 +5,7 @@ use crate::apis::ApiError;
 use crate::auth_verifier::scope::{RpcProxy, Scoped};
 use crate::config::ServerConfig;
 use crate::models::{ErrorCode, ErrorMessageResponse};
+use crate::read_after_write::feed_json;
 use crate::read_after_write::types::{LocalRecords, RecordDescript};
 use crate::read_after_write::util::{
     format_munged_response, get_local_lag, get_repo_rev, handle_read_after_write,
@@ -20,23 +21,20 @@ use atrium_api::app::bsky::feed::get_post_thread::{
 use atrium_api::client::AtpServiceClient;
 use atrium_api::types::LimitedU16;
 use atrium_xrpc_client::reqwest::ReqwestClientBuilder;
-use futures::stream::{self, StreamExt};
 use ipld_core::ipld::Ipld as AtriumIpld;
 use reqwest::header::HeaderMap;
 use rocket::State;
 use rsky_lexicon::app::bsky::feed::Post;
-use rsky_lexicon::app::bsky::feed::{GetPostThreadOutput, ThreadViewPost, ThreadViewPostEnum};
+use rsky_lexicon::app::bsky::feed::{ThreadViewPost, ThreadViewPostEnum};
 use rsky_repo::types::Ids;
 use rsky_syntax::aturi::AtUri;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::future::Future;
-use std::ops::Deref;
-use std::pin::Pin;
 
 const METHOD_NSID: &str = "app.bsky.feed.getPostThread";
 
 pub struct ReadAfterWriteNotFoundOutput {
-    pub data: GetPostThreadOutput,
+    pub data: Value,
     pub lag: Option<usize>,
 }
 
@@ -52,7 +50,7 @@ pub async fn inner_get_post_thread(
     cfg: &State<ServerConfig>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
-) -> Result<ReadAfterWriteResponse<GetPostThreadOutput>> {
+) -> Result<ReadAfterWriteResponse<Value>> {
     let requester: String = auth
         .did_opt()
         .await?
@@ -134,7 +132,7 @@ pub async fn get_post_thread(
     cfg: &State<ServerConfig>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
-) -> Result<ReadAfterWriteResponse<GetPostThreadOutput>, ApiError> {
+) -> Result<ReadAfterWriteResponse<Value>, ApiError> {
     let depth = depth.unwrap_or(6);
     let parentHeight = parentHeight.unwrap_or(80);
     if depth > 1000 || parentHeight > 1000 {
@@ -194,152 +192,51 @@ pub async fn get_post_thread(
     }
 }
 
-#[allow(unused_variables)]
 pub fn get_post_thread_munge(
     local_viewer: LocalViewer,
-    original: GetPostThreadOutput,
+    mut original: Value,
     local: LocalRecords,
-    requester: String,
-) -> Result<GetPostThreadOutput> {
-    match original.thread {
-        ThreadViewPostEnum::ThreadViewPost(post) => {
-            let thread =
-                futures::executor::block_on(add_posts_to_thread(&local_viewer, post, local.posts))?;
-            Ok(GetPostThreadOutput {
-                thread: ThreadViewPostEnum::ThreadViewPost(thread),
-            })
-        }
-        _ => Ok(original),
+    _requester: String,
+) -> Result<Value> {
+    let Some(thread) = original.get_mut("thread") else {
+        return Ok(original);
+    };
+    if !feed_json::is_thread_view_post(thread) {
+        return Ok(original);
     }
+    let thread = std::mem::take(thread);
+    let thread =
+        futures::executor::block_on(add_posts_to_thread(&local_viewer, thread, local.posts))?;
+    original["thread"] = thread;
+    Ok(original)
 }
 
 pub async fn add_posts_to_thread(
     local_viewer: &LocalViewer,
-    original: ThreadViewPost,
+    mut thread: Value,
     posts: Vec<RecordDescript<Post>>,
-) -> Result<ThreadViewPost> {
-    let in_thread = find_posts_in_thread(&original, posts);
-    if in_thread.is_empty() {
-        return Ok(original);
-    }
-    let mut thread = original;
-    for record in in_thread {
-        thread = insert_into_thread_replies(local_viewer, thread, record).await?;
+) -> Result<Value> {
+    for (parent_uri, record) in feed_json::find_posts_in_thread(&thread, posts) {
+        if let Some(node) = thread_post_view(local_viewer, record).await? {
+            feed_json::graft_reply(&mut thread, &parent_uri, &node);
+        }
     }
     Ok(thread)
-}
-
-pub fn find_posts_in_thread(
-    thread: &ThreadViewPost,
-    posts: Vec<RecordDescript<Post>>,
-) -> Vec<RecordDescript<Post>> {
-    posts
-        .into_iter()
-        .filter(|post| match post.record.reply {
-            None => false,
-            Some(ref reply) => {
-                if reply.root.uri == thread.post.uri {
-                    return true;
-                }
-                match serde_json::from_value::<Post>(thread.post.record.clone()) {
-                    Err(_) => false,
-                    Ok(thread_post_record) => match thread_post_record.reply {
-                        None => false,
-                        Some(thread_post_record_reply) => {
-                            thread_post_record_reply.root.uri == reply.root.uri
-                        }
-                    },
-                }
-            }
-        })
-        .collect::<Vec<RecordDescript<Post>>>()
-}
-
-pub fn insert_into_thread_replies<'a>(
-    local_viewer: &'a LocalViewer,
-    view: ThreadViewPost,
-    descript: RecordDescript<Post>,
-) -> Pin<Box<dyn Future<Output = Result<ThreadViewPost>> + Send + 'a>> {
-    Box::pin(async move {
-        if let Some(ref reply) = descript.record.reply {
-            if reply.parent.uri == view.post.uri {
-                return match thread_post_view(local_viewer, descript).await? {
-                    None => Ok(view),
-                    Some(post_view) => {
-                        let ThreadViewPost {
-                            post,
-                            parent,
-                            replies,
-                        } = view;
-                        let mut view_replies = replies.unwrap_or(vec![]);
-                        let mut replies =
-                            vec![Box::new(ThreadViewPostEnum::ThreadViewPost(post_view))];
-                        replies.append(&mut view_replies);
-                        Ok(ThreadViewPost {
-                            post,
-                            parent,
-                            replies: Some(replies),
-                        })
-                    }
-                };
-            }
-        }
-
-        let ThreadViewPost {
-            post,
-            parent,
-            replies,
-        } = view;
-        match replies {
-            None => Ok(ThreadViewPost {
-                post,
-                parent,
-                replies,
-            }),
-            Some(ref view_replies) => {
-                let replies = stream::iter(view_replies)
-                    .then(|reply| {
-                        let descript_clone = descript.clone();
-                        async move {
-                            if let ThreadViewPostEnum::ThreadViewPost(reply_post) = reply.deref() {
-                                Ok(Box::new(ThreadViewPostEnum::ThreadViewPost(
-                                    insert_into_thread_replies(
-                                        local_viewer,
-                                        reply_post.clone(),
-                                        descript_clone,
-                                    )
-                                    .await?,
-                                )))
-                            } else {
-                                Ok(reply.clone())
-                            }
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .await
-                    .into_iter()
-                    .collect::<Result<Vec<Box<ThreadViewPostEnum>>>>()?;
-                Ok(ThreadViewPost {
-                    post,
-                    parent,
-                    replies: Some(replies),
-                })
-            }
-        }
-    })
 }
 
 pub async fn thread_post_view(
     local_viewer: &LocalViewer,
     descript: RecordDescript<Post>,
-) -> Result<Option<ThreadViewPost>> {
+) -> Result<Option<Value>> {
     match local_viewer.get_post(descript).await? {
         None => Ok(None),
-        Some(post_view) => Ok(Some(ThreadViewPost {
-            post: post_view,
-            parent: None,
-            replies: None,
-        })),
+        Some(post) => Ok(Some(serde_json::to_value(
+            ThreadViewPostEnum::ThreadViewPost(ThreadViewPost {
+                post,
+                parent: None,
+                replies: None,
+            }),
+        )?)),
     }
 }
 
@@ -394,7 +291,7 @@ pub async fn read_after_write_not_found(
                                         .collect::<Vec<RecordDescript<Post>>>();
                                     let mut thread =
                                         add_posts_to_thread(&local_viewer, thread, rest).await?;
-                                    let highest_parent = get_highest_parent(&thread);
+                                    let highest_parent = feed_json::highest_parent(&thread);
                                     if let Some(highest_parent) = highest_parent {
                                         match &cfg.bsky_app_view {
                                             None => (),
@@ -451,22 +348,19 @@ pub async fn read_after_write_not_found(
                                                 {
                                                     Err(_) => (),
                                                     Ok(parents_res) => {
-                                                        let val = serde_json::to_value(
+                                                        // Kept as the JSON it arrived as: the
+                                                        // parent's viewer state and counters are
+                                                        // not all described by the typed structs.
+                                                        thread["parent"] = serde_json::to_value(
                                                             parents_res.data.thread,
-                                                        )
-                                                        .expect(
-                                                            "Couldn't serialize atrium to value.",
-                                                        );
-                                                        thread.parent = Some(Box::new(serde_json::from_value::<ThreadViewPostEnum>(val).expect("Couldn't deserialize from atrium to value to ThreadViewPostEnum.")));
+                                                        )?;
                                                     }
                                                 }
                                             }
                                         }
                                     }
                                     Ok(Some(ReadAfterWriteNotFoundOutput {
-                                        data: GetPostThreadOutput {
-                                            thread: ThreadViewPostEnum::ThreadViewPost(thread),
-                                        },
+                                        data: json!({ "thread": thread }),
                                         lag: get_local_lag(&local)?,
                                     }))
                                 }
@@ -476,21 +370,5 @@ pub async fn read_after_write_not_found(
                 }
             }
         }
-    }
-}
-
-pub fn get_highest_parent(thread: &ThreadViewPost) -> Option<String> {
-    match thread.parent {
-        Some(ref boxed_parent) => match boxed_parent.deref() {
-            ThreadViewPostEnum::ThreadViewPost(parent) => get_highest_parent(parent),
-            _ => None,
-        },
-        _ => match serde_json::from_value::<Post>(thread.post.record.clone()) {
-            Err(_) => None,
-            Ok(thread_post_record) => match thread_post_record.reply {
-                None => None,
-                Some(thread_post_record_reply) => Some(thread_post_record_reply.parent.uri),
-            },
-        },
     }
 }
