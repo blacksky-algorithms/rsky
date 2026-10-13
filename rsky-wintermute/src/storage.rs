@@ -167,8 +167,14 @@ impl Storage {
         // resumes the forward scan instead of re-walking every tombstone.
         let seq_read_cursor = cursors
             .get(LIVE_SEQ_READ_CURSOR.as_bytes())?
-            .and_then(|v| <[u8; 8]>::try_from(v.as_ref()).ok())
-            .map(|b| b.to_vec());
+            .and_then(|v| <[u8; 8]>::try_from(v.as_ref()).ok());
+        // New keys always sort after the read cursor, even when every key
+        // behind it was removed or the partition was wiped, so the forward
+        // scan never has to look behind the cursor.
+        let live_seq_start = seq_read_cursor.map_or(live_seq_start, |b| {
+            live_seq_start.max(u64::from_be_bytes(b).saturating_add(1))
+        });
+        let seq_read_cursor = seq_read_cursor.map(|b| b.to_vec());
         let legacy_drained = cursors.get(LIVE_LEGACY_DRAINED.as_bytes())?.is_some();
 
         Ok(Self {
@@ -449,24 +455,6 @@ impl Storage {
             self.cursors
                 .insert(LIVE_SEQ_READ_CURSOR.as_bytes(), key.as_slice())?;
             *guard = Some(key);
-        } else if results.is_empty() && poisoned.is_empty() {
-            // A wiped-and-recreated partition restarts seq keys from zero; a
-            // persisted cursor from before the wipe would then skip everything.
-            if let Some((first, _)) = self.firehose_live_seq.first_key_value()? {
-                let stale = self
-                    .firehose_live_seq_cursor
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.clone())
-                    .is_some_and(|c| first.as_ref() < c.as_slice());
-                if stale {
-                    tracing::warn!("live seq read cursor is ahead of the partition; resetting");
-                    if let Ok(mut guard) = self.firehose_live_seq_cursor.lock() {
-                        *guard = None;
-                    }
-                    self.cursors.remove(LIVE_SEQ_READ_CURSOR.as_bytes())?;
-                }
-            }
         }
 
         for (key, _) in &results {
@@ -1734,7 +1722,7 @@ mod tests {
         }
         assert_eq!(storage.dequeue_firehose_live_batch(10).unwrap().len(), 3);
         // Simulate the runbook partition wipe: force a cursor far ahead of any
-        // key the recreated partition will produce.
+        // key the recreated partition would otherwise produce.
         storage
             .cursors
             .insert(LIVE_SEQ_READ_CURSOR.as_bytes(), 1_000_000u64.to_be_bytes())
@@ -1745,12 +1733,43 @@ mod tests {
         storage
             .enqueue_firehose_live(&live_job("at://did:plc:a/app.bsky.feed.post/fresh"))
             .unwrap();
-        // Fresh key sorts below the stale cursor: first dequeue detects and
-        // resets, second dequeue returns the job.
-        let first = storage.dequeue_firehose_live_batch(10).unwrap();
-        let second = storage.dequeue_firehose_live_batch(10).unwrap();
-        let total = first.len() + second.len();
-        assert_eq!(total, 1, "job behind a stale cursor must not be skipped");
+        let batch = storage.dequeue_firehose_live_batch(10).unwrap();
+        assert_eq!(
+            batch.len(),
+            1,
+            "job behind a stale cursor must not be skipped"
+        );
+        assert_eq!(batch[0].0, 1_000_001u64.to_be_bytes());
+        assert!(storage.dequeue_firehose_live_batch(10).unwrap().is_empty());
+        drop(dir);
+    }
+
+    #[test]
+    fn drained_queue_resumes_after_reopen() {
+        let dir = TempDir::with_prefix("wintermute_test_").unwrap();
+        let db_path = dir.path().join("test_db");
+        let storage = Storage::new(Some(db_path.clone())).unwrap();
+        for i in 0..3 {
+            storage
+                .enqueue_firehose_live(&live_job(&format!(
+                    "at://did:plc:a/app.bsky.feed.post/d{i}"
+                )))
+                .unwrap();
+        }
+        assert_eq!(storage.dequeue_firehose_live_batch(10).unwrap().len(), 3);
+        assert!(storage.dequeue_firehose_live_batch(10).unwrap().is_empty());
+        drop(storage);
+
+        // Every key is a tombstone, so the partition reports no last key; the
+        // next seq must still continue past the persisted cursor.
+        let storage = Storage::new(Some(db_path)).unwrap();
+        storage
+            .enqueue_firehose_live(&live_job("at://did:plc:a/app.bsky.feed.post/d3"))
+            .unwrap();
+        let batch = storage.dequeue_firehose_live_batch(10).unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].0, 3u64.to_be_bytes());
+        assert_eq!(batch[0].1.uri, "at://did:plc:a/app.bsky.feed.post/d3");
         drop(dir);
     }
 
