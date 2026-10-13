@@ -68,6 +68,22 @@ pub static INGESTER_FIREHOSE_LIVE_LENGTH: LazyLock<IntGauge> = LazyLock::new(|| 
     .unwrap()
 });
 
+pub static STORAGE_LIVE_QUEUE_DISK_BYTES: LazyLock<IntGauge> = LazyLock::new(|| {
+    register_int_gauge!(
+        "storage_live_queue_disk_bytes",
+        "On-disk size of the firehose_live partitions, including tombstones"
+    )
+    .unwrap()
+});
+
+pub static STORAGE_LIVE_QUEUE_COMPACTIONS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "storage_live_queue_compactions_total",
+        "Major compactions run against the drained firehose_live partitions"
+    )
+    .unwrap()
+});
+
 pub static INGESTER_REPO_BACKFILL_LENGTH: LazyLock<IntGauge> = LazyLock::new(|| {
     register_int_gauge!(
         "ingester_repo_backfill_length",

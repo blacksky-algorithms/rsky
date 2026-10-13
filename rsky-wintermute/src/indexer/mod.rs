@@ -25,7 +25,7 @@ use rsky_identity::IdResolver;
 use rsky_identity::types::IdentityResolverOpts;
 use rsky_syntax::aturi::AtUri;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
@@ -84,6 +84,7 @@ pub struct IndexerManager {
     #[cfg_attr(not(test), allow(dead_code))]
     semaphore_backfill: Arc<Semaphore>,
     id_resolver: Arc<IdResolver>,
+    live_compaction_running: Arc<AtomicBool>,
 }
 
 /// Parsed job data for batch processing
@@ -145,6 +146,7 @@ impl IndexerManager {
             // Only backfill gets semaphore; firehose_live and label_live are unbounded
             semaphore_backfill: Arc::new(Semaphore::new(workers)),
             id_resolver: Arc::new(id_resolver),
+            live_compaction_running: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -405,6 +407,7 @@ impl IndexerManager {
             };
 
             if batch.is_empty() {
+                self.maybe_compact_live_queue(*crate::config::LIVE_QUEUE_COMPACT_BYTES);
                 self.storage
                     .wait_for_live_enqueue(Duration::from_millis(50))
                     .await;
@@ -826,6 +829,26 @@ impl IndexerManager {
                 tracing::error!("label task panicked: {e}");
             }
         }
+    }
+
+    /// Once the queue has drained, compact away the dequeue tombstones on a
+    /// blocking thread; at most one compaction runs at a time.
+    fn maybe_compact_live_queue(&self, min_bytes: u64) {
+        crate::metrics::STORAGE_LIVE_QUEUE_DISK_BYTES
+            .set(i64::try_from(self.storage.live_queue_disk_bytes()).unwrap_or(i64::MAX));
+        if !self.storage.live_queue_needs_compaction(min_bytes)
+            || self.live_compaction_running.swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        let storage = Arc::clone(&self.storage);
+        let running = Arc::clone(&self.live_compaction_running);
+        drop(tokio::task::spawn_blocking(move || {
+            if let Err(e) = storage.compact_live_queue() {
+                tracing::error!("live queue compaction failed: {e}");
+            }
+            running.store(false, Ordering::Release);
+        }));
     }
 
     #[cfg(test)]

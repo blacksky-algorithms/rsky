@@ -1615,6 +1615,69 @@ mod indexer_tests {
     // Tests for new helper functions
 
     #[tokio::test]
+    async fn test_compacts_live_queue_only_when_drained_and_idle() {
+        let (storage, _dir) = setup_test_storage();
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
+        });
+        let manager = IndexerManager::new(Arc::new(storage), &database_url).unwrap();
+        for i in 0..20 {
+            let job = crate::types::IndexJob {
+                uri: format!("at://did:plc:test/app.bsky.feed.post/compact{i}"),
+                cid: "bafytest".to_owned(),
+                action: WriteAction::Create,
+                record: Some(serde_json::json!({"text": "test"})),
+                indexed_at: "2024-01-01T00:00:00Z".to_owned(),
+                rev: "test".to_owned(),
+                provenance: None,
+            };
+            manager.storage.enqueue_firehose_live(&job).unwrap();
+        }
+        manager.storage.flush_live_queue().unwrap();
+
+        manager.maybe_compact_live_queue(1);
+        assert!(
+            !manager
+                .live_compaction_running
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        assert!(manager.storage.live_queue_disk_bytes() > 0);
+
+        assert_eq!(
+            manager
+                .storage
+                .dequeue_firehose_live_batch(100)
+                .unwrap()
+                .len(),
+            20
+        );
+        manager.storage.flush_live_queue().unwrap();
+        manager
+            .live_compaction_running
+            .store(true, std::sync::atomic::Ordering::Release);
+        manager.maybe_compact_live_queue(1);
+        tokio::task::yield_now().await;
+        assert!(
+            manager
+                .live_compaction_running
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        assert!(manager.storage.live_queue_disk_bytes() > 0);
+        manager
+            .live_compaction_running
+            .store(false, std::sync::atomic::Ordering::Release);
+
+        manager.maybe_compact_live_queue(1);
+        while manager
+            .live_compaction_running
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(manager.storage.live_queue_disk_bytes(), 0);
+    }
+
+    #[tokio::test]
     async fn test_update_queue_metrics() {
         let (storage, _dir) = setup_test_storage();
         let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {

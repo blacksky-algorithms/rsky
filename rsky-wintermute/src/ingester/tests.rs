@@ -1262,6 +1262,41 @@ mod ingester_tests {
             );
             delete_actor(&pool, did).await;
         }
+
+        #[tokio::test]
+        async fn releases_handle_held_by_another_actor() {
+            let pool = setup_test_pool();
+            let previous = "did:plc:wintermute-test-identity-previous";
+            let current = "did:plc:wintermute-test-identity-current";
+            delete_actor(&pool, previous).await;
+            delete_actor(&pool, current).await;
+            let client = pool.get().await.unwrap();
+            client
+                .execute(
+                    "INSERT INTO actor (did, handle, \"indexedAt\") \
+                     VALUES ($1, 'identity-moved.test', '2026-01-01T00:00:00.000Z')",
+                    &[&previous],
+                )
+                .await
+                .unwrap();
+
+            IngesterManager::process_identity_event(
+                &pool,
+                current,
+                "2026-07-29T12:00:00.000Z",
+                Some("identity-moved.test"),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(
+                read_handle(&pool, current).await,
+                Some(Some("identity-moved.test".to_owned()))
+            );
+            assert_eq!(read_handle(&pool, previous).await, Some(None));
+            delete_actor(&pool, previous).await;
+            delete_actor(&pool, current).await;
+        }
     }
 
     mod pds_verification {

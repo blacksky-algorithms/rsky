@@ -1017,15 +1017,29 @@ impl IngesterManager {
 
         // Identity events arrive before any commit for brand-new accounts,
         // so an update-only write would drop the handle the event carries.
-        let client = pool.get().await?;
-        client
-            .execute(
-                "INSERT INTO actor (did, handle, \"indexedAt\") VALUES ($1, $2, $3) \
-                 ON CONFLICT (did) DO UPDATE SET handle = EXCLUDED.handle, \
-                 \"indexedAt\" = EXCLUDED.\"indexedAt\"",
-                &[&did, &handle, &timestamp],
-            )
-            .await?;
+        // A handle that moved between accounts is still on the old row until
+        // its own identity event arrives, so release it first.
+        let mut client = pool.get().await?;
+        let txn = client.transaction().await?;
+        if let Some(ref h) = handle {
+            let released = txn
+                .execute(
+                    "UPDATE actor SET handle = NULL WHERE handle = $1 AND did != $2",
+                    &[&h, &did],
+                )
+                .await?;
+            if released > 0 {
+                tracing::info!("released handle {} from a previous account for {}", h, did);
+            }
+        }
+        txn.execute(
+            "INSERT INTO actor (did, handle, \"indexedAt\") VALUES ($1, $2, $3) \
+             ON CONFLICT (did) DO UPDATE SET handle = EXCLUDED.handle, \
+             \"indexedAt\" = EXCLUDED.\"indexedAt\"",
+            &[&did, &handle, &timestamp],
+        )
+        .await?;
+        txn.commit().await?;
 
         tracing::info!(
             "upserted handle for {} to {:?}",
