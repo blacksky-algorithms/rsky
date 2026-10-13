@@ -474,7 +474,7 @@ async fn ordinary_reconcile_removes_phantoms_and_restores_missing_records() {
         .await
         .unwrap();
     assert_eq!(stored_revs(&pool, did).await.len(), 2);
-    let newer = format!("{}z", &rev[..rev.len() - 1]);
+    let newer = rsky_common::tid::TID::next_str(Some(rev.clone())).unwrap();
     let stale_generation = job(
         &repo.uri("ccc"),
         "bafynew",
@@ -613,7 +613,7 @@ async fn newer_downstream_needs_reset_to_repo() {
     reset_actor(&pool, did).await;
     let repo = TestRepo::create(did, &[("aaa", "one"), ("bbb", "two")]).await;
     let rev = repo.rev();
-    let newer = format!("{}z", &rev[..rev.len() - 1]);
+    let newer = rsky_common::tid::TID::next_str(Some(rev.clone())).unwrap();
     // downstream holds a phantom and a differing value both newer than the
     // repository, and the frontier says a newer revision was published, so
     // the missing record bbb may be a newer deletion
