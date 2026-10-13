@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -17,12 +17,15 @@ use rsky_wintermute::backfiller::BackfillerManager;
 use rsky_wintermute::indexer::IndexerManager;
 use rsky_wintermute::ingester::IngesterManager;
 use rsky_wintermute::metrics;
+use rsky_wintermute::shutdown;
 use rsky_wintermute::storage::Storage;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
 const SLEEP: Duration = Duration::from_millis(10);
+// Below systemd's 90s TimeoutStopSec so a stuck join never ends in SIGKILL.
+const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(60);
 
 #[derive(Debug, clap::Parser)]
 pub struct Args {
@@ -89,6 +92,7 @@ fn main() -> Result<()> {
     let indexer = IndexerManager::new(Arc::clone(&storage), &args.database_url)?;
 
     let metrics_port = args.metrics_port;
+    let deadline_storage = Arc::clone(&storage);
 
     thread::scope(move |s| {
         let handles = vec![
@@ -136,11 +140,25 @@ fn main() -> Result<()> {
         tracing::info!("shutting down");
         SHUTDOWN.store(true, Ordering::Relaxed);
 
+        let joined = Arc::new(AtomicBool::new(false));
+        let deadline =
+            shutdown::spawn_deadline(SHUTDOWN_DEADLINE, Arc::clone(&joined), move || {
+                tracing::error!(
+                    "shutdown exceeded {SHUTDOWN_DEADLINE:?}; persisting storage and exiting"
+                );
+                if let Err(e) = deadline_storage.persist() {
+                    tracing::error!("storage persist before forced exit failed: {e}");
+                }
+                std::process::exit(0);
+            });
+
         for handle in handles {
             if let Ok(res) = handle.join() {
                 res?;
             }
         }
+        joined.store(true, Ordering::Relaxed);
+        drop(deadline);
 
         tracing::info!("goodbye for now");
         Ok(())

@@ -195,9 +195,6 @@ impl IndexerManager {
     }
 
     async fn process_handle_resolution_loop(&self) {
-        type HandleFuture =
-            std::pin::Pin<Box<dyn std::future::Future<Output = Option<bool>> + Send>>;
-
         let max_concurrent = *HANDLE_RESOLUTION_CONCURRENCY;
         tracing::info!(
             "handle resolution processor started (concurrency={max_concurrent}, batch={})",
@@ -236,53 +233,29 @@ impl IndexerManager {
                 .to_string();
             let id_resolver = Arc::clone(&self.id_resolver);
             let pool = self.pool_labels.clone();
-
-            // Process handles in parallel using FuturesUnordered with boxed futures
-            let mut in_flight: FuturesUnordered<HandleFuture> = FuturesUnordered::new();
-            let mut pending_dids = dids_to_resolve.into_iter();
-            let mut resolved_count = 0usize;
-
-            let make_future = |pool: Pool,
-                               id_resolver: Arc<IdResolver>,
-                               did: String,
-                               timestamp: String|
-             -> HandleFuture {
-                Box::pin(async move {
+            let resolve = move |did: String| {
+                let pool = pool.clone();
+                let id_resolver = Arc::clone(&id_resolver);
+                let timestamp = timestamp.clone();
+                async move {
                     let client = pool.get().await.ok()?;
                     Self::index_handle(&client, &id_resolver, &did, &timestamp, false)
                         .await
                         .ok()
-                })
+                }
             };
 
-            // Seed initial batch of concurrent tasks
-            for did in pending_dids.by_ref().take(max_concurrent) {
-                in_flight.push(make_future(
-                    pool.clone(),
-                    Arc::clone(&id_resolver),
-                    did,
-                    timestamp.clone(),
-                ));
-            }
-
-            // Process results and spawn new tasks as slots free up
-            while let Some(result) = in_flight.next().await {
-                if result == Some(true) {
-                    resolved_count += 1;
-                }
-
-                // Spawn next task if there are more DIDs
-                if let Some(did) = pending_dids.next() {
-                    in_flight.push(make_future(
-                        pool.clone(),
-                        Arc::clone(&id_resolver),
-                        did,
-                        timestamp.clone(),
-                    ));
-                }
-            }
-
+            let (resolved_count, stopped) = Self::drive_handle_resolution_batch(
+                dids_to_resolve,
+                max_concurrent,
+                resolve,
+                || SHUTDOWN.load(Ordering::Relaxed),
+            )
+            .await;
             total_resolved += resolved_count as u64;
+            if stopped {
+                continue;
+            }
 
             // Log progress every 10 batches or when handles are resolved
             if batch_count % 10 == 1 || resolved_count > 0 {
@@ -294,6 +267,45 @@ impl IndexerManager {
             // Small delay between batches to avoid overwhelming the system
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    }
+
+    /// Resolve `dids` with at most `max_concurrent` in flight. Returns how many
+    /// resolved and whether `stop` cut the batch short; a stopped batch drops
+    /// its in-flight resolutions instead of waiting for them.
+    async fn drive_handle_resolution_batch<F, Fut>(
+        dids: Vec<String>,
+        max_concurrent: usize,
+        resolve: F,
+        stop: impl Fn() -> bool + Send,
+    ) -> (usize, bool)
+    where
+        F: Fn(String) -> Fut + Send,
+        Fut: std::future::Future<Output = Option<bool>> + Send,
+    {
+        let mut in_flight: FuturesUnordered<Fut> = FuturesUnordered::new();
+        let mut pending = dids.into_iter();
+        let mut resolved = 0usize;
+
+        for did in pending.by_ref().take(max_concurrent) {
+            in_flight.push(resolve(did));
+        }
+
+        while let Some(result) = in_flight.next().await {
+            if result == Some(true) {
+                resolved += 1;
+            }
+            if stop() {
+                tracing::info!(
+                    "handle resolution batch interrupted, dropping {} in-flight resolutions",
+                    in_flight.len()
+                );
+                return (resolved, true);
+            }
+            if let Some(did) = pending.next() {
+                in_flight.push(resolve(did));
+            }
+        }
+        (resolved, false)
     }
 
     async fn get_actors_needing_handle_resolution(&self) -> Result<Vec<String>, WintermuteError> {

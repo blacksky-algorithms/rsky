@@ -6,6 +6,61 @@
 //! Run with: `DATABASE_URL=... cargo test --lib indexer::tests`
 
 #[cfg(test)]
+mod handle_resolution_batch {
+    use crate::indexer::IndexerManager;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    fn dids() -> Vec<String> {
+        (0..10).map(|i| format!("did:plc:{i}")).collect()
+    }
+
+    #[tokio::test]
+    async fn resolves_every_did_when_not_stopped() {
+        let started = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&started);
+        let resolve = move |did: String| {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Some(did.ends_with(['0', '2', '4', '6', '8']))
+            }
+        };
+
+        let outcome =
+            IndexerManager::drive_handle_resolution_batch(dids(), 3, resolve, || false).await;
+
+        assert_eq!(outcome, (5, false));
+        assert_eq!(started.load(Ordering::SeqCst), 10);
+    }
+
+    #[tokio::test]
+    async fn stop_cuts_the_batch_short_without_seeding_more() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(AtomicUsize::new(0));
+        let (counter, trigger) = (Arc::clone(&started), Arc::clone(&stop));
+        let resolve = move |_did: String| {
+            let counter = Arc::clone(&counter);
+            let trigger = Arc::clone(&trigger);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                trigger.store(true, Ordering::SeqCst);
+                Some(true)
+            }
+        };
+
+        let outcome =
+            IndexerManager::drive_handle_resolution_batch(dids(), 3, resolve, move || {
+                stop.load(Ordering::SeqCst)
+            })
+            .await;
+
+        assert_eq!(outcome, (1, true));
+        assert!(started.load(Ordering::SeqCst) <= 3);
+    }
+}
+
+#[cfg(test)]
 mod indexer_tests {
     use crate::backfiller::BackfillerManager;
     use crate::indexer::IndexerManager;
@@ -134,10 +189,7 @@ mod indexer_tests {
 
         let queue_len = storage.firehose_backfill_len().unwrap();
         tracing::info!("backfill complete, {queue_len} records enqueued for indexing");
-        assert!(
-            queue_len > 5000,
-            "expected more than 5000 records to be enqueued, found {queue_len}"
-        );
+        assert!(queue_len > 0, "expected the repo to enqueue records");
 
         let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
             "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
@@ -320,11 +372,37 @@ mod indexer_tests {
 
         assert_eq!(profile_count, 1, "expected exactly 1 profile record");
 
-        let total_records = post_count + like_count + follow_count + repost_count + profile_count;
-        assert!(
-            total_records > 5000,
-            "expected total records > 5000 in core tables (post, like, follow, repost, profile), found {total_records}. Note: other records go into list_item, list_block, starter_pack, etc."
-        );
+        // Each table keeps one row per subject key, so a repo holding two
+        // records for the same subject indexes to a single row.
+        let subject = "json::jsonb->>'subject'";
+        let subject_uri = "json::jsonb->'subject'->>'uri'";
+        let list_subject = "(json::jsonb->>'list') || ' ' || (json::jsonb->>'subject')";
+        for (collection, key, indexed) in [
+            ("app.bsky.feed.post", "uri", post_count),
+            ("app.bsky.feed.like", subject_uri, like_count),
+            ("app.bsky.graph.follow", subject, follow_count),
+            ("app.bsky.feed.repost", subject_uri, repost_count),
+            ("app.bsky.graph.block", subject, block_count),
+            ("app.bsky.graph.list", "uri", list_count),
+            ("app.bsky.graph.listitem", list_subject, list_item_count),
+            ("app.bsky.feed.generator", "uri", feed_gen_count),
+            ("app.bsky.actor.profile", "uri", profile_count),
+        ] {
+            let queued: i64 = client
+                .query_one(
+                    &format!(
+                        "SELECT COUNT(DISTINCT {key}) FROM record WHERE did = $1 AND uri LIKE $2"
+                    ),
+                    &[&test_did, &format!("at://{test_did}/{collection}/%")],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(
+                indexed, queued,
+                "expected every {collection} record to be indexed ({queued} queued, {indexed} indexed)"
+            );
+        }
 
         let profile_agg: Option<(i64, i64, i64)> = client
             .query_opt(

@@ -44,6 +44,7 @@ pub mod ingester;
 pub mod metrics;
 pub mod outbound;
 pub mod reconcile;
+pub mod shutdown;
 pub mod storage;
 pub mod types;
 
