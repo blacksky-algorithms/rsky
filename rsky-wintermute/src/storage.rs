@@ -189,6 +189,12 @@ impl Storage {
         })
     }
 
+    /// Flush and fsync the journal so an immediate process exit loses nothing.
+    pub fn persist(&self) -> Result<(), WintermuteError> {
+        self.db.persist(fjall::PersistMode::SyncAll)?;
+        Ok(())
+    }
+
     pub fn write_firehose_event(
         &self,
         seq: i64,
@@ -1096,6 +1102,12 @@ mod tests {
         let db_path = temp_dir.path().join("test_db");
         let storage = Storage::new(Some(db_path)).unwrap();
         (storage, temp_dir)
+    }
+
+    #[test]
+    fn persist_flushes_without_error() {
+        let (storage, _dir) = setup_test_storage();
+        storage.persist().unwrap();
     }
 
     #[test]

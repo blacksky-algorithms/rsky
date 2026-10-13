@@ -6,6 +6,61 @@
 //! Run with: `DATABASE_URL=... cargo test --lib indexer::tests`
 
 #[cfg(test)]
+mod handle_resolution_batch {
+    use crate::indexer::IndexerManager;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    fn dids() -> Vec<String> {
+        (0..10).map(|i| format!("did:plc:{i}")).collect()
+    }
+
+    #[tokio::test]
+    async fn resolves_every_did_when_not_stopped() {
+        let started = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&started);
+        let resolve = move |did: String| {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Some(did.ends_with(['0', '2', '4', '6', '8']))
+            }
+        };
+
+        let outcome =
+            IndexerManager::drive_handle_resolution_batch(dids(), 3, resolve, || false).await;
+
+        assert_eq!(outcome, (5, false));
+        assert_eq!(started.load(Ordering::SeqCst), 10);
+    }
+
+    #[tokio::test]
+    async fn stop_cuts_the_batch_short_without_seeding_more() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(AtomicUsize::new(0));
+        let (counter, trigger) = (Arc::clone(&started), Arc::clone(&stop));
+        let resolve = move |_did: String| {
+            let counter = Arc::clone(&counter);
+            let trigger = Arc::clone(&trigger);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                trigger.store(true, Ordering::SeqCst);
+                Some(true)
+            }
+        };
+
+        let outcome =
+            IndexerManager::drive_handle_resolution_batch(dids(), 3, resolve, move || {
+                stop.load(Ordering::SeqCst)
+            })
+            .await;
+
+        assert_eq!(outcome, (1, true));
+        assert!(started.load(Ordering::SeqCst) <= 3);
+    }
+}
+
+#[cfg(test)]
 mod indexer_tests {
     use crate::backfiller::BackfillerManager;
     use crate::indexer::IndexerManager;
