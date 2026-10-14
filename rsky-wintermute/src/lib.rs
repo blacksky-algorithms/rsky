@@ -37,6 +37,7 @@
 )]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod actor_handle;
 pub mod backfiller;
 pub mod config;
 pub mod indexer;

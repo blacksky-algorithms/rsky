@@ -240,8 +240,8 @@ impl IndexerManager {
                 let id_resolver = Arc::clone(&id_resolver);
                 let timestamp = timestamp.clone();
                 async move {
-                    let client = pool.get().await.ok()?;
-                    Self::index_handle(&client, &id_resolver, &did, &timestamp, false)
+                    let mut client = pool.get().await.ok()?;
+                    Self::index_handle(&mut client, &id_resolver, &did, &timestamp, false)
                         .await
                         .ok()
                 }
@@ -1026,7 +1026,7 @@ impl IndexerManager {
     /// Resolve and verify a handle for a DID, updating the actor table.
     /// Returns true if handle was successfully resolved and stored.
     pub async fn index_handle(
-        client: &deadpool_postgres::Client,
+        client: &mut deadpool_postgres::Client,
         id_resolver: &Arc<IdResolver>,
         did: &str,
         timestamp: &str,
@@ -1131,27 +1131,13 @@ impl IndexerManager {
             None
         };
 
-        // Handle contention: if another actor has this handle, remove it
-        if let Some(ref h) = verified_handle {
-            client
-                .execute(
-                    "UPDATE actor SET handle = NULL WHERE handle = $1 AND did != $2",
-                    &[&h, &did],
-                )
-                .await?;
-        }
-
-        // Update actor with handle
-        client
-            .execute(
-                "INSERT INTO actor (did, handle, \"indexedAt\")
-                 VALUES ($1, $2, $3)
-                 ON CONFLICT (did) DO UPDATE SET
-                   handle = EXCLUDED.handle,
-                   \"indexedAt\" = EXCLUDED.\"indexedAt\"",
-                &[&did, &verified_handle, &timestamp],
-            )
-            .await?;
+        crate::actor_handle::upsert_actor_handle(
+            client,
+            did,
+            verified_handle.as_deref(),
+            timestamp,
+        )
+        .await?;
 
         Ok(verified_handle.is_some())
     }
