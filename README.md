@@ -24,7 +24,7 @@
 
 rsky (/ˈrɪski/) is a full implementation of AT Protocol in Rust. Most of the code is general purpose. Some of it, like rsky-feedgen, is written for the needs of the Blacksky community.
 
-We wrote it so that Black folks and any other community on the network can run their own infrastructure, moderate on their own terms, and leave if they ever need to. A second implementation of the protocol is how that stays possible.
+We developed rsky so that any community on the network can run their own infrastructure, moderate on their own terms, and leave if they ever need to. A second implementation of the protocol is how that stays possible.
 
 > [!WARNING]
 > This is a work in progress. Things change, things are incomplete, and things break. Until 1.0.0 we make no stability promises.
@@ -53,7 +53,7 @@ We wrote it so that Black folks and any other community on the network can run t
 - `rsky-feedgen`: Feed generator, built around the Blacksky community's feeds.
 - `rsky-labeler`: Firehose consumer that labels content for moderation.
 - `rsky-wintermute`: Indexer and backfiller for the app view.
-- `rsky-space-host`: Authority for a permissioned space. It issues space credentials, manages the space, and routes write notifications to members.
+- `rsky-space` and `rsky-space-host`: Permissioned spaces. Access controlled or private records that only members can read.
 - `rsky-daemon`: Syncer for permissioned data. It pulls each member's permissioned repo from their PDS, verifies it, and indexes it so a space can be read as one whole.
 - `rsky-video`: Video processing and serving.
 - `rsky-satnav`: "Structured Archive Traversal, Navigation & Verification." Explores DASL CAR files and AT Protocol repos.
@@ -61,7 +61,6 @@ We wrote it so that Black folks and any other community on the network can run t
 **Libraries** (used by the services above):
 
 - `rsky-oauth`: OAuth provider core. JOSE, JWK and DPoP for AT Protocol services.
-- `rsky-space`: Permissioned-data primitives. LtHash commits, credentials and space repos, so community-only records can be read by members and nobody else.
 
 **Lexicons** (`/lexicons`): Lexicon definitions for the parts of the protocol we extend, such as spaces.
 
