@@ -2,6 +2,8 @@ use crate::config::{BLOCK_SIZE, CACHE_SIZE, FSYNC_MS, MEMTABLE_SIZE, WRITE_BUFFE
 
 const LIVE_SEQ_READ_CURSOR: &str = "live_seq_read";
 const LIVE_LEGACY_DRAINED: &str = "live_legacy_drained";
+// fjall's snapshot tracker safety gap: GC runs on every 50th closed snapshot.
+const SNAPSHOT_GC_INTERVAL: usize = 50;
 use crate::types::{BackfillJob, FirehoseEvent, IndexJob, WintermuteError};
 use fjall::{Config, Keyspace, PartitionCreateOptions, PartitionHandle};
 use heed::types::Bytes;
@@ -328,10 +330,10 @@ impl Storage {
     // Firehose live queue (from ingester); keys are monotonic so dequeue order
     // is arrival order and the read cursor never revisits tombstones.
     pub fn enqueue_firehose_live(&self, job: &IndexJob) -> Result<(), WintermuteError> {
-        let seq = self.live_seq_next.fetch_add(1, Ordering::Relaxed);
         let mut value = Vec::new();
         ciborium::into_writer(job, &mut value)
             .map_err(|e| WintermuteError::Serialization(format!("failed to serialize job: {e}")))?;
+        let seq = self.live_seq_next.fetch_add(1, Ordering::Relaxed);
         self.firehose_live_seq
             .insert(seq.to_be_bytes(), value.as_slice())?;
         crate::metrics::INGESTER_FIREHOSE_LIVE_LENGTH.inc();
@@ -994,8 +996,89 @@ impl Storage {
         Ok(self.repo_backfill.len()?)
     }
 
+    /// Keys are gap-free and removed in order, so the unread count is the
+    /// distance from the read cursor to the next sequence number; the legacy
+    /// partition is only scanned until it has drained.
     pub fn firehose_live_len(&self) -> Result<usize, WintermuteError> {
-        Ok(self.firehose_live.len()? + self.firehose_live_seq.len()?)
+        let legacy = if self.legacy_live_drained.load(Ordering::Relaxed) {
+            0
+        } else {
+            self.firehose_live.len()?
+        };
+        Ok(legacy + self.live_seq_len())
+    }
+
+    fn live_seq_len(&self) -> usize {
+        let unread_from = self
+            .firehose_live_seq_cursor
+            .lock()
+            .map_or(None, |c| c.clone())
+            .and_then(|k| <[u8; 8]>::try_from(k.as_slice()).ok())
+            .map_or(0, |b| u64::from_be_bytes(b).saturating_add(1));
+        let next = self.live_seq_next.load(Ordering::Relaxed);
+        usize::try_from(next.saturating_sub(unread_from)).unwrap_or(usize::MAX)
+    }
+
+    /// Flush the live partitions to segments and move the sequence number
+    /// past the watermark safety gap so the next compaction sees every
+    /// write made so far as collectable.
+    #[cfg(test)]
+    pub fn flush_live_queue(&self) -> Result<(), WintermuteError> {
+        self.firehose_live.rotate_memtable_and_wait()?;
+        self.firehose_live_seq.rotate_memtable_and_wait()?;
+        for i in 0..SNAPSHOT_GC_INTERVAL {
+            self.cursors
+                .insert(b"live_queue_test_scratch", (i as u64).to_be_bytes())?;
+        }
+        self.advance_snapshot_watermark();
+        Ok(())
+    }
+
+    /// lsm-tree only discards a key's shadowed versions below the keyspace
+    /// snapshot watermark, and fjall moves that watermark only on every
+    /// `SNAPSHOT_GC_INTERVAL`th closed snapshot. Plain reads never open one,
+    /// so without this a major compaction would drop the dequeue tombstones
+    /// in the last level and resurrect every value beneath them.
+    fn advance_snapshot_watermark(&self) {
+        for _ in 0..2 * SNAPSHOT_GC_INTERVAL {
+            drop(self.cursors.snapshot());
+        }
+    }
+
+    pub fn live_queue_disk_bytes(&self) -> u64 {
+        self.firehose_live.disk_space() + self.firehose_live_seq.disk_space()
+    }
+
+    /// True when nothing is left to dequeue and the on-disk live partitions
+    /// hold at least `min_bytes`, which at that point is almost entirely
+    /// removal tombstones.
+    pub fn live_queue_needs_compaction(&self, min_bytes: u64) -> bool {
+        self.firehose_live_len().unwrap_or(usize::MAX) == 0
+            && self.live_queue_disk_bytes() >= min_bytes
+    }
+
+    /// Leveled compaction only discards tombstones in the last level, so a
+    /// drained queue otherwise keeps every removal on disk until the lower
+    /// levels overflow, and every full scan has to walk past all of them.
+    pub fn compact_live_queue(&self) -> Result<(), WintermuteError> {
+        self.advance_snapshot_watermark();
+        for partition in [&self.firehose_live, &self.firehose_live_seq] {
+            if partition.segment_count() == 0 {
+                continue;
+            }
+            let before_bytes = partition.disk_space();
+            let start = std::time::Instant::now();
+            partition.major_compact()?;
+            tracing::info!(
+                partition = %partition.name,
+                before_bytes,
+                after_bytes = partition.disk_space(),
+                elapsed_ms = start.elapsed().as_millis(),
+                "live queue partition compacted"
+            );
+        }
+        crate::metrics::STORAGE_LIVE_QUEUE_COMPACTIONS_TOTAL.inc();
+        Ok(())
     }
 
     pub fn firehose_backfill_len(&self) -> Result<usize, WintermuteError> {
@@ -1682,6 +1765,59 @@ mod tests {
     }
 
     #[test]
+    fn live_len_tracks_unread_keys_across_reopen() {
+        let dir = TempDir::with_prefix("wintermute_test_").unwrap();
+        let db_path = dir.path().join("test_db");
+        let storage = Storage::new(Some(db_path.clone())).unwrap();
+        for i in 0..5 {
+            let uri = format!("at://did:plc:a/app.bsky.feed.post/r{i}");
+            storage.enqueue_firehose_live(&live_job(&uri)).unwrap();
+        }
+        assert_eq!(storage.firehose_live_len().unwrap(), 5);
+        assert_eq!(storage.dequeue_firehose_live_batch(2).unwrap().len(), 2);
+        assert_eq!(storage.firehose_live_len().unwrap(), 3);
+        storage.persist().unwrap();
+        drop(storage);
+
+        let storage = Storage::new(Some(db_path)).unwrap();
+        assert_eq!(storage.firehose_live_len().unwrap(), 3);
+        assert_eq!(storage.dequeue_firehose_live_batch(10).unwrap().len(), 3);
+        assert_eq!(storage.firehose_live_len().unwrap(), 0);
+        assert!(storage.dequeue_firehose_live_batch(10).unwrap().is_empty());
+        assert_eq!(storage.firehose_live_len().unwrap(), 0);
+    }
+
+    #[test]
+    fn compaction_drops_tombstones_only_once_drained() {
+        let (storage, _dir) = setup_test_storage();
+        for i in 0..50 {
+            let uri = format!("at://did:plc:a/app.bsky.feed.post/r{i}");
+            storage.enqueue_firehose_live(&live_job(&uri)).unwrap();
+        }
+        storage.flush_live_queue().unwrap();
+        assert!(storage.live_queue_disk_bytes() > 0);
+        assert!(!storage.live_queue_needs_compaction(1));
+
+        assert_eq!(storage.dequeue_firehose_live_batch(100).unwrap().len(), 50);
+        storage.flush_live_queue().unwrap();
+        assert!(storage.live_queue_needs_compaction(1));
+        assert!(!storage.live_queue_needs_compaction(u64::MAX));
+        assert_eq!(storage.firehose_live.segment_count(), 0);
+
+        storage.compact_live_queue().unwrap();
+        assert_eq!(storage.firehose_live_seq.segment_count(), 0);
+        assert_eq!(storage.live_queue_disk_bytes(), 0);
+        assert!(!storage.live_queue_needs_compaction(1));
+
+        storage
+            .enqueue_firehose_live(&live_job("at://did:plc:a/app.bsky.feed.post/after"))
+            .unwrap();
+        let next = storage.dequeue_firehose_live_batch(10).unwrap();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].1.uri, "at://did:plc:a/app.bsky.feed.post/after");
+    }
+
+    #[test]
     fn live_seq_read_cursor_persists_across_reopen() {
         let dir = TempDir::with_prefix("wintermute_test_").unwrap();
         let db_path = dir.path().join("test_db");
@@ -1777,11 +1913,8 @@ mod tests {
     fn live_queue_dequeues_in_arrival_order() {
         let (storage, _dir) = setup_test_storage();
         for i in 0..5 {
-            storage
-                .enqueue_firehose_live(&live_job(&format!(
-                    "at://did:plc:a/app.bsky.feed.post/r{i}"
-                )))
-                .unwrap();
+            let uri = format!("at://did:plc:a/app.bsky.feed.post/r{i}");
+            storage.enqueue_firehose_live(&live_job(&uri)).unwrap();
         }
         let batch = storage.dequeue_firehose_live_batch(10).unwrap();
         assert_eq!(batch.len(), 5);

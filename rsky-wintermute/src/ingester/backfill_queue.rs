@@ -85,7 +85,9 @@ pub async fn populate_backfill_queue(
     let cursor_key = format!("backfill_enum:{relay_host}");
 
     // Get cursor from cursor store (postgres survives Fjall corruption)
-    let stored_cursor = cursor_store.get(&cursor_key).await?;
+    // Only positive integers are real cursors: PDS hosts page with opaque
+    // strings that cannot be stored, and resuming from 0 is rejected upstream.
+    let stored_cursor = cursor_store.get(&cursor_key).await?.filter(|c| *c > 0);
 
     // Check if Fjall was lost: cursor exists but repo_backfill queue is empty
     // This means DIDs were enumerated but the queue data was lost
@@ -161,9 +163,9 @@ pub async fn populate_backfill_queue(
 
         if let Some(next_cursor) = list_response.cursor {
             // Store cursor (survives Fjall corruption when using postgres)
-            cursor_store
-                .set(&cursor_key, next_cursor.parse::<i64>().unwrap_or(0))
-                .await?;
+            if let Ok(numeric) = next_cursor.parse::<i64>() {
+                cursor_store.set(&cursor_key, numeric).await?;
+            }
             cursor = Some(next_cursor.clone());
 
             // Log every 10K repos

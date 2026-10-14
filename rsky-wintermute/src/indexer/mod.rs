@@ -25,7 +25,7 @@ use rsky_identity::IdResolver;
 use rsky_identity::types::IdentityResolverOpts;
 use rsky_syntax::aturi::AtUri;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
@@ -84,6 +84,7 @@ pub struct IndexerManager {
     #[cfg_attr(not(test), allow(dead_code))]
     semaphore_backfill: Arc<Semaphore>,
     id_resolver: Arc<IdResolver>,
+    live_compaction_running: Arc<AtomicBool>,
 }
 
 /// Parsed job data for batch processing
@@ -145,6 +146,7 @@ impl IndexerManager {
             // Only backfill gets semaphore; firehose_live and label_live are unbounded
             semaphore_backfill: Arc::new(Semaphore::new(workers)),
             id_resolver: Arc::new(id_resolver),
+            live_compaction_running: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -238,8 +240,8 @@ impl IndexerManager {
                 let id_resolver = Arc::clone(&id_resolver);
                 let timestamp = timestamp.clone();
                 async move {
-                    let client = pool.get().await.ok()?;
-                    Self::index_handle(&client, &id_resolver, &did, &timestamp, false)
+                    let mut client = pool.get().await.ok()?;
+                    Self::index_handle(&mut client, &id_resolver, &did, &timestamp, false)
                         .await
                         .ok()
                 }
@@ -405,6 +407,7 @@ impl IndexerManager {
             };
 
             if batch.is_empty() {
+                self.maybe_compact_live_queue(*crate::config::LIVE_QUEUE_COMPACT_BYTES);
                 self.storage
                     .wait_for_live_enqueue(Duration::from_millis(50))
                     .await;
@@ -828,6 +831,26 @@ impl IndexerManager {
         }
     }
 
+    /// Once the queue has drained, compact away the dequeue tombstones on a
+    /// blocking thread; at most one compaction runs at a time.
+    fn maybe_compact_live_queue(&self, min_bytes: u64) {
+        crate::metrics::STORAGE_LIVE_QUEUE_DISK_BYTES
+            .set(i64::try_from(self.storage.live_queue_disk_bytes()).unwrap_or(i64::MAX));
+        if !self.storage.live_queue_needs_compaction(min_bytes)
+            || self.live_compaction_running.swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        let storage = Arc::clone(&self.storage);
+        let running = Arc::clone(&self.live_compaction_running);
+        drop(tokio::task::spawn_blocking(move || {
+            if let Err(e) = storage.compact_live_queue() {
+                tracing::error!("live queue compaction failed: {e}");
+            }
+            running.store(false, Ordering::Release);
+        }));
+    }
+
     #[cfg(test)]
     fn update_queue_metrics(&self) {
         Self::update_queue_metrics_for(&self.storage);
@@ -1003,7 +1026,7 @@ impl IndexerManager {
     /// Resolve and verify a handle for a DID, updating the actor table.
     /// Returns true if handle was successfully resolved and stored.
     pub async fn index_handle(
-        client: &deadpool_postgres::Client,
+        client: &mut deadpool_postgres::Client,
         id_resolver: &Arc<IdResolver>,
         did: &str,
         timestamp: &str,
@@ -1108,27 +1131,13 @@ impl IndexerManager {
             None
         };
 
-        // Handle contention: if another actor has this handle, remove it
-        if let Some(ref h) = verified_handle {
-            client
-                .execute(
-                    "UPDATE actor SET handle = NULL WHERE handle = $1 AND did != $2",
-                    &[&h, &did],
-                )
-                .await?;
-        }
-
-        // Update actor with handle
-        client
-            .execute(
-                "INSERT INTO actor (did, handle, \"indexedAt\")
-                 VALUES ($1, $2, $3)
-                 ON CONFLICT (did) DO UPDATE SET
-                   handle = EXCLUDED.handle,
-                   \"indexedAt\" = EXCLUDED.\"indexedAt\"",
-                &[&did, &verified_handle, &timestamp],
-            )
-            .await?;
+        crate::actor_handle::upsert_actor_handle(
+            client,
+            did,
+            verified_handle.as_deref(),
+            timestamp,
+        )
+        .await?;
 
         Ok(verified_handle.is_some())
     }

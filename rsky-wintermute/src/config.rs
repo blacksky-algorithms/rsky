@@ -150,6 +150,15 @@ pub static LIVE_AGGREGATES: LazyLock<bool> = LazyLock::new(|| {
         .unwrap_or(true)
 });
 
+/// On-disk size of the drained `firehose_live` partitions that triggers a
+/// major compaction of their tombstones.
+pub static LIVE_QUEUE_COMPACT_BYTES: LazyLock<u64> = LazyLock::new(|| {
+    std::env::var("LIVE_QUEUE_COMPACT_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4 * 1024 * 1024 * 1024)
+});
+
 /// Jobs drained from the `firehose_live` queue per indexing batch.
 pub static FIREHOSE_LIVE_DRAIN_BATCH: LazyLock<usize> = LazyLock::new(|| {
     std::env::var("FIREHOSE_LIVE_DRAIN_BATCH")
