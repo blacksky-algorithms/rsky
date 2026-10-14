@@ -39,8 +39,10 @@ We developed rsky so that any community on the network can run their own infrast
 | `rsky-crypto` | Signing and key serialization | [README](./rsky-crypto/README.md) | [![Crate](https://img.shields.io/crates/v/rsky-crypto?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-crypto) |
 | `rsky-identity` | DID and handle resolution | [README](./rsky-identity/README.md) | [![Crate](https://img.shields.io/crates/v/rsky-identity?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-identity) |
 | `rsky-lexicon` | Lexicon schema types | [README](./rsky-lexicon/README.md) | [![Crate](https://img.shields.io/crates/v/rsky-lexicon?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-lexicon) |
+| `rsky-oauth` | OAuth provider core. JOSE, JWK and DPoP for AT Protocol services | [README](./rsky-oauth/README.md) | [![Crate](https://img.shields.io/crates/v/rsky-oauth?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-oauth) |
 | `rsky-repo` | Repository storage, including the MST | [README](./rsky-repo/README.md) | [![Crate](https://img.shields.io/crates/v/rsky-repo?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-repo) |
 | `rsky-syntax` | Parsers for handles, DIDs, NSIDs and other identifiers | [README](./rsky-syntax/README.md) | [![Crate](https://img.shields.io/crates/v/rsky-syntax?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-syntax) |
+| `rsky-space` | Permissioned-data primitives. LtHash commits, credentials and space repos for access controlled or private records that only members can read | [README](./rsky-space/README.md) | [![Crate](https://img.shields.io/crates/v/rsky-space?logo=rust&style=flat-square&logoColor=E05D44&color=E05D44)](https://crates.io/crates/rsky-space) |
 
 **Services** (the things we deploy):
 
@@ -57,11 +59,6 @@ We developed rsky so that any community on the network can run their own infrast
 - `rsky-daemon`: Syncer for permissioned data. It pulls each member's permissioned repo from their PDS, verifies it, and indexes it so a space can be read as one whole.
 - `rsky-video`: Video processing and serving.
 - `rsky-satnav`: "Structured Archive Traversal, Navigation & Verification." Explores DASL CAR files and AT Protocol repos.
-
-**Libraries** (used by the services above):
-
-- `rsky-oauth`: OAuth provider core. JOSE, JWK and DPoP for AT Protocol services.
-- `rsky-space`: Permissioned-data primitives. LtHash commits, credentials and space repos for access controlled or private records that only members can read.
 
 **Lexicons** (`/lexicons`): Lexicon definitions for the parts of the protocol we extend, such as spaces.
 
