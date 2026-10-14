@@ -53,7 +53,7 @@ We developed rsky so that any community on the network can run their own infrast
 - `rsky-feedgen`: Feed generator, built around the Blacksky community's feeds.
 - `rsky-labeler`: Firehose consumer that labels content for moderation.
 - `rsky-wintermute`: Indexer and backfiller for the app view.
-- `rsky-space` and `rsky-space-host`: Permissioned spaces. Access controlled or private records that only members can read.
+- `rsky-space-host`: Authority for a permissioned space. It issues space credentials, manages the space, and routes write notifications to members.
 - `rsky-daemon`: Syncer for permissioned data. It pulls each member's permissioned repo from their PDS, verifies it, and indexes it so a space can be read as one whole.
 - `rsky-video`: Video processing and serving.
 - `rsky-satnav`: "Structured Archive Traversal, Navigation & Verification." Explores DASL CAR files and AT Protocol repos.
@@ -61,6 +61,7 @@ We developed rsky so that any community on the network can run their own infrast
 **Libraries** (used by the services above):
 
 - `rsky-oauth`: OAuth provider core. JOSE, JWK and DPoP for AT Protocol services.
+- `rsky-space`: Permissioned-data primitives. LtHash commits, credentials and space repos for access controlled or private records that only members can read.
 
 **Lexicons** (`/lexicons`): Lexicon definitions for the parts of the protocol we extend, such as spaces.
 
