@@ -151,7 +151,9 @@ impl Drop for ErrorOnDropTcpStream {
     }
 }
 
-fn write_response(stream: &mut ErrorOnDropTcpStream, status: &str, content_type: &str, body: &str) -> Result<()> {
+fn write_response(
+    stream: &mut ErrorOnDropTcpStream, status: &str, content_type: &str, body: &str,
+) -> Result<()> {
     let response = format!(
         "HTTP/1.1 {status}\r\n\
          Content-Type: {content_type}\r\n\
@@ -810,11 +812,7 @@ mod tests {
         .unwrap();
 
         // Insert test data
-        conn.execute(
-            "INSERT INTO hosts (host, cursor) VALUES ('example.com', 12345)",
-            [],
-        )
-        .unwrap();
+        conn.execute("INSERT INTO hosts (host, cursor) VALUES ('example.com', 12345)", []).unwrap();
         drop(conn);
 
         // Change to temp directory so Server can find the database
