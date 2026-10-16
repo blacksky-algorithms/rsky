@@ -171,10 +171,22 @@ fn write_response(
     Ok(())
 }
 
+/// Writes an HTTP response with JSON content type.
+///
+/// Used for all XRPC endpoints that return JSON data, including:
+/// - `com.atproto.sync.listHosts`
+/// - `com.atproto.sync.getHostStatus`
+/// - Admin endpoints
+/// - Error responses
 fn write_json_response(stream: &mut ErrorOnDropTcpStream, status: &str, body: &str) -> Result<()> {
     write_response(stream, status, "application/json", body)
 }
 
+/// Writes an HTTP response with plain text content type.
+///
+/// Used for non-API endpoints like:
+/// - `/_health` - Health check endpoint
+/// - `/` - Root path with ASCII art banner
 fn write_text_response(stream: &mut ErrorOnDropTcpStream, status: &str, body: &str) -> Result<()> {
     write_response(stream, status, "text/plain; charset=utf-8", body)
 }
