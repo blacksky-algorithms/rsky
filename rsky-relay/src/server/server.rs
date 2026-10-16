@@ -151,10 +151,12 @@ impl Drop for ErrorOnDropTcpStream {
     }
 }
 
-fn write_response(stream: &mut ErrorOnDropTcpStream, status: &str, body: &str) -> Result<()> {
+fn write_response(
+    stream: &mut ErrorOnDropTcpStream, status: &str, content_type: &str, body: &str,
+) -> Result<()> {
     let response = format!(
         "HTTP/1.1 {status}\r\n\
-         Content-Type: text/plain; charset=utf-8\r\n\
+         Content-Type: {content_type}\r\n\
          Content-Length: {}\r\n\
          Connection: close\r\n\
          \r\n\
@@ -167,6 +169,26 @@ fn write_response(stream: &mut ErrorOnDropTcpStream, status: &str, body: &str) -
     s.flush()?;
     s.shutdown()?;
     Ok(())
+}
+
+/// Writes an HTTP response with JSON content type.
+///
+/// Used for all XRPC endpoints that return JSON data, including:
+/// - `com.atproto.sync.listHosts`
+/// - `com.atproto.sync.getHostStatus`
+/// - Admin endpoints
+/// - Error responses
+fn write_json_response(stream: &mut ErrorOnDropTcpStream, status: &str, body: &str) -> Result<()> {
+    write_response(stream, status, "application/json", body)
+}
+
+/// Writes an HTTP response with plain text content type.
+///
+/// Used for non-API endpoints like:
+/// - `/_health` - Health check endpoint
+/// - `/` - Root path with ASCII art banner
+fn write_text_response(stream: &mut ErrorOnDropTcpStream, status: &str, body: &str) -> Result<()> {
+    write_response(stream, status, "text/plain; charset=utf-8", body)
 }
 
 #[derive(Debug)]
@@ -312,8 +334,8 @@ impl Server {
         let url = Url::options().base_url(Some(&self.base_url)).parse(path)?;
 
         match (method, url.path()) {
-            ("GET", "/_health") => write_response(&mut stream, "200 OK", "ok"),
-            ("GET", "/") => write_response(&mut stream, "200 OK", INDEX_ASCII),
+            ("GET", "/_health") => write_text_response(&mut stream, "200 OK", "ok"),
+            ("GET", "/") => write_text_response(&mut stream, "200 OK", INDEX_ASCII),
             #[cfg(not(feature = "labeler"))]
             ("GET", PATH_LIST_HOSTS) => {
                 let (status, body) = match self.list_hosts(&url) {
@@ -326,7 +348,7 @@ impl Server {
                         ("400 Bad Request", serde_json::to_string(&error)?)
                     }
                 };
-                write_response(&mut stream, status, &body)
+                write_json_response(&mut stream, status, &body)
             }
             #[cfg(not(feature = "labeler"))]
             ("GET", PATH_HOST_STATUS) => {
@@ -340,7 +362,7 @@ impl Server {
                         ("400 Bad Request", serde_json::to_string(&error)?)
                     }
                 };
-                write_response(&mut stream, status, &body)
+                write_json_response(&mut stream, status, &body)
             }
             ("GET", PATH_SUBSCRIBE) => {
                 let mut cursor = None;
@@ -364,17 +386,17 @@ impl Server {
                     {
                         if self.is_host_banned(&request_crawl.hostname) {
                             tracing::info!(host = %request_crawl.hostname, "rejecting requestCrawl for banned host");
-                            return write_response(
+                            return write_json_response(
                                 &mut stream,
                                 "403 Forbidden",
                                 "{\"error\":\"Forbidden\",\"message\":\"host is banned\"}",
                             );
                         }
                         self.request_crawl_tx.push(request_crawl)?;
-                        return write_response(&mut stream, "200 OK", "");
+                        return write_json_response(&mut stream, "200 OK", "");
                     }
                 }
-                write_response(
+                write_json_response(
                     &mut stream,
                     "400 Bad Request",
                     "{\"error\":\"InvalidRequest\",\"message\":\"invalid or missing hostname\"}",
@@ -383,7 +405,7 @@ impl Server {
             ("POST", PATH_ADMIN_BAN | PATH_ADMIN_UNBAN) | ("GET", PATH_ADMIN_LIST_BANS) => {
                 self.handle_admin(&mut stream, url.path(), &url, is_admin_authed)
             }
-            _ => write_response(
+            _ => write_json_response(
                 &mut stream,
                 "404 Not Found",
                 "{\"error\":\"NotFound\",\"message\":\"endpoint not found\"}",
@@ -395,7 +417,7 @@ impl Server {
         &self, stream: &mut ErrorOnDropTcpStream, path: &str, url: &Url, is_admin_authed: bool,
     ) -> Result<()> {
         if !is_admin_authed {
-            return write_response(
+            return write_json_response(
                 stream,
                 "401 Unauthorized",
                 "{\"error\":\"Unauthorized\",\"message\":\"invalid or missing auth\"}",
@@ -404,7 +426,7 @@ impl Server {
         match path {
             PATH_ADMIN_BAN | PATH_ADMIN_UNBAN => {
                 let Some(hostname) = Self::get_query_param(url, "host") else {
-                    return write_response(
+                    return write_json_response(
                         stream,
                         "400 Bad Request",
                         "{\"error\":\"BadRequest\",\"message\":\"host parameter is required\"}",
@@ -424,7 +446,7 @@ impl Server {
                         ("500 Internal Server Error", serde_json::to_string(&body)?)
                     }
                 };
-                write_response(stream, status, &body)
+                write_json_response(stream, status, &body)
             }
             PATH_ADMIN_LIST_BANS => {
                 let (status, body) = match self.list_bans() {
@@ -435,9 +457,9 @@ impl Server {
                         ("500 Internal Server Error", serde_json::to_string(&body)?)
                     }
                 };
-                write_response(stream, status, &body)
+                write_json_response(stream, status, &body)
             }
-            _ => write_response(
+            _ => write_json_response(
                 stream,
                 "404 Not Found",
                 "{\"error\":\"NotFound\",\"message\":\"endpoint not found\"}",
@@ -770,5 +792,145 @@ mod tests {
         assert_eq!(sleeps.len(), 2, "sleep between attempts only");
         assert_eq!(sleeps[0], Duration::from_secs(1));
         assert_eq!(sleeps[1], Duration::from_secs(2));
+    }
+
+    /// Test for issue #295: JSON endpoints should return Content-Type: application/json
+    ///
+    /// Run this test with:
+    /// ```
+    /// cargo test -p rsky-relay json_endpoints_return_application_json_content_type
+    /// ```
+    #[test]
+    fn json_endpoints_return_application_json_content_type() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpStream;
+        use tempfile::TempDir;
+
+        // Setup temporary directory and database
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("relay.db");
+        let conn = Connection::open(&db_path).unwrap();
+
+        // Create required tables
+        conn.execute(
+            "CREATE TABLE hosts (rowid INTEGER PRIMARY KEY, host TEXT NOT NULL, cursor INTEGER NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE TABLE banned_hosts (host TEXT PRIMARY KEY, created_at TEXT DEFAULT CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+
+        // Insert test data
+        conn.execute("INSERT INTO hosts (host, cursor) VALUES ('example.com', 12345)", []).unwrap();
+        drop(conn);
+
+        // Change to temp directory so Server can find the database
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&temp_dir).unwrap();
+
+        // Create channels for server
+        let (request_crawl_tx, _request_crawl_rx) = rtrb::RingBuffer::new(1);
+        let (subscribe_repos_tx, _subscribe_repos_rx) = rtrb::RingBuffer::new(1);
+
+        // Start server
+        let server = Server::new(None, request_crawl_tx.into(), subscribe_repos_tx.into()).unwrap();
+        let addr = server.listener.local_addr().unwrap();
+
+        // Run server in background thread
+        let handle = thread::spawn(move || {
+            let mut server = server;
+            // Run a few iterations to handle our requests
+            for _ in 0..10 {
+                if server.update().is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        // Give server time to start
+        thread::sleep(Duration::from_millis(50));
+
+        // Test listHosts endpoint
+        let mut stream = TcpStream::connect(addr).unwrap();
+        write!(stream, "GET /xrpc/com.atproto.sync.listHosts HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        stream.flush().unwrap();
+
+        let mut reader = BufReader::new(stream);
+        let mut headers = Vec::new();
+        let mut line = String::new();
+
+        // Read status line
+        reader.read_line(&mut line).unwrap();
+        line.clear();
+
+        // Read headers
+        loop {
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            headers.push(line.clone());
+            line.clear();
+        }
+
+        // Check for Content-Type header
+        let content_type = headers
+            .iter()
+            .find(|h| h.to_lowercase().starts_with("content-type:"))
+            .expect("Content-Type header not found");
+
+        assert!(
+            content_type.contains("application/json"),
+            "listHosts endpoint should return Content-Type: application/json, got: {}",
+            content_type
+        );
+
+        // Test getHostStatus endpoint
+        let mut stream = TcpStream::connect(addr).unwrap();
+        write!(
+            stream,
+            "GET /xrpc/com.atproto.sync.getHostStatus?hostname=example.com HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        .unwrap();
+        stream.flush().unwrap();
+
+        let mut reader = BufReader::new(stream);
+        let mut headers = Vec::new();
+        let mut line = String::new();
+
+        // Read status line
+        reader.read_line(&mut line).unwrap();
+        line.clear();
+
+        // Read headers
+        loop {
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            headers.push(line.clone());
+            line.clear();
+        }
+
+        // Check for Content-Type header
+        let content_type = headers
+            .iter()
+            .find(|h| h.to_lowercase().starts_with("content-type:"))
+            .expect("Content-Type header not found");
+
+        assert!(
+            content_type.contains("application/json"),
+            "getHostStatus endpoint should return Content-Type: application/json, got: {}",
+            content_type
+        );
+
+        // Cleanup
+        std::env::set_current_dir(original_dir).unwrap();
+        handle.join().unwrap();
     }
 }
