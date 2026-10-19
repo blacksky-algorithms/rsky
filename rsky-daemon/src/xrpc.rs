@@ -55,6 +55,12 @@ pub(crate) async fn check(resp: reqwest::Response) -> Result<reqwest::Response> 
     Err(DaemonError::Xrpc(format!("{status}: {body}")))
 }
 
+fn is_nonce_rejection(body: &XrpcErrorBody) -> bool {
+    body.message
+        .as_deref()
+        .is_some_and(|m| m.contains("DPoP \"nonce\""))
+}
+
 pub(crate) async fn send_with_dpop_retry<F>(
     dpop: &DpopSigner,
     method: &str,
@@ -86,6 +92,17 @@ where
                 retried = true;
                 continue;
             }
+        }
+        // A host that rejects the nonce we hold without naming the error
+        // `use_dpop_nonce` (or that issues no nonces at all) would otherwise
+        // see that stale nonce on every request until the process restarts.
+        if !retried && is_nonce_rejection(&parsed) {
+            match nonce {
+                Some(nonce) => dpop.set_nonce(url, nonce),
+                None => dpop.clear_nonce(url),
+            }
+            retried = true;
+            continue;
         }
         if parsed.error.as_deref() == Some("HistoryUnavailable") {
             return Err(DaemonError::HistoryUnavailable(
@@ -565,6 +582,98 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, DaemonError::Xrpc(_)));
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    fn proof_nonce(request: &Request) -> Option<String> {
+        let proof = request.headers.get("dpop")?.to_str().ok()?;
+        rsky_oauth::jwt::decode(proof)
+            .ok()?
+            .claims
+            .extra
+            .get("nonce")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+    }
+
+    struct RejectsAnyNonce;
+
+    impl Respond for RejectsAnyNonce {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            match proof_nonce(request) {
+                Some(_) => ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                    "error": "AuthenticationRequired",
+                    "message": "InvalidDpopProof: DPoP \"nonce\" mismatch"
+                })),
+                None => ResponseTemplate::new(200).set_body_json(serde_json::json!({"repos": []})),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rejected_nonce_without_a_replacement_is_dropped() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.space.listRepos"))
+            .respond_with(RejectsAnyNonce)
+            .mount(&server)
+            .await;
+        let dpop = test_dpop();
+        dpop.set_nonce(&server.uri(), "stale".to_string());
+        let host = HttpSpaceHost::new(server.uri(), dpop);
+
+        assert!(host.list_repos(SPACE, "sc.jwt", None, None).await.is_ok());
+        assert!(host.list_repos(SPACE, "sc.jwt", None, None).await.is_ok());
+        let requests = server.received_requests().await.unwrap();
+        let nonces: Vec<_> = requests.iter().map(proof_nonce).collect();
+        assert_eq!(nonces, vec![Some("stale".to_string()), None, None]);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_nonce_is_replaced_by_the_offered_one() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.space.listRepos"))
+            .respond_with(|request: &Request| {
+                if proof_nonce(request).as_deref() == Some("fresh") {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"repos": []}))
+                } else {
+                    ResponseTemplate::new(401)
+                        .insert_header("DPoP-Nonce", "fresh")
+                        .set_body_json(serde_json::json!({
+                            "error": "AuthenticationRequired",
+                            "message": "InvalidDpopProof: DPoP \"nonce\" mismatch"
+                        }))
+                }
+            })
+            .mount(&server)
+            .await;
+        let dpop = test_dpop();
+        dpop.set_nonce(&server.uri(), "stale".to_string());
+        let host = HttpSpaceHost::new(server.uri(), dpop);
+
+        assert!(host.list_repos(SPACE, "sc.jwt", None, None).await.is_ok());
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_persistent_nonce_rejection_is_retried_only_once() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.space.listRepos"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "error": "AuthenticationRequired",
+                "message": "InvalidDpopProof: DPoP \"nonce\" mismatch"
+            })))
+            .mount(&server)
+            .await;
+        let host = HttpSpaceHost::new(server.uri(), test_dpop());
+
+        let err = host
+            .list_repos(SPACE, "sc.jwt", None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DaemonError::Xrpc(_)));
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
     }
 }
 

@@ -128,6 +128,13 @@ impl DpopSigner {
             .expect("DPoP nonce state is not poisoned")
             .insert(host_key(url), nonce);
     }
+
+    pub(crate) fn clear_nonce(&self, url: &str) {
+        self.nonces
+            .lock()
+            .expect("DPoP nonce state is not poisoned")
+            .remove(&host_key(url));
+    }
 }
 
 fn host_key(url: &str) -> String {
