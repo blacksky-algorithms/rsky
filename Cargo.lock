@@ -8045,7 +8045,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-daemon"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -8055,6 +8055,7 @@ dependencies = [
  "clap",
  "hex",
  "ipld-core",
+ "prometheus",
  "rand 0.8.5",
  "reqwest 0.12.23",
  "rsky-common 0.1.3",

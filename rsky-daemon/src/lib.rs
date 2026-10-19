@@ -29,6 +29,7 @@ pub mod feeds;
 pub mod identity;
 pub mod index;
 pub mod journal;
+pub mod metrics;
 pub mod notify;
 pub mod projection;
 pub mod recovery;

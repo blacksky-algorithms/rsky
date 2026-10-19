@@ -137,7 +137,12 @@ pub fn router(state: NotifyState) -> Router {
             post(notify_space_deleted),
         )
         .route("/internal/v1/spaces/refresh", post(refresh_spaces))
+        .route("/metrics", get(metrics))
         .with_state(state)
+}
+
+async fn metrics() -> String {
+    crate::metrics::encode()
 }
 
 fn service_multikey(signing_key_hex: &str) -> Result<String> {
@@ -430,6 +435,31 @@ mod tests {
             refresh_issuer: None,
             now_fn: fixed_now,
         }
+    }
+
+    #[tokio::test]
+    async fn metrics_are_served_as_prometheus_text() {
+        let (_secret, did_key) = host_key();
+        let (tx, _rx) = mpsc::channel(4);
+        let app = router(state(&did_key, Arc::new(InMemoryIndex::new()), tx));
+        crate::metrics::record_sweep("at://did:plc:notify-metrics/space/x/y", true);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text
+            .contains("daemon_space_sweep_ok{space=\"at://did:plc:notify-metrics/space/x/y\"} 1"));
     }
 
     #[tokio::test]

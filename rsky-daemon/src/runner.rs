@@ -269,7 +269,9 @@ async fn register(
         )
         .await
     };
-    match attempt.await {
+    let outcome = attempt.await;
+    crate::metrics::record_registration(&opts.space_uri, outcome.is_ok());
+    match outcome {
         Ok(expiry) => {
             let ttl = (expiry.timestamp().max(0) as u64).saturating_sub(now);
             // Re-register at 80% of the registration window.
@@ -317,7 +319,9 @@ async fn sweep(
         }
         Ok::<SweepReport, DaemonError>(report)
     };
-    match attempt.await {
+    let outcome = attempt.await;
+    crate::metrics::record_sweep(&opts.space_uri, outcome.is_ok());
+    match outcome {
         Ok(r) => {
             tracing::info!(synced = %r.synced, recovered = %r.recovered, failed = %r.failed, "sweep complete");
             true
@@ -347,7 +351,9 @@ async fn handle_notice(
         let client = make_repo_host(credential);
         sync_repo_healing(client.as_ref(), index, keys, &opts.space_uri, &did).await
     };
-    match attempt.await {
+    let outcome = attempt.await;
+    crate::metrics::record_notified_sync(outcome.is_ok());
+    match outcome {
         Ok(o) => tracing::debug!(did, verified = %o.commit_verified, "notified repo synced"),
         Err(e) => tracing::warn!(did, error = %e, "notified repo sync failed"),
     }
@@ -378,6 +384,7 @@ pub async fn run(
         tokio::select! {
             _ = shutdown.changed() => {
                 tracing::info!("runner shutting down");
+                crate::metrics::forget_space(&opts.space_uri);
                 return;
             }
             _ = tokio::time::sleep_until(register_at) => {
