@@ -38,6 +38,18 @@ pub type SpaceWorkerParts = (
 );
 pub type MultiSpaceFactory = Arc<dyn Fn(&str, i64) -> Result<SpaceWorkerParts> + Send + Sync>;
 
+async fn forward_notice(sender: &mpsc::Sender<WriteNotice>, notice: WriteNotice) {
+    match sender.try_send(notice) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            tracing::debug!("dropping queued notice; worker is busy")
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            tracing::warn!("dropping notice; space worker is closed")
+        }
+    }
+}
+
 pub struct MultiRunnerOptions {
     pub refresh_interval_secs: u64,
     pub sweep_interval_secs: u64,
@@ -87,7 +99,7 @@ pub async fn run_multi(
                 registry.replace(workers.keys().cloned().collect());
             }
             Some(()) = refreshes.recv() => refresh.reset_immediately(),
-            Some(notice) = notices.recv() => { if let Some(worker) = workers.get(&notice.0) { let _ = worker.notices.send(notice).await; } else { tracing::warn!(space = %notice.0, "notice for a space we do not sync"); } }
+            Some(notice) = notices.recv() => { if let Some(worker) = workers.get(&notice.0) { forward_notice(&worker.notices, notice).await; } else { tracing::warn!(space = %notice.0, "notice for a space we do not sync"); } }
         }
     }
     for (space, worker) in workers {
@@ -443,6 +455,20 @@ mod tests {
     use rsky_space::car::repo_car_bytes;
     use rsky_space::commit::{build_ctx, compute_mac};
     use rsky_space::lthash::{element, LtHash};
+
+    #[tokio::test]
+    async fn a_full_notice_channel_does_not_backpressure_routing() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        forward_notice(&sender, ("space".to_string(), "first".to_string())).await;
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            forward_notice(&sender, ("space".to_string(), "second".to_string())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(receiver.try_recv().unwrap().1, "first");
+        assert!(receiver.try_recv().is_err());
+    }
     use rsky_space::types::{RepoOp, SignedCommit};
     use secp256k1::Message;
     use serde_bytes::ByteBuf;

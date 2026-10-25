@@ -259,12 +259,85 @@ pub(crate) mod tests {
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.maximum.fetch_max(active, Ordering::SeqCst);
             sleep(Duration::from_millis(25)).await;
-            self.active.fetch_sub(1, Ordering::SeqCst);
             Ok(self.car.clone())
         }
 
         async fn get_latest_commit(&self, _space: &str, _did: &str) -> Result<SignedCommit> {
             Err(DaemonError::Xrpc("no commit in car host".to_string()))
+        }
+    }
+
+    struct PhaseIndex {
+        inner: Arc<InMemoryIndex>,
+        active: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl SpaceIndex for PhaseIndex {
+        async fn last_rev(&self, did: &str) -> Result<Option<String>> {
+            self.inner.last_rev(did).await
+        }
+
+        async fn load_lthash(&self, did: &str) -> Result<LtHash> {
+            self.inner.load_lthash(did).await
+        }
+
+        async fn get_cid(&self, did: &str, collection: &str, rkey: &str) -> Result<Option<String>> {
+            self.inner.get_cid(did, collection, rkey).await
+        }
+
+        async fn upsert(
+            &self,
+            did: &str,
+            collection: &str,
+            rkey: &str,
+            cid: &str,
+            rev: &str,
+            value: Option<Vec<u8>>,
+        ) -> Result<()> {
+            sleep(Duration::from_millis(25)).await;
+            self.inner
+                .upsert(did, collection, rkey, cid, rev, value)
+                .await
+        }
+
+        async fn delete(&self, did: &str, collection: &str, rkey: &str) -> Result<()> {
+            self.inner.delete(did, collection, rkey).await
+        }
+
+        async fn save_head(&self, did: &str, rev: &str, lthash: &LtHash) -> Result<()> {
+            let result = self.inner.save_head(did, rev, lthash).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            result
+        }
+
+        async fn journal_batch(
+            &self,
+            did: &str,
+            rev: &str,
+            mutations: &[IndexMutation],
+        ) -> Result<()> {
+            self.inner.journal_batch(did, rev, mutations).await
+        }
+
+        async fn list_paths(&self, did: &str) -> Result<Vec<(String, String, String)>> {
+            self.inner.list_paths(did).await
+        }
+
+        async fn purge_space(&self) -> Result<()> {
+            self.inner.purge_space().await
+        }
+
+        async fn update_blob_ledger(
+            &self,
+            did: &str,
+            collection: &str,
+            rkey: &str,
+            cids: &[String],
+        ) -> Result<()> {
+            self.inner
+                .update_blob_ledger(did, collection, rkey, cids)
+                .await
         }
     }
 
@@ -316,8 +389,14 @@ pub(crate) mod tests {
             active: Arc::new(AtomicUsize::new(0)),
             maximum: Arc::new(AtomicUsize::new(0)),
         });
-        let first_index = Arc::new(InMemoryIndex::new());
-        let second_index = Arc::new(InMemoryIndex::new());
+        let first_index = Arc::new(PhaseIndex {
+            inner: Arc::new(InMemoryIndex::new()),
+            active: Arc::clone(&host.active),
+        });
+        let second_index = Arc::new(PhaseIndex {
+            inner: Arc::new(InMemoryIndex::new()),
+            active: Arc::clone(&host.active),
+        });
         let first_keys = Arc::new(FixedKey(f.author.did_key.clone()));
         let second_keys = Arc::new(FixedKey(f.author.did_key.clone()));
         let first = {

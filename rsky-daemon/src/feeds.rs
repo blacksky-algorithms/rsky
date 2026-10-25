@@ -88,6 +88,8 @@ impl HttpProjectionIngress {
         audience: impl Into<String>,
         signing_key_hex: &str,
     ) -> Result<Self> {
+        #[cfg(test)]
+        crate::xrpc::test_proxy_bypass();
         Ok(Self {
             target,
             base_url: base_url.into().trim_end_matches('/').to_string(),

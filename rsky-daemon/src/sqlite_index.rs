@@ -1268,16 +1268,17 @@ mod tests {
             .unwrap();
         }
         let index = SqliteIndex::open(path.to_str().unwrap()).unwrap();
-        let conn = index.conn.lock().unwrap();
-        let old_columns: Vec<String> = conn
-            .prepare("SELECT name FROM pragma_table_info('blob_ledger')")
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .map(|row| row.unwrap())
-            .collect();
-        assert!(old_columns.contains(&"collection".to_string()));
-        assert_eq!(
+        {
+            let conn = index.conn.lock().unwrap();
+            let old_columns: Vec<String> = conn
+                .prepare("SELECT name FROM pragma_table_info('blob_ledger')")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(|row| row.unwrap())
+                .collect();
+            assert!(old_columns.contains(&"collection".to_string()));
+            assert_eq!(
             conn.query_row(
                 "SELECT state FROM blob_state WHERE space_uri = 'at://space' AND repo = 'did:plc:author' AND cid = 'bafyA'",
                 [],
@@ -1286,46 +1287,46 @@ mod tests {
             .unwrap(),
             "fetched"
         );
-        assert_eq!(
-            conn.query_row(
-                "SELECT COUNT(*) FROM blob_ref WHERE repo = 'did:plc:author'",
-                [],
-                |row| row.get::<_, i64>(0),
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM blob_ref WHERE repo = 'did:plc:author'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                2
+            );
+            conn.execute(
+                "UPDATE blob_ledger SET state = 'pending' WHERE collection = ?1 AND rkey = ?2",
+                params!["c.o.l", "3ka"],
             )
-            .unwrap(),
-            2
-        );
-        conn.execute(
-            "UPDATE blob_ledger SET state = 'pending' WHERE collection = ?1 AND rkey = ?2",
-            params!["c.o.l", "3ka"],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO blob_ledger (space_uri, repo, cid, collection, rkey, state)
+            .unwrap();
+            conn.execute(
+                "INSERT INTO blob_ledger (space_uri, repo, cid, collection, rkey, state)
              VALUES (?1, ?2, ?3, ?4, ?5, 'pending')
              ON CONFLICT (space_uri, repo, cid, collection, rkey)
              DO UPDATE SET state = 'pending'",
-            params!["at://space", "did:plc:author", "bafyC", "c.o.l", "new"],
-        )
-        .unwrap();
-        let old_cids: Vec<String> = conn
-            .prepare(
-                "SELECT cid FROM blob_ledger
-                 WHERE space_uri = ?1 AND repo = ?2 AND state != 'orphaned'",
+                params!["at://space", "did:plc:author", "bafyC", "c.o.l", "new"],
             )
-            .unwrap()
-            .query_map(params!["at://space", "did:plc:author"], |row| row.get(0))
-            .unwrap()
-            .map(|row| row.unwrap())
-            .collect();
-        assert_eq!(old_cids, ["bafyA", "bafyA", "bafyC"]);
-        conn.execute(
-            "UPDATE blob_ledger SET state = 'pending'
+            .unwrap();
+            let old_cids: Vec<String> = conn
+                .prepare(
+                    "SELECT cid FROM blob_ledger
+                 WHERE space_uri = ?1 AND repo = ?2 AND state != 'orphaned'",
+                )
+                .unwrap()
+                .query_map(params!["at://space", "did:plc:author"], |row| row.get(0))
+                .unwrap()
+                .map(|row| row.unwrap())
+                .collect();
+            assert_eq!(old_cids, ["bafyA", "bafyA", "bafyC"]);
+            conn.execute(
+                "UPDATE blob_ledger SET state = 'pending'
              WHERE space_uri = ?1 AND repo = ?2 AND cid = ?3 AND state != 'orphaned'",
-            params!["at://space", "did:plc:author", "bafyC"],
-        )
-        .unwrap();
-        drop(conn);
+                params!["at://space", "did:plc:author", "bafyC"],
+            )
+            .unwrap();
+        }
         drop(index);
 
         let migrated = Arc::new(SqliteIndex::open(path.to_str().unwrap()).unwrap());

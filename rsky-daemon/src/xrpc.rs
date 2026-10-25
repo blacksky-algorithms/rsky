@@ -99,12 +99,21 @@ pub(crate) fn http_client_with_loopback() -> reqwest::Client {
 }
 
 pub(crate) fn configured_http_client() -> reqwest::Client {
+    #[cfg(test)]
+    test_proxy_bypass();
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(XRPC_TIMEOUT_SECS))
         .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
         .build()
         .expect("static reqwest client configuration")
+}
+
+#[cfg(test)]
+pub(crate) fn test_proxy_bypass() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        std::env::set_var("NO_PROXY", "localhost,127.0.0.1,::1");
+    });
 }
 
 fn build_http_client(allow_loopback: bool) -> reqwest::Client {
@@ -602,17 +611,23 @@ mod tests {
 
     #[tokio::test]
     async fn the_dns_filter_rejects_non_global_stub_addresses() {
-        let resolver = FilteringResolver::new(Arc::new(StubResolver(vec!["127.0.0.1:443"
-            .parse()
-            .unwrap()])));
-        let error = match resolver
-            .resolve(reqwest::dns::Name::from_str("pds.example").unwrap())
-            .await
-        {
-            Ok(_) => panic!("non-global address was accepted"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("non-global"));
+        for address in [
+            "127.0.0.1:443",
+            "10.0.0.1:443",
+            "169.254.169.254:443",
+            "[fd00::1]:443",
+        ] {
+            let resolver =
+                FilteringResolver::new(Arc::new(StubResolver(vec![address.parse().unwrap()])));
+            let error = match resolver
+                .resolve(reqwest::dns::Name::from_str("pds.example").unwrap())
+                .await
+            {
+                Ok(_) => panic!("non-global address was accepted: {address}"),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains("non-global"));
+        }
 
         let resolver =
             FilteringResolver::new(Arc::new(StubResolver(vec!["8.8.8.8:443".parse().unwrap()])));

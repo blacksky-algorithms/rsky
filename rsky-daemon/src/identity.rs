@@ -222,7 +222,7 @@ pub(crate) fn is_global_address(address: std::net::IpAddr) -> bool {
                 || a == 127
                 || a == 169 && b == 254
                 || a == 172 && (16..=31).contains(&b)
-                || a == 192 && (b == 0 && c == 0 || b == 0 && c == 2 || b == 168)
+                || a == 192 && (b == 0 && (c == 0 || c == 2) || b == 168)
                 || a == 198 && (b == 18 || b == 19 || b == 51)
                 || a == 203 && b == 0 && c == 113
                 || a >= 224)
@@ -324,6 +324,7 @@ pub(crate) mod tests {
     }
 
     fn resolver(plc: &MockServer, ttl: Duration) -> DidResolver {
+        crate::xrpc::test_proxy_bypass();
         DidResolver::new(Some(plc.uri()), ttl, true)
     }
 

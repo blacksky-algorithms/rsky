@@ -61,6 +61,8 @@ impl HttpSpaceSource {
         authority_did: Option<String>,
         space_type: impl Into<String>,
     ) -> Self {
+        #[cfg(test)]
+        crate::xrpc::test_proxy_bypass();
         Self {
             url: url.into().trim_end_matches('/').into(),
             api_key: api_key.into(),
