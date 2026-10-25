@@ -133,7 +133,7 @@ pub(crate) async fn check(resp: reqwest::Response) -> Result<reqwest::Response> 
         return Ok(resp);
     }
     let status = resp.status();
-    let body = String::from_utf8_lossy(&limited_bytes(resp).await.unwrap_or_default()).into_owned();
+    let body = String::from_utf8_lossy(&limited_bytes(resp).await?).into_owned();
     let parsed: XrpcErrorBody = serde_json::from_str(&body).unwrap_or_default();
     if parsed.error.as_deref() == Some("HistoryUnavailable") {
         return Err(DaemonError::HistoryUnavailable(
@@ -492,6 +492,7 @@ impl SpaceHostClient for ResolvingSpaceHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reqwest::dns::Resolve;
     use std::str::FromStr;
 
     fn test_dpop() -> Arc<DpopSigner> {
@@ -546,10 +547,13 @@ mod tests {
         let resolver = FilteringResolver::new(Arc::new(StubResolver(vec!["127.0.0.1:443"
             .parse()
             .unwrap()])));
-        let error = resolver
+        let error = match resolver
             .resolve(reqwest::dns::Name::from_str("pds.example").unwrap())
             .await
-            .unwrap_err();
+        {
+            Ok(_) => panic!("non-global address was accepted"),
+            Err(error) => error,
+        };
         assert!(error.to_string().contains("non-global"));
 
         let resolver =
@@ -694,6 +698,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refuses_an_oversized_error_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/xrpc/com.atproto.space.getSpaceCredential"))
+            .respond_with(
+                ResponseTemplate::new(502).set_body_bytes(vec![b'x'; MAX_RESPONSE_BYTES + 1]),
+            )
+            .mount(&server)
+            .await;
+        let host = HttpSpaceHost::new(server.uri(), test_dpop());
+        let err = host
+            .get_space_credential(SPACE, "dt.jwt", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DaemonError::Xrpc(message) if message.contains("size limit")));
+    }
+
+    #[tokio::test]
     async fn connection_failure_maps_to_xrpc_variant() {
         let host = HttpSpaceHost::new("http://127.0.0.1:1", test_dpop());
         let err = host
@@ -741,6 +763,26 @@ mod tests {
             .and(path("/xrpc/com.atproto.space.listRepos"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_bytes(vec![b'x'; MAX_RESPONSE_BYTES + 1]),
+            )
+            .mount(&server)
+            .await;
+        let host = HttpSpaceHost::new(server.uri(), test_dpop());
+        let err = host
+            .list_repos(SPACE, "sc.jwt", None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DaemonError::Xrpc(message) if message.contains("size limit")));
+    }
+
+    #[tokio::test]
+    async fn refuses_an_oversized_chunked_response_without_content_length() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.space.listRepos"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Transfer-Encoding", "chunked")
+                    .set_body_bytes(vec![b'x'; MAX_RESPONSE_BYTES + 1]),
             )
             .mount(&server)
             .await;
