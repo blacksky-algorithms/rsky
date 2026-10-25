@@ -1,9 +1,9 @@
 //! DID-document lookups: an account's commit signing key, the PDS that
 //! hosts its repos, and, for a space authority, its space host.
 
-use rsky_identity::IdResolver;
-use rsky_identity::did::atproto_data::{VerificationMaterial, get_did_key_from_multibase};
+use rsky_identity::did::atproto_data::{get_did_key_from_multibase, VerificationMaterial};
 use rsky_identity::types::{DidDocument, IdentityResolverOpts, MemoryCache};
+use rsky_identity::IdResolver;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -135,28 +135,14 @@ impl DidResolver {
         let Some(host) = parsed.host_str() else {
             return Endpoint::Unusable;
         };
-        let port = parsed.port_or_known_default().unwrap_or(443);
-        let lookup = tokio::time::timeout(
-            Duration::from_secs(5),
-            tokio::net::lookup_host((host, port)),
-        )
-        .await;
-        let Ok(Ok(addresses)) = lookup else {
-            return Endpoint::Unusable;
-        };
-        if addresses
-            .map(|address| {
-                is_global_address(address.ip())
-                    || (self.allow_http_loopback
-                        && parsed.scheme() == "http"
-                        && address.ip().is_loopback())
-            })
-            .any(|global| !global)
-        {
-            Endpoint::Unusable
-        } else {
-            Endpoint::Named(url)
+        if let Ok(address) = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+            let opted_in_loopback =
+                self.allow_http_loopback && parsed.scheme() == "http" && address.is_loopback();
+            if !is_global_address(address) && !opted_in_loopback {
+                return Endpoint::Unusable;
+            }
         }
+        Endpoint::Named(url)
     }
 
     /// The account's `#atproto_pds` endpoint, `None` when its document names
@@ -226,7 +212,7 @@ fn endpoint(
     }
 }
 
-fn is_global_address(address: std::net::IpAddr) -> bool {
+pub(crate) fn is_global_address(address: std::net::IpAddr) -> bool {
     match address {
         std::net::IpAddr::V4(ip) => {
             let [a, b, c, _] = ip.octets();
@@ -242,13 +228,23 @@ fn is_global_address(address: std::net::IpAddr) -> bool {
                 || a >= 224)
         }
         std::net::IpAddr::V6(ip) => {
+            if let Some(ipv4) = ip.to_ipv4() {
+                return is_global_address(std::net::IpAddr::V4(ipv4));
+            }
             let segments = ip.segments();
             !(ip.is_unspecified()
                 || ip.is_loopback()
                 || ip.is_multicast()
                 || segments[0] & 0xfe00 == 0xfc00
                 || segments[0] & 0xffc0 == 0xfe80
-                || segments[0] == 0x2001 && segments[1] == 0x0db8)
+                || segments[0] == 0x2001 && segments[1] < 0x0200
+                || segments[0] == 0x2001 && segments[1] == 0x0db8
+                || segments[0] == 0x2001 && segments[1] == 0x0010
+                || segments[0] == 0x2001 && segments[1] == 0x0020
+                || segments[0] == 0x2002
+                || segments[0] == 0x0064 && segments[1] == 0xff9b
+                || segments[0] == 0x0100 && segments[1] == 0
+                || segments[0] == 0x0064 && segments[1] == 0)
         }
     }
 }
