@@ -162,13 +162,8 @@ impl SqliteIndex {
              GROUP BY space_uri, repo, cid;
              INSERT OR IGNORE INTO blob_ref
                  (space_uri, repo, cid, collection, rkey)
-             SELECT ref.space_uri, ref.repo, ref.cid, ref.collection, ref.rkey
-             FROM blob_ledger_ref ref
-             JOIN blob_ledger state
-               ON state.space_uri = ref.space_uri
-              AND state.repo = ref.repo
-              AND state.cid = ref.cid
-             WHERE state.state != 'orphaned';
+             SELECT space_uri, repo, cid, collection, rkey
+             FROM blob_ledger WHERE state != 'orphaned';
              COMMIT;",
         )
         .map_err(db_err)
@@ -1240,16 +1235,10 @@ mod tests {
                      collection TEXT NOT NULL, rkey TEXT NOT NULL, state TEXT NOT NULL,
                      PRIMARY KEY (space_uri, repo, cid, collection, rkey)
                  );
-                 CREATE TABLE blob_ledger_ref (
-                     space_uri TEXT NOT NULL, repo TEXT NOT NULL, cid TEXT NOT NULL,
-                     collection TEXT NOT NULL, rkey TEXT NOT NULL,
-                     PRIMARY KEY (space_uri, repo, cid, collection, rkey)
-                 );
                  INSERT INTO blob_ledger VALUES
                      ('at://space', 'did:plc:author', 'bafyA', 'c.o.l', '3ka', 'pending'),
-                     ('at://space', 'did:plc:author', 'bafyA', 'c.o.l', 'old', 'fetched');
-                 INSERT INTO blob_ledger_ref VALUES
-                     ('at://space', 'did:plc:author', 'bafyA', 'c.o.l', '3ka');",
+                     ('at://space', 'did:plc:author', 'bafyA', 'c.o.l', 'old', 'fetched'),
+                     ('at://space', 'did:plc:author', 'bafyB', 'c.o.l', 'orphan', 'orphaned');",
             )
             .unwrap();
         }
@@ -1273,19 +1262,42 @@ mod tests {
             "fetched"
         );
         assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM blob_ref", [], |row| row
-                .get::<_, i64>(0))
-                .unwrap(),
-            1
+            conn.query_row(
+                "SELECT COUNT(*) FROM blob_ref WHERE repo = 'did:plc:author'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            2
         );
         conn.execute(
             "UPDATE blob_ledger SET state = 'pending' WHERE collection = ?1 AND rkey = ?2",
             params!["c.o.l", "3ka"],
         )
         .unwrap();
+            conn.execute(
+                "INSERT INTO blob_ledger (space_uri, repo, cid, collection, rkey, state)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'pending')
+             ON CONFLICT (space_uri, repo, cid, collection, rkey)
+             DO UPDATE SET state = 'pending'",
+            params!["at://space", "did:plc:author", "bafyC", "c.o.l", "new"],
+        )
+        .unwrap();
+        let old_cids: Vec<String> = conn
+            .prepare(
+                "SELECT cid FROM blob_ledger
+                 WHERE space_uri = ?1 AND repo = ?2 AND state != 'orphaned'",
+            )
+            .unwrap()
+            .query_map(params!["at://space", "did:plc:author"], |row| row.get(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert_eq!(old_cids, ["bafyA", "bafyC"]);
         conn.execute(
-            "DELETE FROM blob_ledger_ref WHERE collection = ?1 AND rkey = ?2",
-            params!["c.o.l", "3ka"],
+            "UPDATE blob_ledger SET state = 'pending'
+             WHERE space_uri = ?1 AND repo = ?2 AND cid = ?3 AND state != 'orphaned'",
+            params!["at://space", "did:plc:author", "bafyC"],
         )
         .unwrap();
         drop(conn);
@@ -1293,10 +1305,50 @@ mod tests {
         let reopened = SqliteIndex::open(path.to_str().unwrap()).unwrap();
         let conn = reopened.conn.lock().unwrap();
         assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM blob_ref", [], |row| row
-                .get::<_, i64>(0))
+            conn.query_row("SELECT COUNT(*) FROM blob_ref", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn interrupted_ledger_migration_is_recovered_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE blob_ledger (
+                 space_uri TEXT NOT NULL, repo TEXT NOT NULL, cid TEXT NOT NULL,
+                 collection TEXT NOT NULL, rkey TEXT NOT NULL, state TEXT NOT NULL,
+                 PRIMARY KEY (space_uri, repo, cid, collection, rkey)
+             );
+             INSERT INTO blob_ledger VALUES
+                 ('at://space', 'did:plc:author', 'bafyA', 'c.o.l', '3ka', 'pending');
+             BEGIN IMMEDIATE;
+             CREATE TABLE blob_state (
+                 space_uri TEXT NOT NULL, repo TEXT NOT NULL, cid TEXT NOT NULL,
+                 state TEXT NOT NULL, PRIMARY KEY (space_uri, repo, cid)
+             );
+             INSERT INTO blob_state VALUES
+                 ('at://space', 'did:plc:author', 'bafyA', 'pending');
+             ROLLBACK;",
+        )
+        .unwrap();
+        drop(conn);
+
+        let index = SqliteIndex::open(path.to_str().unwrap()).unwrap();
+        let conn = index.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM blob_ref", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
             1
+        );
+        assert_eq!(
+            conn.query_row("SELECT state FROM blob_state", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+            "pending"
         );
     }
 
