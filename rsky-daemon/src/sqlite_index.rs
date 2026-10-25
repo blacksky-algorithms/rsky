@@ -61,8 +61,10 @@ CREATE TABLE IF NOT EXISTS blob_ledger (
     space_uri  TEXT NOT NULL,
     repo       TEXT NOT NULL,
     cid        TEXT NOT NULL,
+    collection TEXT NOT NULL,
+    rkey       TEXT NOT NULL,
     state      TEXT NOT NULL CHECK (state IN ('pending', 'fetched', 'orphaned')),
-    PRIMARY KEY (space_uri, repo, cid)
+    PRIMARY KEY (space_uri, repo, cid, collection, rkey)
 );
 CREATE TABLE IF NOT EXISTS blob_ledger_ref (
     space_uri  TEXT NOT NULL,
