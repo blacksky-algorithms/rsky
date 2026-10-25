@@ -915,10 +915,25 @@ mod tests {
                 .await
                 .unwrap();
         }
+        one.update_blob_ledger(AUTHOR, "c.o.l", "3ka", &["bafyA".to_string()])
+            .await
+            .unwrap();
 
         one.purge_space().await.unwrap();
         assert_eq!(one.last_rev(AUTHOR).await.unwrap(), None);
         assert!(one.list_paths(AUTHOR).await.unwrap().is_empty());
+        assert_eq!(
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM blob_ref WHERE space_uri = ?1",
+                    params![SPACE],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
         assert_eq!(
             other.last_rev(AUTHOR).await.unwrap(),
             Some("3rev".to_string())
@@ -1374,6 +1389,21 @@ mod tests {
         assert_eq!(
             index.blob_ledger(AUTHOR).await.unwrap()[0].state,
             "orphaned"
+        );
+        index
+            .reconcile_blob_ledger(AUTHOR, &["bafyA".to_string(), "bafyB".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(
+            index
+                .blob_ledger(AUTHOR)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.cid == "bafyA")
+                .unwrap()
+                .state,
+            "pending"
         );
     }
 
