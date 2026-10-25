@@ -7983,7 +7983,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-daemon"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "async-trait",
  "axum",
