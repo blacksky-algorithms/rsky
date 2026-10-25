@@ -656,11 +656,10 @@ mod resolving_tests {
             "sc.jwt",
             Arc::new(DpopSigner::generate().unwrap()),
         );
-        assert!(
-            host.list_repo_ops(SPACE, "did:plc:dave", None, None)
-                .await
-                .is_err()
-        );
+        assert!(host
+            .list_repo_ops(SPACE, "did:plc:dave", None, None)
+            .await
+            .is_err());
         assert!(host.get_repo_car(SPACE, "did:plc:dave").await.is_err());
         assert!(host.get_latest_commit(SPACE, "did:plc:dave").await.is_err());
         assert!(host.list_blobs(SPACE, "did:plc:dave", None).await.is_err());

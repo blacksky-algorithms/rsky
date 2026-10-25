@@ -11,15 +11,15 @@
 //! minted, used, and dropped by the same run, so a key that outlived it would
 //! only be one more secret to keep.
 
-use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use rsky_oauth::jwk::{EcCurve, Jwk};
-use rsky_oauth::jwt::{JwtClaims, JwtHeader, sign};
+use rsky_oauth::jwt::{sign, JwtClaims, JwtHeader};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{DaemonError, Result};
