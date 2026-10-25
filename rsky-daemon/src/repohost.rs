@@ -525,6 +525,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_repo_car_accepts_the_bounded_boundary() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.space.getRepo"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(vec![0u8; MAX_CAR_RESPONSE_BYTES]),
+            )
+            .mount(&server)
+            .await;
+
+        let host = HttpRepoHost::new(server.uri(), "sc.jwt", test_dpop());
+        assert_eq!(
+            host.get_repo_car(SPACE, AUTHOR).await.unwrap().len(),
+            MAX_CAR_RESPONSE_BYTES
+        );
+    }
+
+    #[tokio::test]
     async fn get_latest_commit_converts_wire_commit() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
