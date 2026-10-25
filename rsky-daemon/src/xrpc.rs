@@ -19,7 +19,7 @@ use rsky_space::space_id::SpaceId;
 
 pub const XRPC_TIMEOUT_SECS: u64 = 30;
 pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
-pub const MAX_CAR_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
+pub const MAX_CAR_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 struct SystemResolver;
 
@@ -41,6 +41,14 @@ impl FilteringResolver {
         Self {
             inner,
             allow_loopback: false,
+        }
+    }
+
+    #[cfg(test)]
+    fn new_with_loopback(inner: Arc<dyn reqwest::dns::Resolve>) -> Self {
+        Self {
+            inner,
+            allow_loopback: true,
         }
     }
 }
@@ -88,6 +96,14 @@ pub(crate) fn http_client() -> reqwest::Client {
 
 pub(crate) fn http_client_with_loopback() -> reqwest::Client {
     build_http_client(true)
+}
+
+pub(crate) fn configured_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(XRPC_TIMEOUT_SECS))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("static reqwest client configuration")
 }
 
 fn build_http_client(allow_loopback: bool) -> reqwest::Client {
@@ -301,11 +317,11 @@ pub struct HttpSpaceHost {
 
 impl HttpSpaceHost {
     pub fn new(base_url: impl Into<String>, dpop: Arc<DpopSigner>) -> Self {
-        Self::with_http(base_url, dpop, http_client())
+        Self::with_http(base_url, dpop, configured_http_client())
     }
 
     pub fn new_with_loopback(base_url: impl Into<String>, dpop: Arc<DpopSigner>) -> Self {
-        Self::with_http(base_url, dpop, http_client_with_loopback())
+        Self::with_http(base_url, dpop, configured_http_client())
     }
 
     fn with_http(
@@ -481,14 +497,13 @@ impl ResolvingSpaceHost {
         let authority = SpaceId::parse(space)
             .map_err(|e| DaemonError::Xrpc(format!("invalid space {space}: {e}")))?
             .authority;
-        let base_url = self
-            .resolver
-            .space_host_url(&authority)
-            .await?
-            .unwrap_or_else(|| self.fallback.clone());
+        let (base_url, http) = match self.resolver.space_host_url(&authority).await? {
+            Some(url) => (url, self.http.clone()),
+            None => (self.fallback.clone(), configured_http_client()),
+        };
         Ok(HttpSpaceHost {
             base_url,
-            http: self.http.clone(),
+            http,
             dpop: self.dpop.clone(),
         })
     }
@@ -610,6 +625,30 @@ mod tests {
             .unwrap()
             .next()
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn the_dns_filter_requires_explicit_loopback_opt_in() {
+        let inner = Arc::new(StubResolver(vec!["127.0.0.1:443".parse().unwrap()]));
+        assert!(FilteringResolver::new(inner.clone())
+            .resolve(reqwest::dns::Name::from_str("pds.example").unwrap())
+            .await
+            .is_err());
+        assert!(FilteringResolver::new_with_loopback(inner)
+            .resolve(reqwest::dns::Name::from_str("pds.example").unwrap())
+            .await
+            .unwrap()
+            .next()
+            .is_some());
+    }
+
+    #[test]
+    fn configured_clients_can_target_cluster_private_urls() {
+        let client = configured_http_client();
+        client
+            .get("http://acorn-auth:8000/internal/native-spaces")
+            .build()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -822,17 +861,31 @@ mod tests {
 
     #[tokio::test]
     async fn refuses_an_oversized_chunked_response_without_content_length() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/xrpc/com.atproto.space.listRepos"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("Transfer-Encoding", "chunked")
-                    .set_body_bytes(vec![b'x'; MAX_RESPONSE_BYTES + 1]),
-            )
-            .mount(&server)
-            .await;
-        let host = HttpSpaceHost::new(server.uri(), test_dpop());
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let chunk = vec![b'x'; MAX_RESPONSE_BYTES / 2 + 1];
+            for _ in 0..2 {
+                stream
+                    .write_all(format!("{:X}\r\n", chunk.len()).as_bytes())
+                    .await
+                    .unwrap();
+                stream.write_all(&chunk).await.unwrap();
+                stream.write_all(b"\r\n").await.unwrap();
+            }
+            stream.write_all(b"0\r\n\r\n").await.unwrap();
+        });
+        let host = HttpSpaceHost::new(format!("http://{address}"), test_dpop());
         let err = host
             .list_repos(SPACE, "sc.jwt", None, None)
             .await

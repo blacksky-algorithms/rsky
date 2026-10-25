@@ -11,8 +11,8 @@ use crate::dpop::DpopSigner;
 use crate::error::Result;
 use crate::identity::PdsResolver;
 use crate::xrpc::{
-    http_client, http_client_with_loopback, limited_bytes_with_limit, limited_json,
-    send_with_dpop_retry, MAX_CAR_RESPONSE_BYTES,
+    configured_http_client, http_client, http_client_with_loopback, limited_bytes_with_limit,
+    limited_json, send_with_dpop_retry, MAX_CAR_RESPONSE_BYTES,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -99,7 +99,7 @@ impl HttpRepoHost {
         credential: impl Into<String>,
         dpop: Arc<DpopSigner>,
     ) -> Self {
-        Self::with_http(base_url, credential, dpop, http_client())
+        Self::with_http(base_url, credential, dpop, configured_http_client())
     }
 
     pub fn new_with_loopback(
@@ -107,7 +107,7 @@ impl HttpRepoHost {
         credential: impl Into<String>,
         dpop: Arc<DpopSigner>,
     ) -> Self {
-        Self::with_http(base_url, credential, dpop, http_client_with_loopback())
+        Self::with_http(base_url, credential, dpop, configured_http_client())
     }
 
     fn with_http(
@@ -261,13 +261,12 @@ impl ResolvingRepoHost {
         let pinned = continuing
             .then(|| self.pinned.lock().unwrap().get(did).cloned())
             .flatten();
-        let base_url = match pinned {
-            Some(url) => url,
-            None => self
-                .resolver
-                .pds_url(did)
-                .await?
-                .unwrap_or_else(|| self.fallback.clone()),
+        let (base_url, http) = match pinned {
+            Some(url) => (url, self.http.clone()),
+            None => match self.resolver.pds_url(did).await? {
+                Some(url) => (url, self.http.clone()),
+                None => (self.fallback.clone(), configured_http_client()),
+            },
         };
         self.pinned
             .lock()
@@ -276,7 +275,7 @@ impl ResolvingRepoHost {
         Ok(HttpRepoHost {
             base_url,
             credential: self.credential.clone(),
-            http: self.http.clone(),
+            http,
             dpop: self.dpop.clone(),
         })
     }

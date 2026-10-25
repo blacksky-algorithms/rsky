@@ -102,11 +102,19 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         cfg.allow_http_loopback_pds,
     ));
     let keys: Arc<dyn CommitKeyResolver> = resolver.clone();
-    let space_hosts: Arc<dyn SpaceHostClient> = Arc::new(ResolvingSpaceHost::new_with_loopback(
-        resolver.clone(),
-        &cfg.space_host_url,
-        dpop.clone(),
-    ));
+    let space_hosts: Arc<dyn SpaceHostClient> = if cfg.allow_http_loopback_pds {
+        Arc::new(ResolvingSpaceHost::new_with_loopback(
+            resolver.clone(),
+            &cfg.space_host_url,
+            dpop.clone(),
+        ))
+    } else {
+        Arc::new(ResolvingSpaceHost::new(
+            resolver.clone(),
+            &cfg.space_host_url,
+            dpop.clone(),
+        ))
+    };
 
     let db = if cfg.index_db_path.is_empty() {
         None
@@ -200,6 +208,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let dpop_for_factory = dpop.clone();
     let shared_for_factory = shared_creds.clone();
     let auth_for_factory = auth_creds.clone();
+    let allow_http_loopback_pds = cfg.allow_http_loopback_pds;
     let projection = ProjectionConfig {
         service_identity: cfg.service_identity.clone(),
         signing_key_hex: cfg.service_signing_key_hex.clone(),
@@ -235,12 +244,21 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             Ok((
                 creds,
                 Box::new(move |credential| {
-                    Arc::new(ResolvingRepoHost::new_with_loopback(
-                        repo_resolver.clone(),
-                        &base,
-                        credential,
-                        proof.clone(),
-                    ))
+                    if allow_http_loopback_pds {
+                        Arc::new(ResolvingRepoHost::new_with_loopback(
+                            repo_resolver.clone(),
+                            &base,
+                            credential,
+                            proof.clone(),
+                        ))
+                    } else {
+                        Arc::new(ResolvingRepoHost::new(
+                            repo_resolver.clone(),
+                            &base,
+                            credential,
+                            proof.clone(),
+                        ))
+                    }
                 }),
                 index,
                 projectors,

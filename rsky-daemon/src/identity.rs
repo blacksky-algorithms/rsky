@@ -239,8 +239,10 @@ pub(crate) fn is_global_address(address: std::net::IpAddr) -> bool {
                 || segments[0] & 0xffc0 == 0xfe80
                 || segments[0] == 0x2001 && segments[1] < 0x0200
                 || segments[0] == 0x2001 && segments[1] == 0x0db8
-                || segments[0] == 0x2001 && segments[1] == 0x0010
-                || segments[0] == 0x2001 && segments[1] == 0x0020
+                || segments[0] == 0x2001 && (0x0010..=0x001f).contains(&segments[1])
+                || segments[0] == 0x2001 && (0x0020..=0x002f).contains(&segments[1])
+                || segments[0] == 0x2001 && segments[1] == 0x0004 && segments[2] == 0x0070
+                || segments[0] == 0x3ffe
                 || segments[0] == 0x2002
                 || segments[0] == 0x0064 && segments[1] == 0xff9b
                 || segments[0] == 0x0100 && segments[1] == 0
@@ -397,7 +399,20 @@ pub(crate) mod tests {
             Endpoint::Unusable
         );
         assert_eq!(
+            endpoint_in("https://[64:ff9b:1::1]", false),
+            Endpoint::Unusable
+        );
+        assert_eq!(endpoint_in("https://192.0.0.1", false), Endpoint::Unusable);
+        assert_eq!(
             endpoint_in("https://[2002:c000:201::1]", false),
+            Endpoint::Unusable
+        );
+        assert_eq!(
+            endpoint_in("https://[2001:10::1]", false),
+            Endpoint::Unusable
+        );
+        assert_eq!(
+            endpoint_in("https://[2001:20::1]", false),
             Endpoint::Unusable
         );
         assert_eq!(

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::error::Result;
-use crate::xrpc::{check, http_client, net_err, SpaceHostClient};
+use crate::xrpc::{check, configured_http_client, net_err, SpaceHostClient};
 use crate::{service_jwt::ServiceJwtIssuer, HttpSpaceHost};
 
 type AuthCacheEntry = Arc<Mutex<Option<(String, u64, i64)>>>;
@@ -71,7 +71,7 @@ impl AuthDelegationSource {
             community_did: SpaceId::parse(space.as_ref())?.authority,
             generation,
             auth_key: auth_key.into(),
-            http: http_client(),
+            http: configured_http_client(),
         })
     }
 }
@@ -119,7 +119,7 @@ impl PdsDelegationSource {
         Self {
             pds_url: pds_url.into().trim_end_matches('/').to_string(),
             access_token: access_token.into(),
-            http: http_client(),
+            http: configured_http_client(),
         }
     }
 }
