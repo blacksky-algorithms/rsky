@@ -3,6 +3,8 @@
 //! as a CAR, validate it end-to-end, and diff it against the local index.
 
 use std::collections::HashSet;
+use std::sync::{Arc, OnceLock};
+use tokio::sync::Semaphore;
 
 use rsky_space::car::RepoCarValidator;
 use rsky_space::commit::verify_commit;
@@ -13,6 +15,12 @@ use crate::error::{DaemonError, Result};
 use crate::index::{IndexMutation, SpaceIndex};
 use crate::repohost::RepoHostClient;
 use crate::sqlite_index::extract_blob_cids;
+
+static FULL_RECOVERY_LIMIT: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+fn full_recovery_limit() -> Arc<Semaphore> {
+    Arc::clone(FULL_RECOVERY_LIMIT.get_or_init(|| Arc::new(Semaphore::new(1))))
+}
 
 /// Recover an author's repo from a full-state CAR: verify the commit with the
 /// author's resolved key, authenticate the index against the trusted hash,
@@ -25,6 +33,10 @@ pub async fn recover_repo(
     space_uri: &str,
     did: &str,
 ) -> Result<SyncOutcome> {
+    let _permit = full_recovery_limit()
+        .acquire_owned()
+        .await
+        .map_err(|_| DaemonError::Xrpc("full recovery limit closed".to_string()))?;
     let car = client.get_repo_car(space_uri, did).await?;
     let validator = RepoCarValidator::new(car.as_slice()).await?;
     let commit = validator.commit().clone();
@@ -112,6 +124,9 @@ pub(crate) mod tests {
     use serde_bytes::ByteBuf;
     use sha2::{Digest, Sha256};
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::time::{sleep, Duration};
 
     pub(crate) const SPACE: &str = "at://did:plc:authority/space/community.blacksky.feed/main";
     pub(crate) const AUTHOR: &str = "did:plc:author";
@@ -222,6 +237,37 @@ pub(crate) mod tests {
         }
     }
 
+    struct SerializingCarHost {
+        car: Vec<u8>,
+        active: Arc<AtomicUsize>,
+        maximum: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl RepoHostClient for SerializingCarHost {
+        async fn list_repo_ops(
+            &self,
+            _space: &str,
+            _did: &str,
+            _since: Option<&str>,
+            _cursor: Option<&str>,
+        ) -> Result<OplogPage> {
+            Err(DaemonError::Xrpc("no oplog in car host".to_string()))
+        }
+
+        async fn get_repo_car(&self, _space: &str, _did: &str) -> Result<Vec<u8>> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.maximum.fetch_max(active, Ordering::SeqCst);
+            sleep(Duration::from_millis(25)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(self.car.clone())
+        }
+
+        async fn get_latest_commit(&self, _space: &str, _did: &str) -> Result<SignedCommit> {
+            Err(DaemonError::Xrpc("no commit in car host".to_string()))
+        }
+    }
+
     pub(crate) struct FixedKey(pub String);
     #[async_trait]
     impl CommitKeyResolver for FixedKey {
@@ -259,6 +305,40 @@ pub(crate) mod tests {
         // CarHost's unused trait methods, for completeness.
         assert!(host.list_repo_ops(SPACE, AUTHOR, None, None).await.is_err());
         assert!(host.get_latest_commit(SPACE, AUTHOR).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn full_recoveries_are_serialized_process_wide() {
+        let f = fixture();
+        let commit = signed_commit_for(&f.author, &f.entries, REV);
+        let host = Arc::new(SerializingCarHost {
+            car: car_bytes(&f, &commit).await,
+            active: Arc::new(AtomicUsize::new(0)),
+            maximum: Arc::new(AtomicUsize::new(0)),
+        });
+        let first_index = Arc::new(InMemoryIndex::new());
+        let second_index = Arc::new(InMemoryIndex::new());
+        let first_keys = Arc::new(FixedKey(f.author.did_key.clone()));
+        let second_keys = Arc::new(FixedKey(f.author.did_key.clone()));
+        let first = {
+            let host = Arc::clone(&host);
+            let index = Arc::clone(&first_index);
+            let keys = Arc::clone(&first_keys);
+            tokio::spawn(async move {
+                recover_repo(host.as_ref(), index.as_ref(), keys.as_ref(), SPACE, AUTHOR).await
+            })
+        };
+        let second = {
+            let host = Arc::clone(&host);
+            let index = Arc::clone(&second_index);
+            let keys = Arc::clone(&second_keys);
+            tokio::spawn(async move {
+                recover_repo(host.as_ref(), index.as_ref(), keys.as_ref(), SPACE, AUTHOR).await
+            })
+        };
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        assert_eq!(host.maximum.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
