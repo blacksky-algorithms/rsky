@@ -25,18 +25,23 @@ struct SystemResolver;
 
 struct FilteringResolver {
     inner: Arc<dyn reqwest::dns::Resolve>,
+    allow_loopback: bool,
 }
 
 impl FilteringResolver {
-    fn system() -> Self {
+    fn system(allow_loopback: bool) -> Self {
         Self {
             inner: Arc::new(SystemResolver),
+            allow_loopback,
         }
     }
 
     #[cfg(test)]
     fn new(inner: Arc<dyn reqwest::dns::Resolve>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            allow_loopback: false,
+        }
     }
 }
 
@@ -55,11 +60,15 @@ impl reqwest::dns::Resolve for SystemResolver {
 
 impl reqwest::dns::Resolve for FilteringResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        let resolving = self.inner.resolve(name);
+        let inner = Arc::clone(&self.inner);
+        let allow_loopback = self.allow_loopback;
         Box::pin(async move {
-            let addresses = resolving.await?;
+            let addresses = inner.resolve(name).await?;
             let accepted: Vec<SocketAddr> = addresses
-                .filter(|address| crate::identity::is_global_address(address.ip()))
+                .filter(|address| {
+                    crate::identity::is_global_address(address.ip())
+                        || (allow_loopback && address.ip().is_loopback())
+                })
                 .collect();
             if accepted.is_empty() {
                 return Err(Box::new(std::io::Error::new(
@@ -74,10 +83,18 @@ impl reqwest::dns::Resolve for FilteringResolver {
 }
 
 pub(crate) fn http_client() -> reqwest::Client {
+    build_http_client(false)
+}
+
+pub(crate) fn http_client_with_loopback() -> reqwest::Client {
+    build_http_client(true)
+}
+
+fn build_http_client(allow_loopback: bool) -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(XRPC_TIMEOUT_SECS))
         .redirect(reqwest::redirect::Policy::none())
-        .dns_resolver(Arc::new(FilteringResolver::system()))
+        .dns_resolver(Arc::new(FilteringResolver::system(allow_loopback)))
         .build()
         .expect("static reqwest client configuration")
 }
@@ -284,9 +301,21 @@ pub struct HttpSpaceHost {
 
 impl HttpSpaceHost {
     pub fn new(base_url: impl Into<String>, dpop: Arc<DpopSigner>) -> Self {
+        Self::with_http(base_url, dpop, http_client())
+    }
+
+    pub fn new_with_loopback(base_url: impl Into<String>, dpop: Arc<DpopSigner>) -> Self {
+        Self::with_http(base_url, dpop, http_client_with_loopback())
+    }
+
+    fn with_http(
+        base_url: impl Into<String>,
+        dpop: Arc<DpopSigner>,
+        http: reqwest::Client,
+    ) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
-            http: http_client(),
+            http,
             dpop,
         }
     }
@@ -423,10 +452,27 @@ pub struct ResolvingSpaceHost {
 
 impl ResolvingSpaceHost {
     pub fn new(resolver: Arc<dyn PdsResolver>, fallback: &str, dpop: Arc<DpopSigner>) -> Self {
+        Self::new_with_client(resolver, fallback, dpop, http_client())
+    }
+
+    pub fn new_with_loopback(
+        resolver: Arc<dyn PdsResolver>,
+        fallback: &str,
+        dpop: Arc<DpopSigner>,
+    ) -> Self {
+        Self::new_with_client(resolver, fallback, dpop, http_client_with_loopback())
+    }
+
+    fn new_with_client(
+        resolver: Arc<dyn PdsResolver>,
+        fallback: &str,
+        dpop: Arc<DpopSigner>,
+        http: reqwest::Client,
+    ) -> Self {
         Self {
             resolver,
             fallback: fallback.trim_end_matches('/').to_string(),
-            http: http_client(),
+            http,
             dpop,
         }
     }

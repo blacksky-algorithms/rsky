@@ -11,8 +11,8 @@ use crate::dpop::DpopSigner;
 use crate::error::Result;
 use crate::identity::PdsResolver;
 use crate::xrpc::{
-    http_client, limited_bytes_with_limit, limited_json, send_with_dpop_retry,
-    MAX_CAR_RESPONSE_BYTES,
+    http_client, http_client_with_loopback, limited_bytes_with_limit, limited_json,
+    send_with_dpop_retry, MAX_CAR_RESPONSE_BYTES,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -99,10 +99,27 @@ impl HttpRepoHost {
         credential: impl Into<String>,
         dpop: Arc<DpopSigner>,
     ) -> Self {
+        Self::with_http(base_url, credential, dpop, http_client())
+    }
+
+    pub fn new_with_loopback(
+        base_url: impl Into<String>,
+        credential: impl Into<String>,
+        dpop: Arc<DpopSigner>,
+    ) -> Self {
+        Self::with_http(base_url, credential, dpop, http_client_with_loopback())
+    }
+
+    fn with_http(
+        base_url: impl Into<String>,
+        credential: impl Into<String>,
+        dpop: Arc<DpopSigner>,
+        http: reqwest::Client,
+    ) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             credential: credential.into(),
-            http: http_client(),
+            http,
             dpop,
         }
     }
@@ -205,11 +222,36 @@ impl ResolvingRepoHost {
         credential: impl Into<String>,
         dpop: Arc<DpopSigner>,
     ) -> Self {
+        Self::new_with_client(resolver, fallback, credential, dpop, http_client())
+    }
+
+    pub fn new_with_loopback(
+        resolver: Arc<dyn PdsResolver>,
+        fallback: &str,
+        credential: impl Into<String>,
+        dpop: Arc<DpopSigner>,
+    ) -> Self {
+        Self::new_with_client(
+            resolver,
+            fallback,
+            credential,
+            dpop,
+            http_client_with_loopback(),
+        )
+    }
+
+    fn new_with_client(
+        resolver: Arc<dyn PdsResolver>,
+        fallback: &str,
+        credential: impl Into<String>,
+        dpop: Arc<DpopSigner>,
+        http: reqwest::Client,
+    ) -> Self {
         Self {
             resolver,
             fallback: fallback.trim_end_matches('/').to_string(),
             credential: credential.into(),
-            http: http_client(),
+            http,
             dpop,
             pinned: Mutex::new(HashMap::new()),
         }

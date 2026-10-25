@@ -385,6 +385,22 @@ pub(crate) mod tests {
         );
         assert_eq!(endpoint_in("https://[::1]", false), Endpoint::Unusable);
         assert_eq!(
+            endpoint_in("https://[::ffff:127.0.0.1]", false),
+            Endpoint::Unusable
+        );
+        assert_eq!(
+            endpoint_in("https://[::ffff:10.0.0.1]", false),
+            Endpoint::Unusable
+        );
+        assert_eq!(
+            endpoint_in("https://[64:ff9b::c000:201]", false),
+            Endpoint::Unusable
+        );
+        assert_eq!(
+            endpoint_in("https://[2002:c000:201::1]", false),
+            Endpoint::Unusable
+        );
+        assert_eq!(
             endpoint_in("https://pds.example/xrpc", false),
             Endpoint::Unusable
         );

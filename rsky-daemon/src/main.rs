@@ -102,7 +102,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         cfg.allow_http_loopback_pds,
     ));
     let keys: Arc<dyn CommitKeyResolver> = resolver.clone();
-    let space_hosts: Arc<dyn SpaceHostClient> = Arc::new(ResolvingSpaceHost::new(
+    let space_hosts: Arc<dyn SpaceHostClient> = Arc::new(ResolvingSpaceHost::new_with_loopback(
         resolver.clone(),
         &cfg.space_host_url,
         dpop.clone(),
@@ -235,7 +235,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             Ok((
                 creds,
                 Box::new(move |credential| {
-                    Arc::new(ResolvingRepoHost::new(
+                    Arc::new(ResolvingRepoHost::new_with_loopback(
                         repo_resolver.clone(),
                         &base,
                         credential,
