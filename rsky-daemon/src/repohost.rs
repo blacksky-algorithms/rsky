@@ -535,6 +535,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_repo_car_rejects_content_length_over_bound() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.space.getRepo"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(vec![0u8; MAX_CAR_RESPONSE_BYTES + 1]),
+            )
+            .mount(&server)
+            .await;
+
+        let host = HttpRepoHost::new(server.uri(), "sc.jwt", test_dpop());
+        let error = host.get_repo_car(SPACE, AUTHOR).await.unwrap_err();
+        assert!(matches!(error, DaemonError::Xrpc(message) if message.contains("size limit")));
+    }
+
+    #[tokio::test]
+    async fn get_repo_car_rejects_chunked_over_bound() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let first = vec![0u8; MAX_CAR_RESPONSE_BYTES / 2];
+            let second = vec![0u8; MAX_CAR_RESPONSE_BYTES / 2 + 1];
+            for chunk in [&first, &second] {
+                stream
+                    .write_all(format!("{:X}\r\n", chunk.len()).as_bytes())
+                    .await
+                    .unwrap();
+                stream.write_all(chunk).await.unwrap();
+                stream.write_all(b"\r\n").await.unwrap();
+            }
+            stream.write_all(b"0\r\n\r\n").await.unwrap();
+        });
+
+        let host = HttpRepoHost::new(format!("http://{address}"), "sc.jwt", test_dpop());
+        let error = host.get_repo_car(SPACE, AUTHOR).await.unwrap_err();
+        assert!(matches!(error, DaemonError::Xrpc(message) if message.contains("size limit")));
+    }
+
+    #[tokio::test]
     async fn get_latest_commit_converts_wire_commit() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -573,6 +622,7 @@ mod tests {
 #[cfg(test)]
 mod resolving_tests {
     use super::*;
+    use crate::error::DaemonError;
     use crate::identity::tests::plc_serving;
     use crate::identity::{DidResolver, PDS_ENDPOINT_TTL};
     use rsky_oauth::jwt::decode;
@@ -580,6 +630,7 @@ mod resolving_tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const SPACE: &str = "at://did:plc:authority/space/community.blacksky.feed/main";
+    const AUTHOR: &str = "did:plc:author";
 
     async fn pds_hosting(did: &str, car: u8) -> MockServer {
         let pds = MockServer::start().await;
@@ -673,6 +724,61 @@ mod resolving_tests {
         assert!(host.get_latest_commit(SPACE, "did:plc:dave").await.is_err());
         assert!(host.list_blobs(SPACE, "did:plc:dave", None).await.is_err());
         assert!(fallback.received_requests().await.unwrap().is_empty());
+    }
+
+    struct PrivateRepoResolver;
+
+    #[async_trait]
+    impl PdsResolver for PrivateRepoResolver {
+        async fn pds_url(&self, _did: &str) -> Result<Option<String>> {
+            Ok(Some("http://resolved.private.test:80".to_string()))
+        }
+
+        async fn space_host_url(&self, _did: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+    }
+
+    struct PrivateResolver(std::net::SocketAddr);
+
+    impl reqwest::dns::Resolve for PrivateResolver {
+        fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            Box::pin(std::future::ready(Ok(
+                Box::new(vec![self.0].into_iter()) as reqwest::dns::Addrs
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn resolved_repo_hosts_reject_private_stub_addresses() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.space.listRepoOps"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ops": []
+            })))
+            .mount(&server)
+            .await;
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(Arc::new(crate::xrpc::FilteringResolver::new(Arc::new(
+                PrivateResolver(*server.address()),
+            ))))
+            .build()
+            .unwrap();
+        let host = ResolvingRepoHost::new_with_client(
+            Arc::new(PrivateRepoResolver),
+            "https://fallback.invalid",
+            "sc.jwt",
+            Arc::new(DpopSigner::generate().unwrap()),
+            http,
+        );
+        let error = host
+            .list_repo_ops(SPACE, AUTHOR, None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, DaemonError::Xrpc(_)));
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     struct Moving(std::sync::Mutex<Vec<String>>);
