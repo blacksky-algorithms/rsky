@@ -612,22 +612,13 @@ mod tests {
             .mount(&server)
             .await;
 
-        let address = server.address();
-        let mut source = AuthDelegationSource::new(
-            format!("http://acorn-auth:{}", address.port()),
+        let source = AuthDelegationSource::new(
+            format!("http://localhost:{}", server.address().port()),
             SPACE,
             7,
             "auth-key",
         )
         .unwrap();
-        source.http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(
-                crate::xrpc::XRPC_TIMEOUT_SECS,
-            ))
-            .redirect(reqwest::redirect::Policy::none())
-            .resolve("acorn-auth", *address)
-            .build()
-            .unwrap();
 
         assert_eq!(source.delegation_token(SPACE).await.unwrap(), "dt.jwt");
     }

@@ -23,7 +23,7 @@ pub const MAX_CAR_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 
 struct SystemResolver;
 
-struct FilteringResolver {
+pub(crate) struct FilteringResolver {
     inner: Arc<dyn reqwest::dns::Resolve>,
     allow_loopback: bool,
 }
@@ -37,7 +37,7 @@ impl FilteringResolver {
     }
 
     #[cfg(test)]
-    fn new(inner: Arc<dyn reqwest::dns::Resolve>) -> Self {
+    pub(crate) fn new(inner: Arc<dyn reqwest::dns::Resolve>) -> Self {
         Self {
             inner,
             allow_loopback: false,
@@ -102,6 +102,7 @@ pub(crate) fn configured_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(XRPC_TIMEOUT_SECS))
         .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .build()
         .expect("static reqwest client configuration")
 }
@@ -638,15 +639,6 @@ mod tests {
             .is_some());
     }
 
-    #[test]
-    fn configured_clients_can_target_cluster_private_urls() {
-        let client = configured_http_client();
-        client
-            .get("http://acorn-auth:8000/internal/native-spaces")
-            .build()
-            .unwrap();
-    }
-
     #[tokio::test]
     async fn get_space_credential_posts_input_and_returns_jwt() {
         let server = MockServer::start().await;
@@ -1130,5 +1122,64 @@ mod resolving_tests {
             1,
             "an unresolvable authority is never sent to the fallback"
         );
+    }
+
+    struct PrivateSpaceResolver;
+
+    struct PrivateDnsResolver(SocketAddr);
+
+    impl reqwest::dns::Resolve for PrivateDnsResolver {
+        fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            Box::pin(std::future::ready(Ok(
+                Box::new(vec![self.0].into_iter()) as reqwest::dns::Addrs
+            )))
+        }
+    }
+
+    #[async_trait]
+    impl PdsResolver for PrivateSpaceResolver {
+        async fn pds_url(&self, _did: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+
+        async fn space_host_url(&self, _did: &str) -> Result<Option<String>> {
+            Ok(Some("http://resolved.private.test:80".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn resolved_space_hosts_reject_private_stub_addresses() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.space.listRepos"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "repos": []
+            })))
+            .mount(&server)
+            .await;
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(Arc::new(FilteringResolver::new(Arc::new(
+                PrivateDnsResolver(*server.address()),
+            ))))
+            .build()
+            .unwrap();
+        let host = ResolvingSpaceHost::new_with_client(
+            Arc::new(PrivateSpaceResolver),
+            "https://fallback.invalid",
+            Arc::new(DpopSigner::generate().unwrap()),
+            http,
+        );
+        let error = host
+            .list_repos(
+                "at://did:plc:authority/space/community.blacksky.feed/main",
+                "sc.jwt",
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, DaemonError::Xrpc(_)));
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 }
