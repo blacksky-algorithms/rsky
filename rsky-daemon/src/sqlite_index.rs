@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use rsky_space::LtHash;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -76,6 +76,27 @@ CREATE TABLE IF NOT EXISTS blob_ledger_ref (
 );
 CREATE INDEX IF NOT EXISTS blob_ledger_repo_idx
     ON blob_ledger (space_uri, repo, state);
+CREATE TABLE IF NOT EXISTS blob_state (
+    space_uri  TEXT NOT NULL,
+    repo       TEXT NOT NULL,
+    cid        TEXT NOT NULL,
+    state      TEXT NOT NULL CHECK (state IN ('pending', 'fetched', 'orphaned')),
+    PRIMARY KEY (space_uri, repo, cid)
+);
+CREATE TABLE IF NOT EXISTS blob_ref (
+    space_uri TEXT NOT NULL,
+    repo      TEXT NOT NULL,
+    cid       TEXT NOT NULL,
+    collection TEXT NOT NULL,
+    rkey      TEXT NOT NULL,
+    PRIMARY KEY (space_uri, repo, cid, collection, rkey),
+    FOREIGN KEY (space_uri, repo, cid)
+        REFERENCES blob_state (space_uri, repo, cid)
+);
+CREATE INDEX IF NOT EXISTS blob_state_repo_idx
+    ON blob_state (space_uri, repo, state);
+CREATE INDEX IF NOT EXISTS blob_ref_record_idx
+    ON blob_ref (space_uri, repo, collection, rkey);
 ";
 
 /// Columns added to `projection_failure` after its first release; an index
@@ -107,55 +128,48 @@ impl SqliteIndex {
     }
 
     fn migrate_blob_ledger(conn: &Connection) -> Result<()> {
-        let mut columns = Vec::new();
-        let mut stmt = conn
-            .prepare("SELECT name FROM pragma_table_info('blob_ledger')")
-            .map_err(db_err)?;
-        for row in stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(db_err)?
-        {
-            columns.push(row.map_err(db_err)?);
-        }
-        if columns.iter().any(|column| column == "collection") {
-            conn.execute_batch(
-                "ALTER TABLE blob_ledger RENAME TO blob_ledger_old;
-                 DROP TABLE IF EXISTS blob_ledger_ref;
-                 CREATE TABLE blob_ledger (
-                     space_uri TEXT NOT NULL,
-                     repo TEXT NOT NULL,
-                     cid TEXT NOT NULL,
-                     state TEXT NOT NULL CHECK (state IN ('pending', 'fetched', 'orphaned')),
-                     PRIMARY KEY (space_uri, repo, cid)
-                 );
-                 CREATE TABLE blob_ledger_ref (
-                     space_uri TEXT NOT NULL,
-                     repo TEXT NOT NULL,
-                     cid TEXT NOT NULL,
-                     collection TEXT NOT NULL,
-                     rkey TEXT NOT NULL,
-                     PRIMARY KEY (space_uri, repo, cid, collection, rkey),
-                     FOREIGN KEY (space_uri, repo, cid)
-                         REFERENCES blob_ledger (space_uri, repo, cid)
-                 );
-                 INSERT INTO blob_ledger (space_uri, repo, cid, state)
-                 SELECT space_uri, repo, cid,
-                        CASE MAX(CASE state WHEN 'fetched' THEN 3
-                                            WHEN 'pending' THEN 2 ELSE 1 END)
-                          WHEN 3 THEN 'fetched' WHEN 2 THEN 'pending' ELSE 'orphaned' END
-                 FROM blob_ledger_old
-                 GROUP BY space_uri, repo, cid;
-                 INSERT INTO blob_ledger_ref
-                     (space_uri, repo, cid, collection, rkey)
-                 SELECT space_uri, repo, cid, collection, rkey
-                 FROM blob_ledger_old WHERE state != 'orphaned';
-                 DROP TABLE blob_ledger_old;
-                 CREATE INDEX IF NOT EXISTS blob_ledger_repo_idx
-                     ON blob_ledger (space_uri, repo, state);",
-            )
-            .map_err(db_err)?;
-        }
-        Ok(())
+        conn.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS blob_state (
+                 space_uri TEXT NOT NULL,
+                 repo TEXT NOT NULL,
+                 cid TEXT NOT NULL,
+                 state TEXT NOT NULL CHECK (state IN ('pending', 'fetched', 'orphaned')),
+                 PRIMARY KEY (space_uri, repo, cid)
+             );
+             CREATE TABLE IF NOT EXISTS blob_ref (
+                 space_uri TEXT NOT NULL,
+                 repo TEXT NOT NULL,
+                 cid TEXT NOT NULL,
+                 collection TEXT NOT NULL,
+                 rkey TEXT NOT NULL,
+                 PRIMARY KEY (space_uri, repo, cid, collection, rkey),
+                 FOREIGN KEY (space_uri, repo, cid)
+                     REFERENCES blob_state (space_uri, repo, cid)
+             );
+             CREATE INDEX IF NOT EXISTS blob_state_repo_idx
+                 ON blob_state (space_uri, repo, state);
+             CREATE INDEX IF NOT EXISTS blob_ref_record_idx
+                 ON blob_ref (space_uri, repo, collection, rkey);
+             INSERT OR IGNORE INTO blob_state (space_uri, repo, cid, state)
+             SELECT space_uri, repo, cid,
+                    CASE MAX(CASE state WHEN 'fetched' THEN 3
+                                        WHEN 'pending' THEN 2 ELSE 1 END)
+                      WHEN 3 THEN 'fetched' WHEN 2 THEN 'pending' ELSE 'orphaned' END
+             FROM blob_ledger
+             GROUP BY space_uri, repo, cid;
+             INSERT OR IGNORE INTO blob_ref
+                 (space_uri, repo, cid, collection, rkey)
+             SELECT ref.space_uri, ref.repo, ref.cid, ref.collection, ref.rkey
+             FROM blob_ledger_ref ref
+             JOIN blob_ledger state
+               ON state.space_uri = ref.space_uri
+              AND state.repo = ref.repo
+              AND state.cid = ref.cid
+             WHERE state.state != 'orphaned';
+             COMMIT;",
+        )
+        .map_err(db_err)
     }
 
     fn add_missing_failure_columns(conn: &Connection) -> Result<()> {
@@ -206,7 +220,7 @@ impl SpaceScopedIndex {
         let mut stmt = conn
             .prepare(
                 "SELECT space_uri, repo, cid, state
-                 FROM blob_ledger WHERE space_uri = ?1 AND repo = ?2
+                 FROM blob_state WHERE space_uri = ?1 AND repo = ?2
                  ORDER BY cid",
             )
             .map_err(db_err)?;
@@ -277,10 +291,11 @@ fn collect_ipld_blob_cids(value: &ipld_core::ipld::Ipld, cids: &mut BTreeSet<Str
                     if valid_cid(&cid) {
                         cids.insert(cid);
                     }
-                } else if let Some(Ipld::String(cid)) = object.get("cid") {
-                    if matches!(object.get("mimeType"), Some(Ipld::String(_))) && valid_cid(cid) {
-                        cids.insert(cid.to_string());
-                    }
+                }
+            }
+            if let Some(Ipld::String(cid)) = object.get("cid") {
+                if matches!(object.get("mimeType"), Some(Ipld::String(_))) && valid_cid(cid) {
+                    cids.insert(cid.to_string());
                 }
             }
             object
@@ -584,7 +599,8 @@ impl SpaceIndex for SpaceScopedIndex {
             "projection_journal",
             "projector_cursor",
             "projection_failure",
-            "blob_ledger",
+            "blob_ref",
+            "blob_state",
         ] {
             conn.execute(
                 &format!("DELETE FROM {table} WHERE space_uri = ?1"),
@@ -605,23 +621,35 @@ impl SpaceIndex for SpaceScopedIndex {
         let mut conn = self.db.conn.lock().unwrap();
         let tx = conn.transaction().map_err(db_err)?;
         tx.execute(
-            "DELETE FROM blob_ledger_ref
+            "CREATE TEMP TABLE dropped_blob_cid (cid TEXT PRIMARY KEY)",
+            [],
+        )
+        .map_err(db_err)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO dropped_blob_cid (cid)
+             SELECT cid FROM blob_ref
+             WHERE space_uri = ?1 AND repo = ?2 AND collection = ?3 AND rkey = ?4",
+            params![self.space_uri, did, collection, rkey],
+        )
+        .map_err(db_err)?;
+        tx.execute(
+            "DELETE FROM blob_ref
              WHERE space_uri = ?1 AND repo = ?2 AND collection = ?3 AND rkey = ?4",
             params![self.space_uri, did, collection, rkey],
         )
         .map_err(db_err)?;
         for cid in cids {
             tx.execute(
-                "INSERT INTO blob_ledger (space_uri, repo, cid, state)
+                "INSERT INTO blob_state (space_uri, repo, cid, state)
                  VALUES (?1, ?2, ?3, 'pending')
                  ON CONFLICT (space_uri, repo, cid) DO UPDATE SET state =
-                     CASE WHEN blob_ledger.state = 'orphaned' THEN 'pending'
-                          ELSE blob_ledger.state END",
+                     CASE WHEN blob_state.state = 'orphaned' THEN 'pending'
+                          ELSE blob_state.state END",
                 params![self.space_uri, did, cid],
             )
             .map_err(db_err)?;
             tx.execute(
-                "INSERT OR IGNORE INTO blob_ledger_ref
+                "INSERT OR IGNORE INTO blob_ref
                  (space_uri, repo, cid, collection, rkey)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![self.space_uri, did, cid, collection, rkey],
@@ -629,17 +657,20 @@ impl SpaceIndex for SpaceScopedIndex {
             .map_err(db_err)?;
         }
         tx.execute(
-            "UPDATE blob_ledger SET state = 'orphaned'
-             WHERE space_uri = ?1 AND repo = ?2
-               AND NOT EXISTS (
-                   SELECT 1 FROM blob_ledger_ref ref
-                   WHERE ref.space_uri = blob_ledger.space_uri
-                     AND ref.repo = blob_ledger.repo
-                     AND ref.cid = blob_ledger.cid
-               )",
+            "UPDATE blob_state SET state = 'orphaned'
+             WHERE space_uri = ?1 AND repo = ?2 AND cid IN (
+                 SELECT cid FROM dropped_blob_cid
+             ) AND NOT EXISTS (
+                 SELECT 1 FROM blob_ref ref
+                 WHERE ref.space_uri = blob_state.space_uri
+                   AND ref.repo = blob_state.repo
+                   AND ref.cid = blob_state.cid
+             )",
             params![self.space_uri, did],
         )
         .map_err(db_err)?;
+        tx.execute_batch("DROP TABLE dropped_blob_cid;")
+            .map_err(db_err)?;
         tx.commit().map_err(db_err)
     }
 
@@ -648,7 +679,7 @@ impl SpaceIndex for SpaceScopedIndex {
         let mut conn = self.db.conn.lock().unwrap();
         let tx = conn.transaction().map_err(db_err)?;
         let mut stmt = tx
-            .prepare("SELECT cid FROM blob_ledger WHERE space_uri = ?1 AND repo = ?2")
+            .prepare("SELECT cid FROM blob_state WHERE space_uri = ?1 AND repo = ?2")
             .map_err(db_err)?;
         let ledger = stmt
             .query_map(params![self.space_uri, did], |row| row.get::<_, String>(0))
@@ -656,21 +687,27 @@ impl SpaceIndex for SpaceScopedIndex {
             .collect::<rusqlite::Result<BTreeSet<_>>>()
             .map_err(db_err)?;
         drop(stmt);
-        for cid in remote.difference(&ledger) {
+        for cid in &remote {
             tx.execute(
-                "INSERT INTO blob_ledger (space_uri, repo, cid, state)
+                "INSERT INTO blob_state (space_uri, repo, cid, state)
                  VALUES (?1, ?2, ?3, 'pending')
                  ON CONFLICT (space_uri, repo, cid) DO UPDATE SET state =
-                     CASE WHEN blob_ledger.state = 'orphaned' THEN 'pending'
-                          ELSE blob_ledger.state END",
+                     CASE WHEN blob_state.state = 'orphaned' THEN 'pending'
+                          ELSE blob_state.state END",
                 params![self.space_uri, did, cid],
             )
             .map_err(db_err)?;
         }
         for cid in ledger.difference(&remote) {
             tx.execute(
-                "UPDATE blob_ledger SET state = 'orphaned'
-                 WHERE space_uri = ?1 AND repo = ?2 AND cid = ?3",
+                "UPDATE blob_state SET state = 'orphaned'
+                 WHERE space_uri = ?1 AND repo = ?2 AND cid = ?3
+                   AND NOT EXISTS (
+                       SELECT 1 FROM blob_ref ref
+                       WHERE ref.space_uri = blob_state.space_uri
+                         AND ref.repo = blob_state.repo
+                         AND ref.cid = blob_state.cid
+                   )",
                 params![self.space_uri, did, cid],
             )
             .map_err(db_err)?;
@@ -681,13 +718,13 @@ impl SpaceIndex for SpaceScopedIndex {
     async fn gc_orphaned_blobs(&self) -> Result<usize> {
         let conn = self.db.conn.lock().unwrap();
         conn.execute(
-            "DELETE FROM blob_ledger
+            "DELETE FROM blob_state
              WHERE space_uri = ?1 AND state = 'orphaned'
                AND NOT EXISTS (
-                   SELECT 1 FROM blob_ledger_ref ref
-                   WHERE ref.space_uri = blob_ledger.space_uri
-                     AND ref.repo = blob_ledger.repo
-                     AND ref.cid = blob_ledger.cid
+                   SELECT 1 FROM blob_ref ref
+                   WHERE ref.space_uri = blob_state.space_uri
+                     AND ref.repo = blob_state.repo
+                     AND ref.cid = blob_state.cid
                )",
             params![self.space_uri],
         )
@@ -701,7 +738,7 @@ mod tests {
     use crate::engine::sync_repo;
     use crate::recovery::recover_repo;
     use crate::recovery::tests::{
-        AUTHOR, CarHost, FixedKey, SPACE, author, car_bytes, fixture, signed_commit_for,
+        author, car_bytes, fixture, signed_commit_for, CarHost, FixedKey, AUTHOR, SPACE,
     };
 
     fn open_at(dir: &tempfile::TempDir) -> Arc<SqliteIndex> {
@@ -1155,6 +1192,97 @@ mod tests {
         );
     }
 
+    #[test]
+    fn extracts_untyped_legacy_blob_refs_from_dag_cbor() {
+        use ipld_core::ipld::Ipld;
+        use std::collections::BTreeMap;
+        let cid: ipld_core::cid::Cid =
+            "bafkreie5737gdxlw5i64vzichcalba3z2v5n6icifvx5xytvske7mr3hpm"
+                .parse()
+                .unwrap();
+        let legacy = Ipld::Map(BTreeMap::from([
+            ("cid".to_string(), Ipld::String(cid.to_string())),
+            (
+                "mimeType".to_string(),
+                Ipld::String("image/png".to_string()),
+            ),
+        ]));
+        let bytes = serde_ipld_dagcbor::to_vec(&legacy).unwrap();
+        assert_eq!(extract_blob_cids(&bytes), [cid.to_string()]);
+    }
+
+    #[test]
+    fn migrates_the_old_ledger_without_changing_its_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE blob_ledger (
+                     space_uri TEXT NOT NULL, repo TEXT NOT NULL, cid TEXT NOT NULL,
+                     collection TEXT NOT NULL, rkey TEXT NOT NULL, state TEXT NOT NULL,
+                     PRIMARY KEY (space_uri, repo, cid, collection, rkey)
+                 );
+                 CREATE TABLE blob_ledger_ref (
+                     space_uri TEXT NOT NULL, repo TEXT NOT NULL, cid TEXT NOT NULL,
+                     collection TEXT NOT NULL, rkey TEXT NOT NULL,
+                     PRIMARY KEY (space_uri, repo, cid, collection, rkey)
+                 );
+                 INSERT INTO blob_ledger VALUES
+                     ('at://space', 'did:plc:author', 'bafyA', 'c.o.l', '3ka', 'pending'),
+                     ('at://space', 'did:plc:author', 'bafyA', 'c.o.l', 'old', 'fetched');
+                 INSERT INTO blob_ledger_ref VALUES
+                     ('at://space', 'did:plc:author', 'bafyA', 'c.o.l', '3ka');",
+            )
+            .unwrap();
+        }
+        let index = SqliteIndex::open(path.to_str().unwrap()).unwrap();
+        let conn = index.conn.lock().unwrap();
+        let old_columns: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('blob_ledger')")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert!(old_columns.contains(&"collection".to_string()));
+        assert_eq!(
+            conn.query_row(
+                "SELECT state FROM blob_state WHERE space_uri = 'at://space' AND repo = 'did:plc:author' AND cid = 'bafyA'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "fetched"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM blob_ref", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        conn.execute(
+            "UPDATE blob_ledger SET state = 'pending' WHERE collection = ?1 AND rkey = ?2",
+            params!["c.o.l", "3ka"],
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM blob_ledger_ref WHERE collection = ?1 AND rkey = ?2",
+            params!["c.o.l", "3ka"],
+        )
+        .unwrap();
+        drop(conn);
+        drop(index);
+        let reopened = SqliteIndex::open(path.to_str().unwrap()).unwrap();
+        let conn = reopened.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM blob_ref", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
     #[tokio::test]
     async fn ledger_tracks_pending_and_orphaned_refs_and_requeues_missing_remote_blobs() {
         let dir = tempfile::tempdir().unwrap();
@@ -1180,7 +1308,7 @@ mod tests {
         {
             let conn = db.conn.lock().unwrap();
             conn.execute(
-                "UPDATE blob_ledger SET state = 'fetched'
+                "UPDATE blob_state SET state = 'fetched'
                  WHERE space_uri = ?1 AND repo = ?2 AND cid = 'bafyA'",
                 params![SPACE, AUTHOR],
             )
@@ -1229,9 +1357,21 @@ mod tests {
                 .map(|entry| (&entry.cid, &entry.state))
                 .collect::<Vec<_>>(),
             vec![
-                (&"bafyA".to_string(), &"orphaned".to_string()),
+                (&"bafyA".to_string(), &"pending".to_string()),
                 (&"bafyB".to_string(), &"pending".to_string())
             ]
+        );
+        index
+            .update_blob_ledger(AUTHOR, "c.o.l", "3ka", &[])
+            .await
+            .unwrap();
+        index
+            .reconcile_blob_ledger(AUTHOR, &["bafyB".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(
+            index.blob_ledger(AUTHOR).await.unwrap()[0].state,
+            "orphaned"
         );
     }
 
