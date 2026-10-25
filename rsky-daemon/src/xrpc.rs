@@ -19,7 +19,7 @@ use rsky_space::space_id::SpaceId;
 
 pub const XRPC_TIMEOUT_SECS: u64 = 30;
 pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
-pub const MAX_CAR_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_CAR_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 
 struct SystemResolver;
 
