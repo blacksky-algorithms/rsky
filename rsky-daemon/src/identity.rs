@@ -1,9 +1,9 @@
 //! DID-document lookups: an account's commit signing key, the PDS that
 //! hosts its repos, and, for a space authority, its space host.
 
-use rsky_identity::did::atproto_data::{get_did_key_from_multibase, VerificationMaterial};
-use rsky_identity::types::{DidDocument, IdentityResolverOpts, MemoryCache};
 use rsky_identity::IdResolver;
+use rsky_identity::did::atproto_data::{VerificationMaterial, get_did_key_from_multibase};
+use rsky_identity::types::{DidDocument, IdentityResolverOpts, MemoryCache};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -91,7 +91,10 @@ impl DidResolver {
             None => None,
         };
         let (last, ttl) = match self.document(did, true).await {
-            Ok(doc) => (Some((self.hosts_from(did, &doc), now)), self.ttl),
+            Ok(doc) => {
+                let hosts = self.hosts_from(did, &doc).await;
+                (Some((hosts, now)), self.ttl)
+            }
             Err(error) => {
                 tracing::warn!(did, error = %error, "DID document resolution failed");
                 (last, PDS_FAILURE_TTL.min(self.ttl))
@@ -107,7 +110,7 @@ impl DidResolver {
         serve(did, last, now)
     }
 
-    fn hosts_from(&self, did: &str, doc: &DidDocument) -> Hosts {
+    async fn hosts_from(&self, did: &str, doc: &DidDocument) -> Hosts {
         let find = |fragment, kind| endpoint(did, doc, fragment, kind, self.allow_http_loopback);
         // Matches how Auth and the PDS pick a space's host, so all three agree.
         let space_host = match find("atproto_space_host", None) {
@@ -115,8 +118,44 @@ impl DidResolver {
             named => named,
         };
         Hosts {
-            pds: find("atproto_pds", Some("AtprotoPersonalDataServer")),
-            space_host,
+            pds: self
+                .validate(find("atproto_pds", Some("AtprotoPersonalDataServer")))
+                .await,
+            space_host: self.validate(space_host).await,
+        }
+    }
+
+    async fn validate(&self, endpoint: Endpoint) -> Endpoint {
+        let Endpoint::Named(url) = endpoint else {
+            return endpoint;
+        };
+        let Ok(parsed) = reqwest::Url::parse(&url) else {
+            return Endpoint::Unusable;
+        };
+        let Some(host) = parsed.host_str() else {
+            return Endpoint::Unusable;
+        };
+        let port = parsed.port_or_known_default().unwrap_or(443);
+        let lookup = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::lookup_host((host, port)),
+        )
+        .await;
+        let Ok(Ok(addresses)) = lookup else {
+            return Endpoint::Unusable;
+        };
+        if addresses
+            .map(|address| {
+                is_global_address(address.ip())
+                    || (self.allow_http_loopback
+                        && parsed.scheme() == "http"
+                        && address.ip().is_loopback())
+            })
+            .any(|global| !global)
+        {
+            Endpoint::Unusable
+        } else {
+            Endpoint::Named(url)
         }
     }
 
@@ -160,13 +199,57 @@ fn endpoint(
     let Ok(url) = reqwest::Url::parse(&service.service_endpoint) else {
         return Endpoint::Unusable;
     };
+    if url.username() != ""
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Endpoint::Unusable;
+    }
     // The document decides where a credential is sent, so it must not be
     // able to point the daemon at a plain-HTTP internal address.
     let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1"));
+    if let Some(host) = url
+        .host_str()
+        .and_then(|host| host.trim_matches(['[', ']']).parse().ok())
+    {
+        let opted_in_loopback = allow_http_loopback && url.scheme() == "http" && loopback;
+        if !is_global_address(host) && !opted_in_loopback {
+            return Endpoint::Unusable;
+        }
+    }
     if url.scheme() == "https" || (allow_http_loopback && url.scheme() == "http" && loopback) {
         Endpoint::Named(service.service_endpoint.trim_end_matches('/').to_string())
     } else {
         Endpoint::Unusable
+    }
+}
+
+fn is_global_address(address: std::net::IpAddr) -> bool {
+    match address {
+        std::net::IpAddr::V4(ip) => {
+            let [a, b, c, _] = ip.octets();
+            !(a == 0
+                || a == 10
+                || a == 100 && (64..=127).contains(&b)
+                || a == 127
+                || a == 169 && b == 254
+                || a == 172 && (16..=31).contains(&b)
+                || a == 192 && (b == 0 && c == 0 || b == 0 && c == 2 || b == 168)
+                || a == 198 && (b == 18 || b == 19 || b == 51)
+                || a == 203 && b == 0 && c == 113
+                || a >= 224)
+        }
+        std::net::IpAddr::V6(ip) => {
+            let segments = ip.segments();
+            !(ip.is_unspecified()
+                || ip.is_loopback()
+                || ip.is_multicast()
+                || segments[0] & 0xfe00 == 0xfc00
+                || segments[0] & 0xffc0 == 0xfe80
+                || segments[0] == 0x2001 && segments[1] == 0x0db8)
+        }
     }
 }
 
@@ -296,6 +379,23 @@ pub(crate) mod tests {
             named("http://localhost:2583")
         );
         assert_eq!(endpoint_in("http://10.0.0.7", true), Endpoint::Unusable);
+        assert_eq!(
+            endpoint_in("https://127.0.0.1:2583", true),
+            Endpoint::Unusable
+        );
+        assert_eq!(
+            endpoint_in("https://169.254.1.2", false),
+            Endpoint::Unusable
+        );
+        assert_eq!(endpoint_in("https://[::1]", false), Endpoint::Unusable);
+        assert_eq!(
+            endpoint_in("https://pds.example/xrpc", false),
+            Endpoint::Unusable
+        );
+        assert_eq!(
+            endpoint_in("https://user:p@pds.example", false),
+            Endpoint::Unusable
+        );
         assert_eq!(endpoint_in("not a url", true), Endpoint::Unusable);
         assert!(Endpoint::Unusable.into_url("did:plc:a", "pds").is_err());
     }
@@ -311,18 +411,18 @@ pub(crate) mod tests {
                     service(
                         "#atproto_pds",
                         "AtprotoPersonalDataServer",
-                        "https://pds.one",
+                        "http://127.0.0.1:1",
                     ),
                     service(
                         "did:plc:both#atproto_space_host",
                         "Any",
-                        "https://spaces.one/",
+                        "http://127.0.0.1:2/",
                     ),
                 ],
             ),
             (
                 "pdsonly",
-                vec![service("#atproto_pds", "Other", "https://pds.two")],
+                vec![service("#atproto_pds", "Other", "http://127.0.0.1:3")],
             ),
             (
                 "none",
@@ -345,15 +445,15 @@ pub(crate) mod tests {
         let space_host = |did: &'static str| resolver.space_host_url(did);
         assert_eq!(
             space_host("did:plc:both").await.unwrap().as_deref(),
-            Some("https://spaces.one")
+            Some("http://127.0.0.1:2")
         );
         assert_eq!(
             resolver.pds_url("did:plc:both").await.unwrap().as_deref(),
-            Some("https://pds.one")
+            Some("http://127.0.0.1:1")
         );
         assert_eq!(
             space_host("did:plc:pdsonly").await.unwrap().as_deref(),
-            Some("https://pds.two")
+            Some("http://127.0.0.1:3")
         );
         assert_eq!(resolver.pds_url("did:plc:pdsonly").await.unwrap(), None);
         assert_eq!(space_host("did:plc:none").await.unwrap(), None);

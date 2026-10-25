@@ -63,8 +63,6 @@ pub struct BlobLedgerEntry {
     pub space: String,
     pub repo: String,
     pub cid: String,
-    pub collection: String,
-    pub rkey: String,
     pub state: String,
 }
 
@@ -165,6 +163,10 @@ pub trait SpaceIndex: Send + Sync {
 
     async fn reconcile_blob_ledger(&self, _did: &str, _remote_cids: &[String]) -> Result<()> {
         Ok(())
+    }
+
+    async fn gc_orphaned_blobs(&self) -> Result<usize> {
+        Ok(0)
     }
 }
 

@@ -11,15 +11,15 @@
 //! minted, used, and dropped by the same run, so a key that outlived it would
 //! only be one more secret to keep.
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rsky_oauth::jwk::{EcCurve, Jwk};
-use rsky_oauth::jwt::{sign, JwtClaims, JwtHeader};
+use rsky_oauth::jwt::{JwtClaims, JwtHeader, sign};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{DaemonError, Result};
@@ -140,7 +140,11 @@ impl DpopSigner {
 fn host_key(url: &str) -> String {
     reqwest::Url::parse(url)
         .ok()
-        .and_then(|parsed| parsed.host_str().map(str::to_owned))
+        .and_then(|parsed| {
+            let host = parsed.host_str()?;
+            let port = parsed.port_or_known_default()?;
+            Some(format!("{}://{host}:{port}", parsed.scheme()))
+        })
         .unwrap_or_else(|| url.to_owned())
 }
 
@@ -204,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn nonce_is_shared_by_urls_on_one_host() {
+    fn nonce_is_shared_by_urls_on_one_origin() {
         let signer = DpopSigner::generate().unwrap();
         signer.set_nonce("https://host.example/one", "nonce".to_string());
         let decoded = decode(
@@ -214,5 +218,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(decoded.claims.extra.get("nonce").unwrap(), "nonce");
+    }
+
+    #[test]
+    fn nonce_is_not_shared_across_origins() {
+        let signer = DpopSigner::generate().unwrap();
+        signer.set_nonce("https://host.example:8443/one", "nonce".to_string());
+        let decoded = decode(
+            &signer
+                .proof("GET", "https://host.example:9443/two", None)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(decoded.claims.extra.get("nonce").is_none());
     }
 }

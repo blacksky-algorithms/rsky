@@ -41,11 +41,11 @@ base64 = "0.22"
 sha2 = { workspace = true }
 secp256k1 = { workspace = true }
 urlencoding = "2.1.3"
+lexicon_cid = { workspace = true }
 
 [dev-dependencies]
 secp256k1 = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
-lexicon_cid = { workspace = true }
 wiremock = "=0.6.3"
 tower = { version = "0.4", features = ["util"] }
 tempfile = "3"

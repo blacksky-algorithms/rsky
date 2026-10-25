@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use rsky_space::LtHash;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -61,10 +61,18 @@ CREATE TABLE IF NOT EXISTS blob_ledger (
     space_uri  TEXT NOT NULL,
     repo       TEXT NOT NULL,
     cid        TEXT NOT NULL,
+    state      TEXT NOT NULL CHECK (state IN ('pending', 'fetched', 'orphaned')),
+    PRIMARY KEY (space_uri, repo, cid)
+);
+CREATE TABLE IF NOT EXISTS blob_ledger_ref (
+    space_uri  TEXT NOT NULL,
+    repo       TEXT NOT NULL,
+    cid        TEXT NOT NULL,
     collection TEXT NOT NULL,
     rkey       TEXT NOT NULL,
-    state      TEXT NOT NULL CHECK (state IN ('pending', 'fetched', 'orphaned')),
-    PRIMARY KEY (space_uri, repo, cid, collection, rkey)
+    PRIMARY KEY (space_uri, repo, cid, collection, rkey),
+    FOREIGN KEY (space_uri, repo, cid)
+        REFERENCES blob_ledger (space_uri, repo, cid)
 );
 CREATE INDEX IF NOT EXISTS blob_ledger_repo_idx
     ON blob_ledger (space_uri, repo, state);
@@ -91,10 +99,63 @@ impl SqliteIndex {
         conn.pragma_update(None, "synchronous", "NORMAL")
             .map_err(db_err)?;
         conn.execute_batch(SCHEMA).map_err(db_err)?;
+        Self::migrate_blob_ledger(&conn)?;
         Self::add_missing_failure_columns(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
+    }
+
+    fn migrate_blob_ledger(conn: &Connection) -> Result<()> {
+        let mut columns = Vec::new();
+        let mut stmt = conn
+            .prepare("SELECT name FROM pragma_table_info('blob_ledger')")
+            .map_err(db_err)?;
+        for row in stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(db_err)?
+        {
+            columns.push(row.map_err(db_err)?);
+        }
+        if columns.iter().any(|column| column == "collection") {
+            conn.execute_batch(
+                "ALTER TABLE blob_ledger RENAME TO blob_ledger_old;
+                 DROP TABLE IF EXISTS blob_ledger_ref;
+                 CREATE TABLE blob_ledger (
+                     space_uri TEXT NOT NULL,
+                     repo TEXT NOT NULL,
+                     cid TEXT NOT NULL,
+                     state TEXT NOT NULL CHECK (state IN ('pending', 'fetched', 'orphaned')),
+                     PRIMARY KEY (space_uri, repo, cid)
+                 );
+                 CREATE TABLE blob_ledger_ref (
+                     space_uri TEXT NOT NULL,
+                     repo TEXT NOT NULL,
+                     cid TEXT NOT NULL,
+                     collection TEXT NOT NULL,
+                     rkey TEXT NOT NULL,
+                     PRIMARY KEY (space_uri, repo, cid, collection, rkey),
+                     FOREIGN KEY (space_uri, repo, cid)
+                         REFERENCES blob_ledger (space_uri, repo, cid)
+                 );
+                 INSERT INTO blob_ledger (space_uri, repo, cid, state)
+                 SELECT space_uri, repo, cid,
+                        CASE MAX(CASE state WHEN 'fetched' THEN 3
+                                            WHEN 'pending' THEN 2 ELSE 1 END)
+                          WHEN 3 THEN 'fetched' WHEN 2 THEN 'pending' ELSE 'orphaned' END
+                 FROM blob_ledger_old
+                 GROUP BY space_uri, repo, cid;
+                 INSERT INTO blob_ledger_ref
+                     (space_uri, repo, cid, collection, rkey)
+                 SELECT space_uri, repo, cid, collection, rkey
+                 FROM blob_ledger_old WHERE state != 'orphaned';
+                 DROP TABLE blob_ledger_old;
+                 CREATE INDEX IF NOT EXISTS blob_ledger_repo_idx
+                     ON blob_ledger (space_uri, repo, state);",
+            )
+            .map_err(db_err)?;
+        }
+        Ok(())
     }
 
     fn add_missing_failure_columns(conn: &Connection) -> Result<()> {
@@ -144,9 +205,9 @@ impl SpaceScopedIndex {
         let conn = self.db.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT space_uri, repo, cid, collection, rkey, state
+                "SELECT space_uri, repo, cid, state
                  FROM blob_ledger WHERE space_uri = ?1 AND repo = ?2
-                 ORDER BY collection, rkey, cid",
+                 ORDER BY cid",
             )
             .map_err(db_err)?;
         let rows = stmt
@@ -155,9 +216,7 @@ impl SpaceScopedIndex {
                     space: row.get(0)?,
                     repo: row.get(1)?,
                     cid: row.get(2)?,
-                    collection: row.get(3)?,
-                    rkey: row.get(4)?,
-                    state: row.get(5)?,
+                    state: row.get(3)?,
                 })
             })
             .map_err(db_err)?;
@@ -181,12 +240,19 @@ fn collect_blob_cids(value: &Value, cids: &mut BTreeSet<String>) {
             .iter()
             .for_each(|value| collect_blob_cids(value, cids)),
         Value::Object(object) => {
-            if object.get("$type").and_then(Value::as_str) == Some("blob") {
+            let typed = object.get("$type").and_then(Value::as_str) == Some("blob");
+            if typed {
                 if let Some(cid) = object
                     .get("ref")
                     .and_then(|reference| reference.get("$link"))
                     .and_then(Value::as_str)
                 {
+                    if valid_cid(cid) {
+                        cids.insert(cid.to_string());
+                    }
+                }
+            } else if let Some(cid) = object.get("cid").and_then(Value::as_str) {
+                if object.get("mimeType").and_then(Value::as_str).is_some() && valid_cid(cid) {
                     cids.insert(cid.to_string());
                 }
             }
@@ -207,7 +273,14 @@ fn collect_ipld_blob_cids(value: &ipld_core::ipld::Ipld, cids: &mut BTreeSet<Str
         Ipld::Map(object) => {
             if matches!(object.get("$type"), Some(Ipld::String(value)) if value == "blob") {
                 if let Some(Ipld::Link(cid)) = object.get("ref") {
-                    cids.insert(cid.to_string());
+                    let cid = cid.to_string();
+                    if valid_cid(&cid) {
+                        cids.insert(cid);
+                    }
+                } else if let Some(Ipld::String(cid)) = object.get("cid") {
+                    if matches!(object.get("mimeType"), Some(Ipld::String(_))) && valid_cid(cid) {
+                        cids.insert(cid.to_string());
+                    }
                 }
             }
             object
@@ -216,6 +289,10 @@ fn collect_ipld_blob_cids(value: &ipld_core::ipld::Ipld, cids: &mut BTreeSet<Str
         }
         _ => {}
     }
+}
+
+fn valid_cid(value: &str) -> bool {
+    value.parse::<lexicon_cid::Cid>().is_ok()
 }
 
 #[async_trait]
@@ -528,48 +605,93 @@ impl SpaceIndex for SpaceScopedIndex {
         let mut conn = self.db.conn.lock().unwrap();
         let tx = conn.transaction().map_err(db_err)?;
         tx.execute(
-            "UPDATE blob_ledger SET state = 'orphaned'
+            "DELETE FROM blob_ledger_ref
              WHERE space_uri = ?1 AND repo = ?2 AND collection = ?3 AND rkey = ?4",
             params![self.space_uri, did, collection, rkey],
         )
         .map_err(db_err)?;
         for cid in cids {
             tx.execute(
-                "INSERT INTO blob_ledger (space_uri, repo, cid, collection, rkey, state)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'pending')
-                 ON CONFLICT (space_uri, repo, cid, collection, rkey)
-                 DO UPDATE SET state = 'pending'",
+                "INSERT INTO blob_ledger (space_uri, repo, cid, state)
+                 VALUES (?1, ?2, ?3, 'pending')
+                 ON CONFLICT (space_uri, repo, cid) DO UPDATE SET state =
+                     CASE WHEN blob_ledger.state = 'orphaned' THEN 'pending'
+                          ELSE blob_ledger.state END",
+                params![self.space_uri, did, cid],
+            )
+            .map_err(db_err)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO blob_ledger_ref
+                 (space_uri, repo, cid, collection, rkey)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![self.space_uri, did, cid, collection, rkey],
+            )
+            .map_err(db_err)?;
+        }
+        tx.execute(
+            "UPDATE blob_ledger SET state = 'orphaned'
+             WHERE space_uri = ?1 AND repo = ?2
+               AND NOT EXISTS (
+                   SELECT 1 FROM blob_ledger_ref ref
+                   WHERE ref.space_uri = blob_ledger.space_uri
+                     AND ref.repo = blob_ledger.repo
+                     AND ref.cid = blob_ledger.cid
+               )",
+            params![self.space_uri, did],
+        )
+        .map_err(db_err)?;
+        tx.commit().map_err(db_err)
+    }
+
+    async fn reconcile_blob_ledger(&self, did: &str, remote_cids: &[String]) -> Result<()> {
+        let remote: BTreeSet<_> = remote_cids.iter().cloned().collect();
+        let mut conn = self.db.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(db_err)?;
+        let mut stmt = tx
+            .prepare("SELECT cid FROM blob_ledger WHERE space_uri = ?1 AND repo = ?2")
+            .map_err(db_err)?;
+        let ledger = stmt
+            .query_map(params![self.space_uri, did], |row| row.get::<_, String>(0))
+            .map_err(db_err)?
+            .collect::<rusqlite::Result<BTreeSet<_>>>()
+            .map_err(db_err)?;
+        drop(stmt);
+        for cid in remote.difference(&ledger) {
+            tx.execute(
+                "INSERT INTO blob_ledger (space_uri, repo, cid, state)
+                 VALUES (?1, ?2, ?3, 'pending')
+                 ON CONFLICT (space_uri, repo, cid) DO UPDATE SET state =
+                     CASE WHEN blob_ledger.state = 'orphaned' THEN 'pending'
+                          ELSE blob_ledger.state END",
+                params![self.space_uri, did, cid],
+            )
+            .map_err(db_err)?;
+        }
+        for cid in ledger.difference(&remote) {
+            tx.execute(
+                "UPDATE blob_ledger SET state = 'orphaned'
+                 WHERE space_uri = ?1 AND repo = ?2 AND cid = ?3",
+                params![self.space_uri, did, cid],
             )
             .map_err(db_err)?;
         }
         tx.commit().map_err(db_err)
     }
 
-    async fn reconcile_blob_ledger(&self, did: &str, remote_cids: &[String]) -> Result<()> {
+    async fn gc_orphaned_blobs(&self) -> Result<usize> {
         let conn = self.db.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare(
-                "SELECT cid FROM blob_ledger
-                 WHERE space_uri = ?1 AND repo = ?2 AND state != 'orphaned'",
-            )
-            .map_err(db_err)?;
-        let ledger_cids = stmt
-            .query_map(params![self.space_uri, did], |row| row.get::<_, String>(0))
-            .map_err(db_err)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(db_err)?;
-        for cid in ledger_cids {
-            if !remote_cids.iter().any(|remote| remote == &cid) {
-                conn.execute(
-                    "UPDATE blob_ledger SET state = 'pending'
-                     WHERE space_uri = ?1 AND repo = ?2 AND cid = ?3 AND state != 'orphaned'",
-                    params![self.space_uri, did, cid],
-                )
-                .map_err(db_err)?;
-            }
-        }
-        Ok(())
+        conn.execute(
+            "DELETE FROM blob_ledger
+             WHERE space_uri = ?1 AND state = 'orphaned'
+               AND NOT EXISTS (
+                   SELECT 1 FROM blob_ledger_ref ref
+                   WHERE ref.space_uri = blob_ledger.space_uri
+                     AND ref.repo = blob_ledger.repo
+                     AND ref.cid = blob_ledger.cid
+               )",
+            params![self.space_uri],
+        )
+        .map_err(db_err)
     }
 }
 
@@ -579,7 +701,7 @@ mod tests {
     use crate::engine::sync_repo;
     use crate::recovery::recover_repo;
     use crate::recovery::tests::{
-        author, car_bytes, fixture, signed_commit_for, CarHost, FixedKey, AUTHOR, SPACE,
+        AUTHOR, CarHost, FixedKey, SPACE, author, car_bytes, fixture, signed_commit_for,
     };
 
     fn open_at(dir: &tempfile::TempDir) -> Arc<SqliteIndex> {
@@ -975,13 +1097,15 @@ mod tests {
 
     #[test]
     fn extracts_nested_modern_blob_refs_once_in_order() {
+        const A: &str = "bafyreiaau22fcyoampbgk7wbuhv3hux6zrgqav7c4cjn76wb7cyokdple4";
+        const B: &str = "bafyreidjydtjo7mztg5n3mrxpqr7h5jxklpvcljbahx5zpdd45xnaugoxq";
         let value = serde_json::json!({
             "embed": {
                 "$type": "app.bsky.embed.images",
                 "images": [{
                     "image": {
                         "$type": "blob",
-                        "ref": {"$link": "bafyB"},
+                        "ref": {"$link": B},
                         "mimeType": "image/png",
                         "size": 2
                     }
@@ -989,16 +1113,13 @@ mod tests {
             },
             "duplicate": {
                 "$type": "blob",
-                "ref": {"$link": "bafyB"},
+                "ref": {"$link": B},
                 "mimeType": "image/png",
                 "size": 2
             },
-            "other": {"$type": "blob", "ref": {"$link": "bafyA"}}
+            "other": {"$type": "blob", "ref": {"$link": A}}
         });
-        assert_eq!(
-            extract_blob_cids(value.to_string().as_bytes()),
-            ["bafyA", "bafyB"]
-        );
+        assert_eq!(extract_blob_cids(value.to_string().as_bytes()), [A, B]);
         assert!(extract_blob_cids(b"not json").is_empty());
     }
 
@@ -1020,6 +1141,18 @@ mod tests {
         )]));
         let bytes = serde_ipld_dagcbor::to_vec(&record).unwrap();
         assert_eq!(extract_blob_cids(&bytes), [cid.to_string()]);
+    }
+
+    #[test]
+    fn extracts_legacy_blob_refs_and_rejects_invalid_cids() {
+        let value = serde_json::json!({
+            "legacy": {"cid": "bafyreiaau22fcyoampbgk7wbuhv3hux6zrgqav7c4cjn76wb7cyokdple4", "mimeType": "image/png"},
+            "invalid": {"cid": "not-a-cid", "mimeType": "image/png"}
+        });
+        assert_eq!(
+            extract_blob_cids(value.to_string().as_bytes()),
+            ["bafyreiaau22fcyoampbgk7wbuhv3hux6zrgqav7c4cjn76wb7cyokdple4"]
+        );
     }
 
     #[tokio::test]
@@ -1044,6 +1177,19 @@ mod tests {
             .update_blob_ledger(AUTHOR, "c.o.l", "3ka", &["bafyA".to_string()])
             .await
             .unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE blob_ledger SET state = 'fetched'
+                 WHERE space_uri = ?1 AND repo = ?2 AND cid = 'bafyA'",
+                params![SPACE, AUTHOR],
+            )
+            .unwrap();
+        }
+        index
+            .update_blob_ledger(AUTHOR, "c.o.l", "3ka", &["bafyA".to_string()])
+            .await
+            .unwrap();
         assert_eq!(
             index
                 .blob_ledger(AUTHOR)
@@ -1053,9 +1199,67 @@ mod tests {
                 .map(|entry| (&entry.cid, &entry.state))
                 .collect::<Vec<_>>(),
             vec![
-                (&"bafyA".to_string(), &"pending".to_string()),
+                (&"bafyA".to_string(), &"fetched".to_string()),
                 (&"bafyB".to_string(), &"orphaned".to_string())
             ]
+        );
+        index.gc_orphaned_blobs().await.unwrap();
+        assert_eq!(index.blob_ledger(AUTHOR).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reconcile_records_remote_only_and_orphans_ledger_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_at(&dir);
+        let index = db.for_space(SPACE);
+        index
+            .update_blob_ledger(AUTHOR, "c.o.l", "3ka", &["bafyA".to_string()])
+            .await
+            .unwrap();
+        index
+            .reconcile_blob_ledger(AUTHOR, &["bafyB".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(
+            index
+                .blob_ledger(AUTHOR)
+                .await
+                .unwrap()
+                .iter()
+                .map(|entry| (&entry.cid, &entry.state))
+                .collect::<Vec<_>>(),
+            vec![
+                (&"bafyA".to_string(), &"orphaned".to_string()),
+                (&"bafyB".to_string(), &"pending".to_string())
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blob_is_orphaned_only_after_its_last_record_reference_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_at(&dir);
+        let index = db.for_space(SPACE);
+        index
+            .update_blob_ledger(AUTHOR, "c.o.l", "one", &["bafyA".to_string()])
+            .await
+            .unwrap();
+        index
+            .update_blob_ledger(AUTHOR, "c.o.l", "two", &["bafyA".to_string()])
+            .await
+            .unwrap();
+        index
+            .update_blob_ledger(AUTHOR, "c.o.l", "one", &[])
+            .await
+            .unwrap();
+        assert_eq!(index.blob_ledger(AUTHOR).await.unwrap()[0].state, "pending");
+        index
+            .update_blob_ledger(AUTHOR, "c.o.l", "two", &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            index.blob_ledger(AUTHOR).await.unwrap()[0].state,
+            "orphaned"
         );
     }
 }

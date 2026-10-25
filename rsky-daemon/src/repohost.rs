@@ -10,7 +10,7 @@ use serde_bytes::ByteBuf;
 use crate::dpop::DpopSigner;
 use crate::error::Result;
 use crate::identity::PdsResolver;
-use crate::xrpc::{http_client, net_err, send_with_dpop_retry};
+use crate::xrpc::{http_client, limited_bytes, limited_json, send_with_dpop_retry};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -138,12 +138,8 @@ impl RepoHostClient for HttpRepoHost {
         if let Some(cursor) = cursor {
             query.push(("cursor", cursor));
         }
-        let out: wire::ListRepoOpsOutput = self
-            .get("com.atproto.space.listRepoOps", &query)
-            .await?
-            .json()
-            .await
-            .map_err(net_err)?;
+        let out: wire::ListRepoOpsOutput =
+            limited_json(self.get("com.atproto.space.listRepoOps", &query).await?).await?;
         Ok(OplogPage {
             ops: out.ops.into_iter().map(op_from_wire).collect(),
             commit: out.commit.map(commit_from_wire),
@@ -158,19 +154,18 @@ impl RepoHostClient for HttpRepoHost {
                 &[("space", space), ("repo", did)],
             )
             .await?;
-        Ok(resp.bytes().await.map_err(net_err)?.to_vec())
+        limited_bytes(resp).await
     }
 
     async fn get_latest_commit(&self, space: &str, did: &str) -> Result<SignedCommit> {
-        let out: wire::GetLatestCommitOutput = self
-            .get(
+        let out: wire::GetLatestCommitOutput = limited_json(
+            self.get(
                 "com.atproto.space.getLatestCommit",
                 &[("space", space), ("repo", did)],
             )
-            .await?
-            .json()
-            .await
-            .map_err(net_err)?;
+            .await?,
+        )
+        .await?;
         Ok(commit_from_wire(out.commit))
     }
 
@@ -184,11 +179,7 @@ impl RepoHostClient for HttpRepoHost {
         if let Some(cursor) = cursor {
             query.push(("cursor", cursor));
         }
-        self.get("com.atproto.space.listBlobs", &query)
-            .await?
-            .json()
-            .await
-            .map_err(net_err)
+        limited_json(self.get("com.atproto.space.listBlobs", &query).await?).await
     }
 }
 
@@ -620,10 +611,11 @@ mod resolving_tests {
             "sc.jwt",
             Arc::new(DpopSigner::generate().unwrap()),
         );
-        assert!(host
-            .list_repo_ops(SPACE, "did:plc:dave", None, None)
-            .await
-            .is_err());
+        assert!(
+            host.list_repo_ops(SPACE, "did:plc:dave", None, None)
+                .await
+                .is_err()
+        );
         assert!(host.get_repo_car(SPACE, "did:plc:dave").await.is_err());
         assert!(host.get_latest_commit(SPACE, "did:plc:dave").await.is_err());
         assert!(host.list_blobs(SPACE, "did:plc:dave", None).await.is_err());
