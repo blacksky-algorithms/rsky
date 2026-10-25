@@ -1124,7 +1124,9 @@ mod resolving_tests {
         );
     }
 
-    struct PrivateSpaceResolver;
+    struct PrivateSpaceResolver {
+        endpoint: String,
+    }
 
     struct PrivateDnsResolver(SocketAddr);
 
@@ -1143,7 +1145,7 @@ mod resolving_tests {
         }
 
         async fn space_host_url(&self, _did: &str) -> Result<Option<String>> {
-            Ok(Some("http://resolved.private.test:80".to_string()))
+            Ok(Some(self.endpoint.clone()))
         }
     }
 
@@ -1165,7 +1167,9 @@ mod resolving_tests {
             .build()
             .unwrap();
         let host = ResolvingSpaceHost::new_with_client(
-            Arc::new(PrivateSpaceResolver),
+            Arc::new(PrivateSpaceResolver {
+                endpoint: "http://resolved.private.test:80".to_string(),
+            }),
             "https://fallback.invalid",
             Arc::new(DpopSigner::generate().unwrap()),
             http,
@@ -1180,6 +1184,35 @@ mod resolving_tests {
             .await
             .unwrap_err();
         assert!(matches!(error, DaemonError::Xrpc(_)));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolved_space_host_constructor_rejects_loopback_hostname() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.space.listRepos"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "repos": []
+            })))
+            .mount(&server)
+            .await;
+        let host = ResolvingSpaceHost::new(
+            Arc::new(PrivateSpaceResolver {
+                endpoint: format!("http://localhost:{}", server.address().port()),
+            }),
+            "https://fallback.invalid",
+            Arc::new(DpopSigner::generate().unwrap()),
+        );
+        assert!(host
+            .list_repos(
+                "at://did:plc:authority/space/community.blacksky.feed/main",
+                "sc.jwt",
+                None,
+                None,
+            )
+            .await
+            .is_err());
         assert!(server.received_requests().await.unwrap().is_empty());
     }
 }

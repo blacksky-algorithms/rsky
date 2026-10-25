@@ -726,12 +726,14 @@ mod resolving_tests {
         assert!(fallback.received_requests().await.unwrap().is_empty());
     }
 
-    struct PrivateRepoResolver;
+    struct PrivateRepoResolver {
+        endpoint: String,
+    }
 
     #[async_trait]
     impl PdsResolver for PrivateRepoResolver {
         async fn pds_url(&self, _did: &str) -> Result<Option<String>> {
-            Ok(Some("http://resolved.private.test:80".to_string()))
+            Ok(Some(self.endpoint.clone()))
         }
 
         async fn space_host_url(&self, _did: &str) -> Result<Option<String>> {
@@ -767,7 +769,9 @@ mod resolving_tests {
             .build()
             .unwrap();
         let host = ResolvingRepoHost::new_with_client(
-            Arc::new(PrivateRepoResolver),
+            Arc::new(PrivateRepoResolver {
+                endpoint: "http://resolved.private.test:80".to_string(),
+            }),
             "https://fallback.invalid",
             "sc.jwt",
             Arc::new(DpopSigner::generate().unwrap()),
@@ -778,6 +782,28 @@ mod resolving_tests {
             .await
             .unwrap_err();
         assert!(matches!(error, DaemonError::Xrpc(_)));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolved_repo_host_constructor_rejects_loopback_hostname() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.space.listRepoOps"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ops": []
+            })))
+            .mount(&server)
+            .await;
+        let host = ResolvingRepoHost::new(
+            Arc::new(PrivateRepoResolver {
+                endpoint: format!("http://localhost:{}", server.address().port()),
+            }),
+            "https://fallback.invalid",
+            "sc.jwt",
+            Arc::new(DpopSigner::generate().unwrap()),
+        );
+        assert!(host.list_repo_ops(SPACE, AUTHOR, None, None).await.is_err());
         assert!(server.received_requests().await.unwrap().is_empty());
     }
 
