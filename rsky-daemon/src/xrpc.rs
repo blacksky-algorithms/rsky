@@ -7,22 +7,77 @@ use rsky_lexicon::com::atproto::space::{
     GetSpaceCredentialInput, GetSpaceCredentialOutput, ListReposOutput, RegisterNotifyInput,
     RegisterNotifyOutput,
 };
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use std::net::SocketAddr;
+use std::sync::Arc;
 
 use crate::dpop::DpopSigner;
 use crate::error::{DaemonError, Result};
 use crate::identity::PdsResolver;
 use rsky_space::space_id::SpaceId;
-use std::sync::Arc;
 
 pub const XRPC_TIMEOUT_SECS: u64 = 30;
 pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_CAR_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
+
+struct SystemResolver;
+
+struct FilteringResolver {
+    inner: Arc<dyn reqwest::dns::Resolve>,
+}
+
+impl FilteringResolver {
+    fn system() -> Self {
+        Self {
+            inner: Arc::new(SystemResolver),
+        }
+    }
+
+    #[cfg(test)]
+    fn new(inner: Arc<dyn reqwest::dns::Resolve>) -> Self {
+        Self { inner }
+    }
+}
+
+impl reqwest::dns::Resolve for SystemResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+                .await
+                .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?
+                .collect();
+            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+impl reqwest::dns::Resolve for FilteringResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let resolving = self.inner.resolve(name);
+        Box::pin(async move {
+            let addresses = resolving.await?;
+            let accepted: Vec<SocketAddr> = addresses
+                .filter(|address| crate::identity::is_global_address(address.ip()))
+                .collect();
+            if accepted.is_empty() {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "DNS resolved only to non-global addresses",
+                ))
+                    as Box<dyn std::error::Error + Send + Sync>);
+            }
+            Ok(Box::new(accepted.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
 
 pub(crate) fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(XRPC_TIMEOUT_SECS))
         .redirect(reqwest::redirect::Policy::none())
+        .dns_resolver(Arc::new(FilteringResolver::system()))
         .build()
         .expect("static reqwest client configuration")
 }
@@ -427,6 +482,7 @@ impl SpaceHostClient for ResolvingSpaceHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     fn test_dpop() -> Arc<DpopSigner> {
         Arc::new(DpopSigner::generate().unwrap())
@@ -462,6 +518,38 @@ mod tests {
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({"repos": []}))
             }
         }
+    }
+
+    struct StubResolver(Vec<SocketAddr>);
+
+    impl reqwest::dns::Resolve for StubResolver {
+        fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            let addresses = self.0.clone();
+            Box::pin(std::future::ready(Ok(
+                Box::new(addresses.into_iter()) as reqwest::dns::Addrs
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_dns_filter_rejects_non_global_stub_addresses() {
+        let resolver = FilteringResolver::new(Arc::new(StubResolver(vec!["127.0.0.1:443"
+            .parse()
+            .unwrap()])));
+        let error = resolver
+            .resolve(reqwest::dns::Name::from_str("pds.example").unwrap())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("non-global"));
+
+        let resolver =
+            FilteringResolver::new(Arc::new(StubResolver(vec!["8.8.8.8:443".parse().unwrap()])));
+        assert!(resolver
+            .resolve(reqwest::dns::Name::from_str("pds.example").unwrap())
+            .await
+            .unwrap()
+            .next()
+            .is_some());
     }
 
     #[tokio::test]
