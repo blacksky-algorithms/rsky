@@ -1245,8 +1245,8 @@ mod tests {
         assert_eq!(extract_blob_cids(&bytes), [cid.to_string()]);
     }
 
-    #[test]
-    fn migrates_the_old_ledger_without_changing_its_schema() {
+    #[tokio::test]
+    async fn migrates_the_old_ledger_without_changing_its_schema() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index.sqlite");
         {
@@ -1325,15 +1325,21 @@ mod tests {
             params!["at://space", "did:plc:author", "bafyC"],
         )
         .unwrap();
-        conn.execute(
-            "DELETE FROM blob_ref
-             WHERE space_uri = 'at://space' AND repo = 'did:plc:author'
-               AND cid = 'bafyC'",
-            [],
-        )
-        .unwrap();
         drop(conn);
         drop(index);
+
+        let migrated = Arc::new(SqliteIndex::open(path.to_str().unwrap()).unwrap());
+        let scoped = migrated.for_space("at://space");
+        scoped
+            .update_blob_ledger("did:plc:author", "c.o.l", "new", &["bafyC".to_string()])
+            .await
+            .unwrap();
+        scoped
+            .update_blob_ledger("did:plc:author", "c.o.l", "new", &[])
+            .await
+            .unwrap();
+        drop(scoped);
+        drop(migrated);
         let reopened = SqliteIndex::open(path.to_str().unwrap()).unwrap();
         let conn = reopened.conn.lock().unwrap();
         assert_eq!(
