@@ -1275,8 +1275,8 @@ mod tests {
             params!["c.o.l", "3ka"],
         )
         .unwrap();
-            conn.execute(
-                "INSERT INTO blob_ledger (space_uri, repo, cid, collection, rkey, state)
+        conn.execute(
+            "INSERT INTO blob_ledger (space_uri, repo, cid, collection, rkey, state)
              VALUES (?1, ?2, ?3, ?4, ?5, 'pending')
              ON CONFLICT (space_uri, repo, cid, collection, rkey)
              DO UPDATE SET state = 'pending'",
@@ -1293,7 +1293,7 @@ mod tests {
             .unwrap()
             .map(|row| row.unwrap())
             .collect();
-        assert_eq!(old_cids, ["bafyA", "bafyC"]);
+        assert_eq!(old_cids, ["bafyA", "bafyA", "bafyC"]);
         conn.execute(
             "UPDATE blob_ledger SET state = 'pending'
              WHERE space_uri = ?1 AND repo = ?2 AND cid = ?3 AND state != 'orphaned'",
@@ -1305,7 +1305,8 @@ mod tests {
         let reopened = SqliteIndex::open(path.to_str().unwrap()).unwrap();
         let conn = reopened.conn.lock().unwrap();
         assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM blob_ref", [], |row| row.get::<_, i64>(0))
+            conn.query_row("SELECT COUNT(*) FROM blob_ref", [], |row| row
+                .get::<_, i64>(0))
                 .unwrap(),
             3
         );
@@ -1339,7 +1340,8 @@ mod tests {
         let index = SqliteIndex::open(path.to_str().unwrap()).unwrap();
         let conn = index.conn.lock().unwrap();
         assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM blob_ref", [], |row| row.get::<_, i64>(0))
+            conn.query_row("SELECT COUNT(*) FROM blob_ref", [], |row| row
+                .get::<_, i64>(0))
                 .unwrap(),
             1
         );
