@@ -781,16 +781,14 @@ mod resolving_tests {
                 .unwrap(),
             "from-fallback"
         );
-        assert!(
-            host.get_space_credential("not a space", "dt", None)
-                .await
-                .is_err()
-        );
-        assert!(
-            host.get_space_credential(&space("did:plc:unresolvable"), "dt", None)
-                .await
-                .is_err()
-        );
+        assert!(host
+            .get_space_credential("not a space", "dt", None)
+            .await
+            .is_err());
+        assert!(host
+            .get_space_credential(&space("did:plc:unresolvable"), "dt", None)
+            .await
+            .is_err());
 
         host.list_repos(&space("did:plc:two"), "sc", None, None)
             .await
