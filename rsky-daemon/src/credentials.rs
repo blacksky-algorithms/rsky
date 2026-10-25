@@ -599,6 +599,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configured_auth_client_connects_to_a_private_hostname() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/internal/native-spaces/did%3Aplc%3Aauthority/delegation",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "delegationToken": "dt.jwt",
+                "expiresAt": 1893456000,
+            })))
+            .mount(&server)
+            .await;
+
+        let address = server.address();
+        let mut source = AuthDelegationSource::new(
+            format!("http://acorn-auth:{}", address.port()),
+            SPACE,
+            7,
+            "auth-key",
+        )
+        .unwrap();
+        source.http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(
+                crate::xrpc::XRPC_TIMEOUT_SECS,
+            ))
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve("acorn-auth", *address)
+            .build()
+            .unwrap();
+
+        assert_eq!(source.delegation_token(SPACE).await.unwrap(), "dt.jwt");
+    }
+
+    #[tokio::test]
     async fn auth_delegation_source_rejects_wrong_space_and_generation() {
         assert!(AuthDelegationSource::new("https://auth.example", SPACE, 0, "key").is_err());
         let source = AuthDelegationSource::new("https://auth.example", SPACE, 1, "key").unwrap();
