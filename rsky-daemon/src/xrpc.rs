@@ -141,6 +141,28 @@ where
         // `use_dpop_nonce` (or that issues no nonces at all) would otherwise
         // see that stale nonce on every request until the process restarts.
         if !retried && is_nonce_rejection(&parsed) {
+            let parsed_url = reqwest::Url::parse(url).ok();
+            let origin = parsed_url
+                .as_ref()
+                .and_then(|url| {
+                    Some(format!(
+                        "{}://{}:{}",
+                        url.scheme(),
+                        url.host_str()?,
+                        url.port_or_known_default()?
+                    ))
+                })
+                .unwrap_or_else(|| "invalid".to_string());
+            let path = parsed_url
+                .as_ref()
+                .map(|url| url.path())
+                .unwrap_or("<invalid-url>");
+            tracing::warn!(
+                origin = %origin,
+                method,
+                path,
+                "rejected DPoP nonce; clearing cached nonce and retrying"
+            );
             match nonce {
                 Some(nonce) => dpop.set_nonce(url, nonce),
                 None => dpop.clear_nonce(url),
