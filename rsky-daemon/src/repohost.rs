@@ -10,7 +10,10 @@ use serde_bytes::ByteBuf;
 use crate::dpop::DpopSigner;
 use crate::error::Result;
 use crate::identity::PdsResolver;
-use crate::xrpc::{http_client, limited_bytes, limited_json, send_with_dpop_retry};
+use crate::xrpc::{
+    http_client, limited_bytes_with_limit, limited_json, send_with_dpop_retry,
+    MAX_CAR_RESPONSE_BYTES,
+};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -154,7 +157,7 @@ impl RepoHostClient for HttpRepoHost {
                 &[("space", space), ("repo", did)],
             )
             .await?;
-        limited_bytes(resp).await
+        limited_bytes_with_limit(resp, MAX_CAR_RESPONSE_BYTES).await
     }
 
     async fn get_latest_commit(&self, space: &str, did: &str) -> Result<SignedCommit> {

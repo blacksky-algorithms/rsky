@@ -87,21 +87,31 @@ pub(crate) fn net_err(e: reqwest::Error) -> DaemonError {
 }
 
 pub(crate) async fn limited_bytes(response: reqwest::Response) -> Result<Vec<u8>> {
+    limited_bytes_with_limit(response, MAX_RESPONSE_BYTES).await
+}
+
+pub(crate) async fn limited_bytes_with_limit(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>> {
     if response
         .content_length()
-        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+        .is_some_and(|length| length > limit as u64)
     {
         return Err(DaemonError::Xrpc(
             "response body exceeds size limit".to_string(),
         ));
     }
-    let bytes = response.bytes().await.map_err(net_err)?;
-    if bytes.len() > MAX_RESPONSE_BYTES {
-        return Err(DaemonError::Xrpc(
-            "response body exceeds size limit".to_string(),
-        ));
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(net_err)? {
+        if bytes.len().saturating_add(chunk.len()) > limit {
+            return Err(DaemonError::Xrpc(
+                "response body exceeds size limit".to_string(),
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
     }
-    Ok(bytes.to_vec())
+    Ok(bytes)
 }
 
 pub(crate) async fn limited_json<T: DeserializeOwned>(response: reqwest::Response) -> Result<T> {
@@ -183,7 +193,7 @@ where
             .get("DPoP-Nonce")
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
-        let body = response.text().await.unwrap_or_default();
+        let body = String::from_utf8_lossy(&limited_bytes(response).await?).into_owned();
         let parsed: XrpcErrorBody = serde_json::from_str(&body).unwrap_or_default();
         if !retried && is_nonce_challenge(status, &response_headers, &parsed) {
             if let Some(nonce) = nonce {
