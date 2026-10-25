@@ -320,10 +320,6 @@ impl HttpSpaceHost {
         Self::with_http(base_url, dpop, configured_http_client())
     }
 
-    pub fn new_with_loopback(base_url: impl Into<String>, dpop: Arc<DpopSigner>) -> Self {
-        Self::with_http(base_url, dpop, configured_http_client())
-    }
-
     fn with_http(
         base_url: impl Into<String>,
         dpop: Arc<DpopSigner>,

@@ -132,7 +132,27 @@ impl SqliteIndex {
     fn migrate_blob_ledger(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             "BEGIN IMMEDIATE;
-             CREATE TABLE IF NOT EXISTS blob_state (
+             CREATE TABLE IF NOT EXISTS daemon_schema_meta (
+                 key TEXT PRIMARY KEY,
+                 value TEXT NOT NULL
+             );",
+        )
+        .map_err(db_err)?;
+        let already_migrated = conn
+            .query_row(
+                "SELECT 1 FROM daemon_schema_meta
+                 WHERE key = 'blob_ledger_v1'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(db_err)?
+            .is_some();
+        if already_migrated {
+            return conn.execute_batch("COMMIT;").map_err(db_err);
+        }
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS blob_state (
                  space_uri TEXT NOT NULL,
                  repo TEXT NOT NULL,
                  cid TEXT NOT NULL,
@@ -164,6 +184,8 @@ impl SqliteIndex {
                  (space_uri, repo, cid, collection, rkey)
              SELECT space_uri, repo, cid, collection, rkey
              FROM blob_ledger WHERE state != 'orphaned';
+             INSERT INTO daemon_schema_meta (key, value)
+             VALUES ('blob_ledger_v1', 'complete');
              COMMIT;",
         )
         .map_err(db_err)
@@ -1303,6 +1325,13 @@ mod tests {
             params!["at://space", "did:plc:author", "bafyC"],
         )
         .unwrap();
+        conn.execute(
+            "DELETE FROM blob_ref
+             WHERE space_uri = 'at://space' AND repo = 'did:plc:author'
+               AND cid = 'bafyC'",
+            [],
+        )
+        .unwrap();
         drop(conn);
         drop(index);
         let reopened = SqliteIndex::open(path.to_str().unwrap()).unwrap();
@@ -1311,7 +1340,17 @@ mod tests {
             conn.query_row("SELECT COUNT(*) FROM blob_ref", [], |row| row
                 .get::<_, i64>(0))
                 .unwrap(),
-            3
+            2
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM daemon_schema_meta
+                 WHERE key = 'blob_ledger_v1' AND value = 'complete'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
         );
     }
 
