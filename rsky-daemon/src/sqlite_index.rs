@@ -1232,9 +1232,12 @@ mod tests {
             conn.execute_batch(
                 "CREATE TABLE blob_ledger (
                      space_uri TEXT NOT NULL, repo TEXT NOT NULL, cid TEXT NOT NULL,
-                     collection TEXT NOT NULL, rkey TEXT NOT NULL, state TEXT NOT NULL,
+                     collection TEXT NOT NULL, rkey TEXT NOT NULL,
+                     state TEXT NOT NULL CHECK (state IN ('pending', 'fetched', 'orphaned')),
                      PRIMARY KEY (space_uri, repo, cid, collection, rkey)
                  );
+                 CREATE INDEX blob_ledger_repo_idx
+                     ON blob_ledger (space_uri, repo, state);
                  INSERT INTO blob_ledger VALUES
                      ('at://space', 'did:plc:author', 'bafyA', 'c.o.l', '3ka', 'pending'),
                      ('at://space', 'did:plc:author', 'bafyA', 'c.o.l', 'old', 'fetched'),
@@ -1320,9 +1323,12 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE blob_ledger (
                  space_uri TEXT NOT NULL, repo TEXT NOT NULL, cid TEXT NOT NULL,
-                 collection TEXT NOT NULL, rkey TEXT NOT NULL, state TEXT NOT NULL,
+                 collection TEXT NOT NULL, rkey TEXT NOT NULL,
+                 state TEXT NOT NULL CHECK (state IN ('pending', 'fetched', 'orphaned')),
                  PRIMARY KEY (space_uri, repo, cid, collection, rkey)
              );
+             CREATE INDEX blob_ledger_repo_idx
+                 ON blob_ledger (space_uri, repo, state);
              INSERT INTO blob_ledger VALUES
                  ('at://space', 'did:plc:author', 'bafyA', 'c.o.l', '3ka', 'pending');
              BEGIN IMMEDIATE;
