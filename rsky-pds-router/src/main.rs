@@ -3,6 +3,7 @@ use rsky_pds_router::config::Config;
 use rsky_pds_router::journal::Journal;
 use rsky_pds_router::lookup::AccountLookup;
 use rsky_pds_router::policy::Routing;
+use rsky_pds_router::raise_open_file_limit;
 use rsky_pds_router::server::{app, metrics_app, Deadlines, Router, Upstreams};
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,6 +16,7 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+    raise_open_file_limit();
     let config = Config::parse();
     let routing = Arc::new(Routing::new(
         config.policy_file.clone(),

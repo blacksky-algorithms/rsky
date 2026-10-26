@@ -8513,7 +8513,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-pds-router"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -8525,6 +8525,7 @@ dependencies = [
  "http-body-util",
  "hyper 1.7.0",
  "hyper-util",
+ "libc",
  "prometheus",
  "reqwest 0.12.23",
  "rusqlite",
