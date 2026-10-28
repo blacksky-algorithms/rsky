@@ -13,6 +13,8 @@ use crate::config::ActorStoreConfig;
 use crate::read_after_write::feed_json;
 use crate::read_after_write::types::{LocalRecords, RecordDescript};
 use crate::read_after_write::viewer::LocalViewer;
+use atrium_api::client::AtpServiceClient;
+use atrium_xrpc_client::reqwest::ReqwestClientBuilder;
 use chrono::{DateTime, Utc};
 use lexicon_cid::Cid;
 use rsky_lexicon::app::bsky::actor::{
@@ -32,8 +34,12 @@ use rsky_lexicon::com::atproto::label::Label;
 use rsky_lexicon::com::atproto::repo::{Blob, StrongRef};
 use rsky_syntax::aturi::AtUri;
 use serde_json::{json, Value};
+use std::future::Future;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 const TEST_DID: &str = "did:example:alice";
 const OTHER_DID: &str = "did:example:bob";
@@ -43,6 +49,10 @@ const TEST_CID: &str = "bafkreibjfgx2gprinfvicegelk5kosd6y2frmqpqzwqkg7usac74l3t
 const TEST_SECRET_HEX: &str = "1d2f8064213bd212453fa93943c084dbbf42104d02f1f02b23a638f9a48f925a";
 
 async fn test_viewer() -> (tempfile::TempDir, LocalViewer) {
+    test_viewer_with_appview(None).await
+}
+
+async fn test_viewer_with_appview(appview: Option<String>) -> (tempfile::TempDir, LocalViewer) {
     let dir = tempfile::tempdir().unwrap();
     let cfg = ActorStoreConfig {
         directory: dir.path().join("actors").to_string_lossy().to_string(),
@@ -73,13 +83,19 @@ async fn test_viewer() -> (tempfile::TempDir, LocalViewer) {
     .await
     .unwrap();
     let account_manager = AccountManager::new(account_db);
+    let appview_agent = appview
+        .as_ref()
+        .map(|url| AtpServiceClient::new(ReqwestClientBuilder::new(url).build()));
+    let appview_did = appview
+        .as_ref()
+        .map(|_| "did:web:appview.invalid".to_owned());
     let viewer = LocalViewer::new(
         reader,
         account_manager,
         TEST_HOSTNAME.to_owned(),
-        None,
-        None,
-        None,
+        appview_agent,
+        appview,
+        appview_did,
         None,
     );
     (dir, viewer)
@@ -248,7 +264,9 @@ async fn profile_munge_without_local_profile_returns_original() {
             "2024-01-02T00:00:00.000Z",
         )],
     );
-    let munged = get_profile_munge(viewer, original.clone(), local, TEST_DID.to_owned()).unwrap();
+    let munged = get_profile_munge(viewer, original.clone(), local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged, original);
 }
 
@@ -260,7 +278,9 @@ async fn profile_munge_skips_profiles_of_other_accounts() {
         Some(profile_descript(profile_record("New", "new bio"))),
         vec![],
     );
-    let munged = get_profile_munge(viewer, original.clone(), local, TEST_DID.to_owned()).unwrap();
+    let munged = get_profile_munge(viewer, original.clone(), local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged, original);
 }
 
@@ -275,7 +295,9 @@ async fn profile_munge_overlays_record_fields_and_counts_local_posts() {
             post_descript("b", post_record("two"), "2024-01-03T00:00:00.000Z"),
         ],
     );
-    let munged = get_profile_munge(viewer, original, local, TEST_DID.to_owned()).unwrap();
+    let munged = get_profile_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged.display_name, Some("New Name".to_owned()));
     assert_eq!(munged.description, Some("new bio".to_owned()));
     let avatar = munged.avatar.expect("avatar url");
@@ -309,7 +331,9 @@ async fn profile_munge_clears_fields_missing_from_local_record() {
         created_at: Some(fixed_datetime()),
     };
     let local = local_records(Some(profile_descript(record)), vec![]);
-    let munged = get_profile_munge(viewer, original, local, TEST_DID.to_owned()).unwrap();
+    let munged = get_profile_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged.display_name, None);
     assert_eq!(munged.description, None);
     assert_eq!(munged.avatar, None);
@@ -333,7 +357,9 @@ async fn profiles_munge_updates_only_the_requester() {
             "2024-01-02T00:00:00.000Z",
         )],
     );
-    let munged = get_profiles_munge(viewer, original, local, TEST_DID.to_owned()).unwrap();
+    let munged = get_profiles_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged.profiles[0].display_name, Some("Old Name".to_owned()));
     assert_eq!(munged.profiles[0].posts_count, Some(10));
     assert_eq!(munged.profiles[1].display_name, Some("New Name".to_owned()));
@@ -451,8 +477,9 @@ async fn author_feed_munge_leaves_foreign_feeds_untouched() {
             "2024-01-02T00:00:00.000Z",
         )],
     );
-    let munged =
-        get_author_feed_munge(viewer, original.clone(), local, TEST_DID.to_owned()).unwrap();
+    let munged = get_author_feed_munge(viewer, original.clone(), local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged, original);
 }
 
@@ -461,8 +488,9 @@ async fn author_feed_munge_passes_through_a_body_without_a_feed() {
     let (_dir, viewer) = test_viewer().await;
     let original = json!({ "unexpected": true });
     let local = local_records(None, vec![]);
-    let munged =
-        get_author_feed_munge(viewer, original.clone(), local, TEST_DID.to_owned()).unwrap();
+    let munged = get_author_feed_munge(viewer, original.clone(), local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged, original);
 }
 
@@ -481,7 +509,9 @@ async fn author_feed_munge_updates_author_and_inserts_local_posts() {
             "2024-01-02T00:00:00.000Z",
         )],
     );
-    let munged = get_author_feed_munge(viewer, original, local, TEST_DID.to_owned()).unwrap();
+    let munged = get_author_feed_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged["cursor"], json!("cursor"));
     let feed = munged["feed"].as_array().unwrap();
     assert_eq!(feed.len(), 2);
@@ -512,7 +542,9 @@ async fn author_feed_munge_removes_author_keys_the_pending_profile_cleared() {
     let mut cleared = profile_record("Only Name", "bio");
     cleared.avatar = None;
     let local = local_records(Some(profile_descript(cleared)), vec![]);
-    let munged = get_author_feed_munge(viewer, original, local, TEST_DID.to_owned()).unwrap();
+    let munged = get_author_feed_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     let author = &munged["feed"][0]["post"]["author"];
     assert_eq!(author["displayName"], json!("Only Name"));
     assert!(author.get("avatar").is_none());
@@ -538,7 +570,9 @@ async fn author_feed_munge_inserts_posts_without_local_profile() {
             "2024-01-02T00:00:00.000Z",
         )],
     );
-    let munged = get_author_feed_munge(viewer, original, local, TEST_DID.to_owned()).unwrap();
+    let munged = get_author_feed_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     let feed = munged["feed"].as_array().unwrap();
     assert_eq!(feed.len(), 2);
     assert_eq!(
@@ -567,7 +601,9 @@ async fn author_feed_munge_keeps_a_pinned_item_first() {
             "2024-01-02T00:00:00.000Z",
         )],
     );
-    let munged = get_author_feed_munge(viewer, original, local, TEST_DID.to_owned()).unwrap();
+    let munged = get_author_feed_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     let uris: Vec<&str> = munged["feed"]
         .as_array()
         .unwrap()
@@ -613,8 +649,9 @@ async fn author_feed_munge_preserves_reposts_and_viewer_state() {
         profile: None,
         posts: vec![],
     };
-    let munged =
-        get_author_feed_munge(viewer, original.clone(), local, TEST_DID.to_owned()).unwrap();
+    let munged = get_author_feed_munge(viewer, original.clone(), local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged, original);
     assert_wire_round_trip(&munged);
 }
@@ -693,7 +730,9 @@ async fn actor_likes_munge_updates_profile_but_never_inserts_posts() {
             "2024-01-02T00:00:00.000Z",
         )],
     );
-    let munged = get_actor_likes_munge(viewer, original, local, TEST_DID.to_owned()).unwrap();
+    let munged = get_actor_likes_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     let feed = munged["feed"].as_array().unwrap();
     assert_eq!(feed.len(), 2);
     assert_eq!(feed[0]["post"]["author"]["displayName"], json!("New Name"));
@@ -715,8 +754,9 @@ async fn actor_likes_munge_without_local_profile_returns_original() {
         )],
     );
     let local = local_records(None, vec![]);
-    let munged =
-        get_actor_likes_munge(viewer, original.clone(), local, TEST_DID.to_owned()).unwrap();
+    let munged = get_actor_likes_munge(viewer, original.clone(), local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged, original);
 }
 
@@ -741,7 +781,9 @@ async fn timeline_munge_inserts_local_posts_in_order() {
             post_descript("b", post_record("newer"), "2024-01-03T00:00:00.000Z"),
         ],
     );
-    let munged = get_timeline_munge(viewer, original, local, TEST_DID.to_owned()).unwrap();
+    let munged = get_timeline_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged["cursor"], json!("cursor"));
     let uris: Vec<&str> = munged["feed"]
         .as_array()
@@ -778,7 +820,9 @@ async fn timeline_munge_skips_posts_older_than_the_feed_window() {
             "2024-01-02T00:00:00.000Z",
         )],
     );
-    let munged = get_timeline_munge(viewer, original.clone(), local, TEST_DID.to_owned()).unwrap();
+    let munged = get_timeline_munge(viewer, original.clone(), local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged, original);
 }
 
@@ -805,7 +849,9 @@ async fn timeline_munge_keeps_reposts_pins_and_viewer_state_while_inserting() {
             "2024-01-02T00:00:00.000Z",
         )],
     );
-    let munged = get_timeline_munge(viewer, original, local, TEST_DID.to_owned()).unwrap();
+    let munged = get_timeline_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     let feed = munged["feed"].as_array().unwrap();
     assert_eq!(feed.len(), 3);
     assert_eq!(feed[0], reposted);
@@ -829,7 +875,9 @@ async fn timeline_munge_passes_through_a_body_without_a_feed() {
             "2024-01-02T00:00:00.000Z",
         )],
     );
-    let munged = get_timeline_munge(viewer, original.clone(), local, TEST_DID.to_owned()).unwrap();
+    let munged = get_timeline_munge(viewer, original.clone(), local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged, original);
 }
 
@@ -850,7 +898,9 @@ async fn post_thread_munge_grafts_local_replies_onto_the_thread() {
             "2024-01-02T00:00:00.000Z",
         )],
     );
-    let munged = get_post_thread_munge(viewer, original, local, TEST_DID.to_owned()).unwrap();
+    let munged = get_post_thread_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     let thread = &munged["thread"];
     assert_eq!(thread["$type"], json!("app.bsky.feed.defs#threadViewPost"));
     assert_eq!(thread["post"], root["post"]);
@@ -894,7 +944,9 @@ async fn post_thread_munge_prepends_replies_and_reaches_nested_parents() {
             ),
         ],
     );
-    let munged = get_post_thread_munge(viewer, original, local, TEST_DID.to_owned()).unwrap();
+    let munged = get_post_thread_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     let replies = munged["thread"]["replies"].as_array().unwrap();
     let uris: Vec<&str> = replies.iter().map(post_uri).collect();
     assert_eq!(
@@ -937,8 +989,9 @@ async fn post_thread_munge_passes_through_not_found_threads() {
             "2024-01-02T00:00:00.000Z",
         )],
     );
-    let munged =
-        get_post_thread_munge(viewer, original.clone(), local, TEST_DID.to_owned()).unwrap();
+    let munged = get_post_thread_munge(viewer, original.clone(), local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged, original);
 }
 
@@ -947,8 +1000,9 @@ async fn post_thread_munge_passes_through_a_body_without_a_thread() {
     let (_dir, viewer) = test_viewer().await;
     let original = json!({ "unexpected": true });
     let local = local_records(None, vec![]);
-    let munged =
-        get_post_thread_munge(viewer, original.clone(), local, TEST_DID.to_owned()).unwrap();
+    let munged = get_post_thread_munge(viewer, original.clone(), local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged, original);
 }
 
@@ -1210,4 +1264,177 @@ async fn service_auth_headers_are_signed_with_the_actors_key() {
     .unwrap();
     assert_eq!(payload.iss, TEST_DID);
     drop(dir);
+}
+
+// Runtime starvation
+// ------------------
+//
+// Formatting a pending quote post asks the appview for the quoted post, so the
+// munge future only completes once the runtime drives that round trip. A munge
+// that blocked its worker thread on that future could never be woken on a
+// runtime whose only worker it was holding, which is how the server hung in
+// production once every worker was parked in one.
+
+fn quoted_uri() -> String {
+    format!("at://{OTHER_DID}/app.bsky.feed.post/quoted")
+}
+
+fn quoted_post_json() -> Value {
+    json!({
+        "$type": "app.bsky.feed.defs#postView",
+        "uri": quoted_uri(),
+        "cid": TEST_CID,
+        "author": { "did": OTHER_DID, "handle": "bob.test" },
+        "record": {
+            "$type": "app.bsky.feed.post",
+            "text": "quoted",
+            "createdAt": "2024-01-01T00:00:00.000Z"
+        },
+        "indexedAt": "2024-01-01T00:00:00.000Z"
+    })
+}
+
+fn quote_record(mut record: Post) -> Post {
+    record.embed = Some(Embeds::Record(RecordEmbed {
+        record: StrongRef {
+            uri: quoted_uri(),
+            cid: TEST_CID.to_owned(),
+        },
+    }));
+    record
+}
+
+/// Answers every request with the quoted post, as `app.bsky.feed.getPosts` would.
+fn start_mock_appview() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 4096];
+            while !raw.windows(4).any(|window| window == b"\r\n\r\n") {
+                let n = stream.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&buf[..n]);
+            }
+            let body = json!({ "posts": [quoted_post_json()] }).to_string();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// Runs `work` as a task on a runtime with a single worker thread, as a
+/// request handler runs, and fails if it has not finished within the deadline.
+fn complete_on_one_worker<T, F, Fut>(work: F) -> T
+where
+    T: Send + 'static,
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = T> + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let outcome = runtime.block_on(async { tokio::spawn(work()).await.unwrap() });
+        let _ = tx.send(outcome);
+    });
+    rx.recv_timeout(Duration::from_secs(20))
+        .expect("the munge parked the only runtime worker")
+}
+
+fn embedded_record_uri(post: &Value) -> &Value {
+    &post["embed"]["record"]["uri"]
+}
+
+#[test]
+fn timeline_munge_with_a_quote_post_does_not_park_the_runtime() {
+    let appview = start_mock_appview();
+    let munged = complete_on_one_worker(move || async move {
+        let (_dir, viewer) = test_viewer_with_appview(Some(appview)).await;
+        let original = author_feed_json(None, vec![]);
+        let local = local_records(
+            None,
+            vec![post_descript(
+                "quote",
+                quote_record(post_record("look at this")),
+                "2024-01-02T00:00:00.000Z",
+            )],
+        );
+        get_timeline_munge(viewer, original, local, TEST_DID.to_owned())
+            .await
+            .unwrap()
+    });
+    let feed = munged["feed"].as_array().unwrap();
+    assert_eq!(feed.len(), 1);
+    assert_eq!(embedded_record_uri(&feed[0]["post"]), &json!(quoted_uri()));
+}
+
+#[test]
+fn author_feed_munge_with_a_quote_post_does_not_park_the_runtime() {
+    let appview = start_mock_appview();
+    let munged = complete_on_one_worker(move || async move {
+        let (_dir, viewer) = test_viewer_with_appview(Some(appview)).await;
+        let original = author_feed_json(
+            None,
+            vec![feed_item_json(
+                TEST_DID,
+                &format!("at://{TEST_DID}/app.bsky.feed.post/published"),
+                "2024-01-01T00:00:00.000Z",
+            )],
+        );
+        let local = local_records(
+            None,
+            vec![post_descript(
+                "quote",
+                quote_record(post_record("look at this")),
+                "2024-01-02T00:00:00.000Z",
+            )],
+        );
+        get_author_feed_munge(viewer, original, local, TEST_DID.to_owned())
+            .await
+            .unwrap()
+    });
+    let feed = munged["feed"].as_array().unwrap();
+    assert_eq!(feed.len(), 2);
+    assert_eq!(embedded_record_uri(&feed[0]["post"]), &json!(quoted_uri()));
+}
+
+#[test]
+fn post_thread_munge_with_a_quote_reply_does_not_park_the_runtime() {
+    let appview = start_mock_appview();
+    let munged = complete_on_one_worker(move || async move {
+        let (_dir, viewer) = test_viewer_with_appview(Some(appview)).await;
+        let root_uri = format!("at://{TEST_DID}/app.bsky.feed.post/root");
+        let original =
+            json!({ "thread": thread_node(TEST_DID, &root_uri, "2024-01-01T00:00:00.000Z") });
+        let local = local_records(
+            None,
+            vec![post_descript(
+                "reply",
+                quote_record(reply_record("quoting reply", &root_uri, &root_uri)),
+                "2024-01-02T00:00:00.000Z",
+            )],
+        );
+        get_post_thread_munge(viewer, original, local, TEST_DID.to_owned())
+            .await
+            .unwrap()
+    });
+    let replies = munged["thread"]["replies"].as_array().unwrap();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(
+        embedded_record_uri(&replies[0]["post"]),
+        &json!(quoted_uri())
+    );
 }

@@ -192,7 +192,7 @@ pub async fn get_post_thread(
     }
 }
 
-pub fn get_post_thread_munge(
+pub async fn get_post_thread_munge(
     local_viewer: LocalViewer,
     mut original: Value,
     local: LocalRecords,
@@ -205,8 +205,7 @@ pub fn get_post_thread_munge(
         return Ok(original);
     }
     let thread = std::mem::take(thread);
-    let thread =
-        futures::executor::block_on(add_posts_to_thread(&local_viewer, thread, local.posts))?;
+    let thread = add_posts_to_thread(&local_viewer, thread, local.posts).await?;
     original["thread"] = thread;
     Ok(original)
 }

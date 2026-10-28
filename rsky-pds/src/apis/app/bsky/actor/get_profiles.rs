@@ -74,7 +74,7 @@ pub async fn get_profiles(
     }
 }
 
-pub fn get_profiles_munge(
+pub async fn get_profiles_munge(
     local_viewer: LocalViewer,
     original: GetProfilesOutput,
     local: LocalRecords,

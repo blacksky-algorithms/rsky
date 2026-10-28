@@ -93,7 +93,7 @@ pub async fn get_actor_likes(
     }
 }
 
-pub fn get_author_munge(
+pub async fn get_author_munge(
     local_viewer: LocalViewer,
     mut original: Value,
     local: LocalRecords,

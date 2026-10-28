@@ -92,7 +92,7 @@ pub async fn get_timeline(
     }
 }
 
-pub fn get_timeline_munge(
+pub async fn get_timeline_munge(
     local_viewer: LocalViewer,
     mut original: Value,
     local: LocalRecords,
@@ -102,9 +102,9 @@ pub fn get_timeline_munge(
         return Ok(original);
     };
     let feed = std::mem::take(feed);
-    let feed = futures::executor::block_on(
-        local_viewer.format_and_insert_posts_in_feed(feed, local.posts),
-    )?;
+    let feed = local_viewer
+        .format_and_insert_posts_in_feed(feed, local.posts)
+        .await?;
     original["feed"] = Value::Array(feed);
     Ok(original)
 }
