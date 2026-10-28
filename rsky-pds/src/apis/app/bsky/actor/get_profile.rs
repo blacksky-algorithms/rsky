@@ -82,7 +82,7 @@ pub async fn get_profile(
     }
 }
 
-pub fn get_profile_munge(
+pub async fn get_profile_munge(
     local_viewer: LocalViewer,
     original: ProfileViewDetailed,
     local: LocalRecords,

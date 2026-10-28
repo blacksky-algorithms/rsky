@@ -17,12 +17,11 @@ use rsky_common::time::from_str_to_utc;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::io::Cursor;
 use std::time::SystemTime;
 
 const REPO_REV_HEADER: &str = "atproto-repo-rev";
-
-pub type MungeFn<T> = fn(LocalViewer, T, LocalRecords, String) -> Result<T>;
 
 #[derive(Serialize)]
 pub struct HandlerResponse<T: Serialize> {
@@ -105,16 +104,21 @@ pub fn get_local_lag(local: &LocalRecords) -> Result<Option<usize>> {
 
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
-pub async fn handle_read_after_write<T: DeserializeOwned + serde::Serialize>(
+pub async fn handle_read_after_write<T, M, F>(
     nsid: String,
     requester: String,
     res: HandlerPipeThrough,
-    munge: MungeFn<T>,
+    munge: M,
     blobstore_factory: &State<BlobstoreFactory>,
     state_local_viewer: &State<SharedLocalViewer>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
-) -> Result<ReadAfterWriteResponse<T>> {
+) -> Result<ReadAfterWriteResponse<T>>
+where
+    T: DeserializeOwned + Serialize,
+    M: FnOnce(LocalViewer, T, LocalRecords, String) -> F,
+    F: Future<Output = Result<T>>,
+{
     match read_after_write_internal(
         nsid,
         requester.clone(),
@@ -140,16 +144,21 @@ pub async fn handle_read_after_write<T: DeserializeOwned + serde::Serialize>(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn read_after_write_internal<T: DeserializeOwned + serde::Serialize>(
+pub async fn read_after_write_internal<T, M, F>(
     nsid: String,
     requester: String,
     res: HandlerPipeThrough,
-    munge: MungeFn<T>,
+    munge: M,
     blobstore_factory: &State<BlobstoreFactory>,
     state_local_viewer: &State<SharedLocalViewer>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
-) -> Result<ReadAfterWriteResponse<T>> {
+) -> Result<ReadAfterWriteResponse<T>>
+where
+    T: DeserializeOwned + Serialize,
+    M: FnOnce(LocalViewer, T, LocalRecords, String) -> F,
+    F: Future<Output = Result<T>>,
+{
     let headers = &res.headers.clone().unwrap_or_default();
     let rev = get_repo_rev(headers);
     match rev {
@@ -165,10 +174,12 @@ pub async fn read_after_write_internal<T: DeserializeOwned + serde::Serialize>(
             if local.count <= 0 {
                 return Ok(ReadAfterWriteResponse::HandlerPipeThrough(res));
             }
-            let local_viewer_lock = state_local_viewer.local_viewer.read().await;
-            let local_viewer = local_viewer_lock(actor_store, account_manager);
+            let local_viewer = {
+                let create = state_local_viewer.local_viewer.read().await;
+                create(actor_store, account_manager)
+            };
             let parse_res = parse_res(nsid, res)?;
-            let data = munge(local_viewer, parse_res, local.clone(), requester)?;
+            let data = munge(local_viewer, parse_res, local.clone(), requester).await?;
             Ok(ReadAfterWriteResponse::HandlerResponse(
                 format_munged_response(data, get_local_lag(&local)?)?,
             ))

@@ -118,7 +118,7 @@ pub async fn get_author_feed(
     }
 }
 
-pub fn get_author_munge(
+pub async fn get_author_munge(
     local_viewer: LocalViewer,
     mut original: Value,
     local: LocalRecords,
@@ -139,9 +139,9 @@ pub fn get_author_munge(
         }
     }
     let feed = std::mem::take(feed);
-    let feed = futures::executor::block_on(
-        local_viewer.format_and_insert_posts_in_feed(feed, local.posts),
-    )?;
+    let feed = local_viewer
+        .format_and_insert_posts_in_feed(feed, local.posts)
+        .await?;
     original["feed"] = Value::Array(feed);
     Ok(original)
 }
