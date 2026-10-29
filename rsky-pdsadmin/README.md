@@ -17,13 +17,13 @@ A Rust command-line utility for administering RSKY-PDS (Personal Data Server) in
 ```bash
 # Clone the repository (if you haven't already)
 git clone https://github.com/blacksky-algorithms/rsky.git
-cd rsky
+cd rsky/rsky-pdsadmin
 
 # Build the pdsadmin tool
-cargo build --package rsky-pdsadmin
+cargo build
 
 # Optionally, install it for system-wide access
-cargo install --path rsky-pdsadmin
+cargo install --path .
 ```
 
 ### Features
