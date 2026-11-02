@@ -90,7 +90,7 @@ pub async fn space_notify_write(
         return Err(ApiError::InvalidToken("Token is invalid".to_string()));
     }
     // The space's write axis decides whether this writer is tracked and their
-    // notice forwarded; an unauthorized writer's notice is dropped (spec
+    // notice forwarded; an unauthorized writer's notice is rejected (spec
     // §Baseline policies).
     let signer = Signer::from_secret(
         SecretKey::from_slice(&keypair.secret_bytes()).expect("actor key is a valid secret"),
@@ -108,8 +108,10 @@ pub async fn space_notify_write(
         .await
         .unwrap_or(false);
     if !authorized {
-        tracing::debug!(space = %space, %repo, %rev, "write notice from unauthorized writer dropped");
-        return Ok(());
+        tracing::debug!(space = %space, %repo, %rev, "write notice from unauthorized writer rejected");
+        return Err(ApiError::Forbidden(format!(
+            "repo {repo} is not authorized to write in this space"
+        )));
     }
     space_store
         .upsert_writer(&space_id.uri(), &repo, &rev, None)

@@ -414,8 +414,8 @@ async fn notify_write(
         .authorizes(&input.space, Some(&input.repo), Access::Write, None)
         .await?
     {
-        tracing::debug!(space = %input.space, repo = %input.repo, "write notice from unauthorized writer dropped");
-        return Ok(Json(serde_json::json!({})));
+        tracing::debug!(space = %input.space, repo = %input.repo, "write notice from unauthorized writer rejected");
+        return Err(HostError::NotAuthorized.into());
     }
 
     let now = (state.now)();
