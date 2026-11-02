@@ -1,0 +1,36 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.space.updateSpace",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Replace a space's policy object wholesale. A policy with the same $type is a configuration change; a different $type migrates the space to a new policy and discards the previous policy's state (such as a memberspace member list). The updated policy is surfaced through com.atproto.space.getSpace. Requires auth with a covering manage=update grant, implemented by PDS.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["space", "policy"],
+          "properties": {
+            "space": {
+              "type": "string",
+              "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
+            },
+            "policy": {
+              "type": "union",
+              "refs": [
+                "com.atproto.personalspace.policy#main",
+                "com.atproto.memberspace.policy#main",
+                "com.atproto.managedspace.policy#main"
+              ],
+              "description": "The space's new policy object. Open union; policies other than the baseline set may be supported by a PDS."
+            }
+          }
+        }
+      },
+      "errors": [
+        { "name": "SpaceNotFound" },
+        { "name": "UnsupportedPolicy" }
+      ]
+    }
+  }
+}
