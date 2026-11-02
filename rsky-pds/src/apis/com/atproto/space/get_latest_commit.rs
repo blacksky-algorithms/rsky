@@ -30,6 +30,7 @@ pub async fn serve_latest_commit(
         &account_manager,
         &repo,
         false,
+        &auth,
     )
     .await?;
     let commit = serve_commit(&reader, &space_id.uri()).await?;

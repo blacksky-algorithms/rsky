@@ -188,6 +188,7 @@ fn jwt_typ(token: &str) -> Option<String> {
 pub struct SpaceCredentialAuth {
     pub space_uri: String,
     pub authority: String,
+    pub jti: String,
 }
 
 async fn verify_space_credential_token(
@@ -223,10 +224,31 @@ async fn verify_space_credential_token(
     let bound_jkt =
         credential::verify_space_credential(token, &space_uri, &authority, &did_key, now_secs())
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let jti = decoded.claims.jti.clone();
+    if actor_store.exists(&authority).await.unwrap_or(false) {
+        let blob_factory = req
+            .guard::<&State<crate::actor_store::blobstore::BlobstoreFactory>>()
+            .await
+            .expect("BlobstoreFactory managed");
+        if let Ok(reader) = actor_store
+            .read(authority.clone(), blob_factory.blobstore(authority.clone()))
+            .await
+        {
+            if reader
+                .space
+                .credential_revoked(&space_uri, &jti)
+                .await
+                .unwrap_or(false)
+            {
+                bail!("space credential has been revoked");
+            }
+        }
+    }
     verify_bound_proof(req, token, &bound_jkt).await?;
     Ok(SpaceCredentialAuth {
         space_uri,
         authority,
+        jti,
     })
 }
 

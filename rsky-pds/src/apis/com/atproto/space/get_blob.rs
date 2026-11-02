@@ -43,6 +43,7 @@ pub async fn space_get_blob(
         &account_manager,
         &repo,
         false,
+        &auth,
     )
     .await?;
     reader

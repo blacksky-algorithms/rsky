@@ -41,6 +41,7 @@ pub mod list_records;
 pub mod list_repo_ops;
 pub mod list_repos;
 pub mod list_spaces;
+pub mod notify_credential_revoked;
 pub mod notify_space_deleted;
 pub mod notify_write;
 pub mod publish;
@@ -192,17 +193,33 @@ pub async fn open_local_repo(
     account_manager: &AccountManager,
     did: &str,
     is_user_or_admin: bool,
+    auth: &crate::space_auth::SpaceReadAuth,
 ) -> Result<ActorStoreReader, ApiError> {
     assert_repo_availability(did, is_user_or_admin, account_manager)
         .await
         .map_err(|error| ApiError::BadRequest("RepoNotFound".to_string(), error.to_string()))?;
-    actor_store
+    let reader = actor_store
         .read(
             did.to_string(),
             blobstore_factory.blobstore(did.to_string()),
         )
         .await
-        .map_err(|error| ApiError::BadRequest("RepoNotFound".to_string(), error.to_string()))
+        .map_err(|error| ApiError::BadRequest("RepoNotFound".to_string(), error.to_string()))?;
+    // Credentials revoked for this repo's space are rejected here
+    // (com.atproto.space.notifyCredentialRevoked).
+    if let crate::space_auth::SpaceReadAuth::Credential(credential) = auth {
+        if reader
+            .space
+            .credential_revoked(&credential.space_uri, &credential.jti)
+            .await
+            .unwrap_or(false)
+        {
+            return Err(ApiError::InvalidToken(
+                "Token is invalid".to_string(),
+            ));
+        }
+    }
+    Ok(reader)
 }
 
 /// Sign the current commit for a repo at serve time.
