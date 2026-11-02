@@ -246,6 +246,19 @@ pub const ACTOR_DB_MIGRATIONS: &[Migration] = &[
         ELSE '{\"$type\":\"com.atproto.memberspace.policy\"}' \
     END;",
     },
+    // Revoked space credentials (spec §Access control): a repo host keeps
+    // each revoked jti for at least 60 minutes, by which time every
+    // credential with it has expired anyway.
+    Migration {
+        name: "007",
+        sql: "\
+    CREATE TABLE space_revoked (\
+        space_uri TEXT NOT NULL, \
+        jti TEXT NOT NULL, \
+        revoked_at INTEGER NOT NULL, \
+        PRIMARY KEY (space_uri, jti)\
+    );",
+    },
 ];
 
 /// The first migration is the reference actor-store schema; the rest are
@@ -382,6 +395,7 @@ mod tests {
                 "space_record",
                 "space_repo",
                 "space_repo_notify",
+                "space_revoked",
                 "space_used_jti",
                 "space_writer"
             ]

@@ -160,6 +160,18 @@ pub struct MemberRow {
     pub added_at: String,
 }
 
+/// A record decoded from a repo archive for [`SpaceStore::replace_repo`]:
+/// the record's canonical bytes and CID are preserved from the archive so
+/// the rebuilt digest matches the commit it carried.
+#[derive(Debug, Clone)]
+pub struct ImportedRecord {
+    pub collection: String,
+    pub rkey: String,
+    pub cid: String,
+    pub bytes: Vec<u8>,
+    pub blob_cids: Vec<String>,
+}
+
 /// A registered write-notification subscriber.
 ///
 /// `service` is the DID (with optional service fragment) a delivery is
@@ -880,6 +892,219 @@ impl SpaceStore {
                     "DELETE FROM space_writer WHERE space_uri = ?1 AND did = ?2",
                     params![space_uri, did],
                 )? > 0)
+            })
+            .await
+    }
+
+    /// Replace the whole writer set on `importSpaceMeta`.
+    pub async fn clear_writers(&self, space_uri: &str) -> Result<()> {
+        let space_uri = space_uri.to_string();
+        self.db
+            .run(move |conn| {
+                conn.execute(
+                    "DELETE FROM space_writer WHERE space_uri = ?1",
+                    params![space_uri],
+                )?;
+                Ok(())
+            })
+            .await
+    }
+
+    /// Record revoked space credentials (spec §Access control); each `jti`
+    /// stays rejected for at least 60 minutes, by which point every
+    /// credential carrying it has expired anyway.
+    pub async fn revoke_credentials(&self, space_uri: &str, jtis: &[String]) -> Result<()> {
+        let space_uri = space_uri.to_string();
+        let jtis = jtis.to_vec();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.db
+            .tx(move |tx| {
+                for jti in &jtis {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO space_revoked (space_uri, jti, revoked_at) \
+                         VALUES (?1, ?2, ?3)",
+                        params![space_uri, jti, now],
+                    )?;
+                }
+                tx.execute(
+                    "DELETE FROM space_revoked WHERE revoked_at < ?1",
+                    params![now - 3600],
+                )?;
+                Ok(())
+            })
+            .await
+    }
+
+    /// Whether a credential's `jti` was revoked within the retention window.
+    pub async fn credential_revoked(&self, space_uri: &str, jti: &str) -> Result<bool> {
+        let (space_uri, jti) = (space_uri.to_string(), jti.to_string());
+        let cutoff = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64 - 3600)
+            .unwrap_or(0);
+        Ok(self
+            .db
+            .run(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT 1 FROM space_revoked WHERE space_uri = ?1 AND jti = ?2 AND revoked_at >= ?3",
+                        params![space_uri, jti, cutoff],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some())
+            })
+            .await?)
+    }
+
+    /// `clearRecords`: drop every record except the `keep` collections (the
+    /// published policy/member records in the authority's own repo), advance
+    /// to a fresh rev whose digest covers only what remains, and empty the
+    /// operation log (spec §Repo lifecycle).
+    pub async fn clear_repo(
+        &self,
+        space: &SpaceId,
+        keep: &[&str],
+    ) -> Result<SpaceCommitResult> {
+        let rev = TID::next_str(None)?;
+        let keep: Vec<String> = keep.iter().map(|c| c.to_string()).collect();
+        let space_uri = space.uri();
+        let (authority, space_type, skey) = (
+            space.authority.clone(),
+            space.space_type.clone(),
+            space.skey.clone(),
+        );
+        self.db
+            .tx(move |tx| {
+                let survivors: Vec<(String, String, String)> = {
+                    let mut stmt = tx.prepare(
+                        "SELECT collection, rkey, cid FROM space_record WHERE space_uri = ?1",
+                    )?;
+                    let rows = stmt
+                        .query_map(params![space_uri], |row| {
+                            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                        })?
+                        .collect::<Result<Vec<_>, rusqlite::Error>>()?;
+                    drop(stmt);
+                    rows
+                };
+                let mut lthash = LtHash::new();
+                for (collection, rkey, cid) in &survivors {
+                    if keep.iter().any(|c| c == collection) {
+                        lthash.add(&element(collection, rkey, cid));
+                        continue;
+                    }
+                    tx.execute(
+                        "DELETE FROM space_record WHERE space_uri = ?1 AND collection = ?2 AND rkey = ?3",
+                        params![space_uri, collection, rkey],
+                    )?;
+                    tx.execute(
+                        "DELETE FROM space_blob_ref WHERE space_uri = ?1 AND collection = ?2 AND rkey = ?3",
+                        params![space_uri, collection, rkey],
+                    )?;
+                }
+                tx.execute(
+                    "DELETE FROM space_oplog WHERE space_uri = ?1",
+                    params![space_uri],
+                )?;
+                let state = lthash.state_bytes().to_vec();
+                let n = tx.execute(
+                    "UPDATE space_repo SET rev = ?2, lthash_state = ?3, oplog_floor_rev = NULL \
+                     WHERE space_uri = ?1",
+                    params![space_uri, rev, state],
+                )?;
+                if n == 0 {
+                    tx.execute(
+                        "INSERT INTO space_repo \
+                         (space_uri, authority, space_type, skey, rev, lthash_state, oplog_floor_rev, deleted, created_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, 0, ?7)",
+                        params![space_uri, authority, space_type, skey, rev, state, rsky_common::now()],
+                    )?;
+                }
+                Ok(SpaceCommitResult {
+                    rev: rev.clone(),
+                    hash: lthash.hash(),
+                    results: Vec::new(),
+                })
+            })
+            .await
+    }
+
+    /// Replace a repo wholesale from an imported archive (spec §Repo
+    /// lifecycle): drop records, blob refs, and the oplog, rebuild under a
+    /// fresh rev. The digest is recomputed from the imported records, so a
+    /// well-formed archive lands on the commit data it carried.
+    pub async fn replace_repo(
+        &self,
+        space: &SpaceId,
+        records: Vec<ImportedRecord>,
+    ) -> Result<SpaceCommitResult> {
+        let rev = TID::next_str(None)?;
+        let space_uri = space.uri();
+        let (authority, space_type, skey) = (
+            space.authority.clone(),
+            space.space_type.clone(),
+            space.skey.clone(),
+        );
+        self.db
+            .tx(move |tx| {
+                tx.execute(
+                    "DELETE FROM space_record WHERE space_uri = ?1",
+                    params![space_uri],
+                )?;
+                tx.execute(
+                    "DELETE FROM space_blob_ref WHERE space_uri = ?1",
+                    params![space_uri],
+                )?;
+                tx.execute(
+                    "DELETE FROM space_oplog WHERE space_uri = ?1",
+                    params![space_uri],
+                )?;
+                let mut lthash = LtHash::new();
+                for record in &records {
+                    tx.execute(
+                        "INSERT INTO space_record (space_uri, collection, rkey, cid, rev, value) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![
+                            space_uri,
+                            record.collection,
+                            record.rkey,
+                            record.cid,
+                            rev,
+                            record.bytes
+                        ],
+                    )?;
+                    for blob_cid in &record.blob_cids {
+                        tx.execute(
+                            "INSERT OR IGNORE INTO space_blob_ref (space_uri, blob_cid, collection, rkey) \
+                             VALUES (?1, ?2, ?3, ?4)",
+                            params![space_uri, blob_cid, record.collection, record.rkey],
+                        )?;
+                    }
+                    lthash.add(&element(&record.collection, &record.rkey, &record.cid));
+                }
+                let state = lthash.state_bytes().to_vec();
+                let n = tx.execute(
+                    "UPDATE space_repo SET rev = ?2, lthash_state = ?3, oplog_floor_rev = NULL \
+                     WHERE space_uri = ?1",
+                    params![space_uri, rev, state],
+                )?;
+                if n == 0 {
+                    tx.execute(
+                        "INSERT INTO space_repo \
+                         (space_uri, authority, space_type, skey, rev, lthash_state, oplog_floor_rev, deleted, created_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, 0, ?7)",
+                        params![space_uri, authority, space_type, skey, rev, state, rsky_common::now()],
+                    )?;
+                }
+                Ok(SpaceCommitResult {
+                    rev: rev.clone(),
+                    hash: lthash.hash(),
+                    results: Vec::new(),
+                })
             })
             .await
     }
