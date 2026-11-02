@@ -964,11 +964,7 @@ impl SpaceStore {
     /// published policy/member records in the authority's own repo), advance
     /// to a fresh rev whose digest covers only what remains, and empty the
     /// operation log (spec §Repo lifecycle).
-    pub async fn clear_repo(
-        &self,
-        space: &SpaceId,
-        keep: &[&str],
-    ) -> Result<SpaceCommitResult> {
+    pub async fn clear_repo(&self, space: &SpaceId, keep: &[&str]) -> Result<SpaceCommitResult> {
         let rev = TID::next_str(None)?;
         let keep: Vec<String> = keep.iter().map(|c| c.to_string()).collect();
         let space_uri = space.uri();

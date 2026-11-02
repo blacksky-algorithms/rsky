@@ -1,12 +1,12 @@
 use crate::actor_store::blobstore::BlobstoreFactory;
+use crate::actor_store::space::SpacePolicy;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::space::host::parse_policy;
+use crate::apis::com::atproto::space::publish::{member_dids, reconcile_published};
 use crate::apis::com::atproto::space::{parse_space_uri, require_manage, space_def_error};
 use crate::apis::ApiError;
-use crate::actor_store::space::SpacePolicy;
-use crate::apis::com::atproto::space::publish::{member_dids, reconcile_published};
-use crate::config::ServerConfig;
 use crate::auth_verifier::AccessSpace;
+use crate::config::ServerConfig;
 use crate::space_scope::ManageOp;
 use rocket::serde::json::Json;
 use rocket::State;
@@ -72,7 +72,11 @@ pub async fn space_update_space(
         &did,
         &space_id,
         &policy,
-        if was_memberspace { dropped_members } else { Vec::new() },
+        if was_memberspace {
+            dropped_members
+        } else {
+            Vec::new()
+        },
     )
     .await?;
     Ok(())

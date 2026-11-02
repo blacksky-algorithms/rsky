@@ -139,12 +139,19 @@ pub async fn reconcile_published(
     let mut cursor = None;
     loop {
         let page = space_store
-            .list_records(&space.uri(), Some(MEMBER_COLLECTION.to_string()), 500, cursor.clone())
+            .list_records(
+                &space.uri(),
+                Some(MEMBER_COLLECTION.to_string()),
+                500,
+                cursor.clone(),
+            )
             .await
             .map_err(space_def_error)?;
         let full_page = page.len() == 500;
         published.extend(page.into_iter().map(|row| row.rkey));
-        cursor = published.last().map(|rkey| format!("{MEMBER_COLLECTION}/{rkey}"));
+        cursor = published
+            .last()
+            .map(|rkey| format!("{MEMBER_COLLECTION}/{rkey}"));
         if !full_page {
             break;
         }
@@ -158,7 +165,10 @@ pub async fn reconcile_published(
                 .await
                 .map_err(space_def_error)?;
             let full_page = page.len() == 500;
-            for MemberRow { did, read, write, .. } in &page {
+            for MemberRow {
+                did, read, write, ..
+            } in &page
+            {
                 writes.push(member_record(did, *read, *write));
                 current.remove(did);
             }
@@ -271,7 +281,10 @@ pub async fn unpublish_member(
 }
 
 /// A memberspace's member DID list (for `dropped_members` on a policy change).
-pub async fn member_dids(space_store: &SpaceStore, space_uri: &str) -> Result<Vec<String>, ApiError> {
+pub async fn member_dids(
+    space_store: &SpaceStore,
+    space_uri: &str,
+) -> Result<Vec<String>, ApiError> {
     let mut dids = Vec::new();
     let mut cursor = None;
     loop {

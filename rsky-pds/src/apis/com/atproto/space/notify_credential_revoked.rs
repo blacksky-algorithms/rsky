@@ -62,12 +62,20 @@ pub async fn space_notify_credential_revoked(
     if claims.iss != space_id.authority {
         return Err(ApiError::InvalidToken("Token is invalid".to_string()));
     }
-    let repo_did = claims.aud.split('#').next().unwrap_or(&claims.aud).to_string();
+    let repo_did = claims
+        .aud
+        .split('#')
+        .next()
+        .unwrap_or(&claims.aud)
+        .to_string();
     if !actor_store.exists(&repo_did).await.unwrap_or(false) {
         return Err(ApiError::InvalidToken("Token is invalid".to_string()));
     }
     let reader = actor_store
-        .read(repo_did.clone(), blobstore_factory.blobstore(repo_did.clone()))
+        .read(
+            repo_did.clone(),
+            blobstore_factory.blobstore(repo_did.clone()),
+        )
         .await
         .map_err(|error| ApiError::BadRequest("RepoNotFound".to_string(), error.to_string()))?;
     reader
@@ -77,7 +85,12 @@ pub async fn space_notify_credential_revoked(
         .map_err(space_error)?;
     // A locally anchored space's revocation list also lives on the authority's
     // store so credential verification sees it regardless of the repo read.
-    if space_id.authority != repo_did && actor_store.exists(&space_id.authority).await.unwrap_or(false) {
+    if space_id.authority != repo_did
+        && actor_store
+            .exists(&space_id.authority)
+            .await
+            .unwrap_or(false)
+    {
         if let Ok(authority_reader) = actor_store
             .read(
                 space_id.authority.clone(),

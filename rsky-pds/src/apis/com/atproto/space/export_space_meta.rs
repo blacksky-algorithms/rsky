@@ -1,9 +1,7 @@
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::space::SpacePolicy;
 use crate::actor_store::ActorStore;
-use crate::apis::com::atproto::space::{
-    parse_space_uri, require_read_self, space_def_error,
-};
+use crate::apis::com::atproto::space::{parse_space_uri, require_read_self, space_def_error};
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessSpace;
 use rocket::http::Header;
@@ -90,7 +88,13 @@ pub async fn space_export_space_meta(
             .as_ref()
             .and_then(|h| hex::decode(h).ok())
             .map(Drisl::Bytes)
-            .unwrap_or_else(|| writer.hash.as_deref().map(|h| Drisl::Str(h.to_string())).unwrap_or(Drisl::Null));
+            .unwrap_or_else(|| {
+                writer
+                    .hash
+                    .as_deref()
+                    .map(|h| Drisl::Str(h.to_string()))
+                    .unwrap_or(Drisl::Null)
+            });
         pairs.push((
             format!("writer/{}", writer.did),
             Drisl::Map(vec![

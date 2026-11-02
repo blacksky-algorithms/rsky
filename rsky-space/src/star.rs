@@ -103,9 +103,7 @@ impl Drisl {
             Drisl::Null => Value::Null,
             Drisl::Bool(b) => Value::Bool(*b),
             Drisl::Int(i) => Value::Number((*i).into()),
-            Drisl::Bytes(b) => {
-                Value::Array(b.iter().map(|b| Value::Number((*b).into())).collect())
-            }
+            Drisl::Bytes(b) => Value::Array(b.iter().map(|b| Value::Number((*b).into())).collect()),
             Drisl::Str(s) => Value::String(s.clone()),
             Drisl::Array(items) => Value::Array(items.iter().map(Drisl::to_json).collect()),
             Drisl::Map(entries) => Value::Object(
@@ -205,17 +203,23 @@ impl Drisl {
                     n as u64
                 }
                 25 => {
-                    let n = bytes.get(*pos..*pos + 2).ok_or_else(|| err("truncated drisl"))?;
+                    let n = bytes
+                        .get(*pos..*pos + 2)
+                        .ok_or_else(|| err("truncated drisl"))?;
                     *pos += 2;
                     u16::from_be_bytes([n[0], n[1]]) as u64
                 }
                 26 => {
-                    let n = bytes.get(*pos..*pos + 4).ok_or_else(|| err("truncated drisl"))?;
+                    let n = bytes
+                        .get(*pos..*pos + 4)
+                        .ok_or_else(|| err("truncated drisl"))?;
                     *pos += 4;
                     u32::from_be_bytes([n[0], n[1], n[2], n[3]]) as u64
                 }
                 27 => {
-                    let n = bytes.get(*pos..*pos + 8).ok_or_else(|| err("truncated drisl"))?;
+                    let n = bytes
+                        .get(*pos..*pos + 8)
+                        .ok_or_else(|| err("truncated drisl"))?;
                     *pos += 8;
                     u64::from_be_bytes(n.try_into().unwrap())
                 }
@@ -298,7 +302,9 @@ pub fn decode_star(bytes: &[u8]) -> Result<StarArchive, SpaceError> {
     let end = pos
         .checked_add(meta_len)
         .ok_or_else(|| err("metadata length overflow"))?;
-    let meta_bytes = bytes.get(pos..end).ok_or_else(|| err("truncated metadata"))?;
+    let meta_bytes = bytes
+        .get(pos..end)
+        .ok_or_else(|| err("truncated metadata"))?;
     let mut inner = 0usize;
     let metadata = Drisl::decode(meta_bytes, &mut inner)?;
     if inner != meta_bytes.len() {
@@ -350,10 +356,7 @@ mod tests {
         let bytes = meta.encode_to_vec();
         // canonical order: "$type" (5) < "ver" (3)? No — (len,bytes): "ver"(3),
         // "$type"(5), "space"(5 -> "$" < "s").
-        assert_eq!(
-            &bytes[..7],
-            &[0xa3, 0x63, b'v', b'e', b'r', 0x01, 0x65]
-        );
+        assert_eq!(&bytes[..7], &[0xa3, 0x63, b'v', b'e', b'r', 0x01, 0x65]);
         let mut pos = 0;
         let decoded = Drisl::decode(&bytes, &mut pos).unwrap();
         assert_eq!(decoded.get("ver"), Some(&Drisl::Int(1)));
@@ -378,10 +381,7 @@ mod tests {
 
     #[test]
     fn star_rejects_out_of_order_and_bad_magic() {
-        let pairs = vec![
-            ("b".to_string(), vec![0]),
-            ("a".to_string(), vec![0]),
-        ];
+        let pairs = vec![("b".to_string(), vec![0]), ("a".to_string(), vec![0])];
         assert!(decode_star(&encode_star(&Drisl::Null, &pairs)).is_err());
         assert!(decode_star(b"\x2a\x6c\x01").is_err());
         assert!(decode_star(&encode_star(&Drisl::Null, &pairs)[..5]).is_err());

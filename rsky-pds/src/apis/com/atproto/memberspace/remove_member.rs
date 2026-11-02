@@ -1,11 +1,11 @@
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::memberspace::require_memberspace;
+use crate::apis::com::atproto::space::publish::unpublish_member;
 use crate::apis::com::atproto::space::{parse_space_uri, require_manage, space_def_error};
 use crate::apis::ApiError;
-use crate::apis::com::atproto::space::publish::unpublish_member;
-use crate::config::ServerConfig;
 use crate::auth_verifier::AccessSpace;
+use crate::config::ServerConfig;
 use crate::space_scope::ManageOp;
 use rocket::serde::json::Json;
 use rocket::State;

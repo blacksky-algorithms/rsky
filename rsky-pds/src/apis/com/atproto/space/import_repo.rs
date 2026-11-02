@@ -8,11 +8,11 @@ use crate::apis::ApiError;
 use crate::auth_verifier::AccessSpace;
 use crate::space_auth::session_permits;
 use crate::space_scope::{SpaceAction, SpaceRequest};
-use rsky_space::lthash::{element, LtHash};
 use rocket::data::Data;
 use rocket::tokio::io::AsyncReadExt;
 use rocket::State;
 use rsky_space::car::{cid_for_block, RepoCarValidator};
+use rsky_space::lthash::{element, LtHash};
 use rsky_space::space_id::SpaceId;
 use rsky_space::star::{decode_star, Drisl, STAR_MAGIC};
 
@@ -40,78 +40,82 @@ pub async fn space_import_repo(
         .await
         .map_err(|_| ApiError::RuntimeError)?;
 
-    let (space_uri, repo, commit_data, records): (String, String, Option<Vec<u8>>, Vec<ImportedRecord>) =
-        if bytes.len() >= 4 && bytes[..4] == STAR_MAGIC {
-            let archive = decode_star(&bytes).map_err(|error| {
-                ApiError::InvalidRequest(format!("bad repo archive: {error}"))
-            })?;
-            let meta = &archive.metadata;
-            let (space_uri, repo) = (
-                meta.get("space").and_then(Drisl::as_str).unwrap_or_default().to_string(),
-                meta.get("repo").and_then(Drisl::as_str).unwrap_or_default().to_string(),
-            );
-            let commit_data = match meta.get("data") {
-                Some(Drisl::Bytes(b)) => Some(b.clone()),
-                _ => None,
-            };
-            let mut records = Vec::with_capacity(archive.pairs.len());
-            for (path, value) in &archive.pairs {
-                let (collection, rkey) = path.split_once('/').ok_or_else(|| {
-                    ApiError::InvalidRequest(format!("bad record path: {path}"))
-                })?;
-                let cid = cid_for_block(DAG_CBOR, value).to_string();
-                let mut pos = 0;
-                let decoded = Drisl::decode(value, &mut pos).map_err(|error| {
-                    ApiError::InvalidRequest(format!("bad record bytes: {error}"))
-                })?;
-                records.push(ImportedRecord {
-                    collection: collection.to_string(),
-                    rkey: rkey.to_string(),
-                    cid,
-                    bytes: value.clone(),
-                    blob_cids: blob_cids_in_record(&decoded.to_json()),
-                });
-            }
-            (space_uri, repo, commit_data, records)
-        } else {
-            let validator = RepoCarValidator::new(&bytes[..])
-                .await
-                .map_err(|error| {
-                    ApiError::InvalidRequest(format!("bad repo archive: {error}"))
-                })?;
-            let commit = validator.commit().clone();
-            let commit_hash = commit.hash.to_vec();
-            let raw = validator
-                .into_records(&commit_hash)
-                .await
-                .map_err(|error| {
-                    ApiError::InvalidRequest(format!("bad repo archive: {error}"))
-                })?;
-            let mut records = Vec::with_capacity(raw.len());
-            for (path, cid, value) in raw {
-                let (collection, rkey) = path.split_once('/').ok_or_else(|| {
-                    ApiError::InvalidRequest(format!("bad record path: {path}"))
-                })?;
-                let value_json: serde_json::Value = rsky_common::cbor_to_struct(value.clone())
-                    .map_err(|_| ApiError::RuntimeError)?;
-                records.push(ImportedRecord {
-                    collection: collection.to_string(),
-                    rkey: rkey.to_string(),
-                    cid: cid.to_string(),
-                    bytes: value,
-                    blob_cids: blob_cids_in_record(&value_json),
-                });
-            }
-            // The CAR commit does not name its space or repo; the space
-            // comes from the query param and the repo is the authenticated
-            // account's own.
-            (
-                space.clone().unwrap_or_default(),
-                did.clone(),
-                Some(commit_hash),
-                records,
-            )
+    let (space_uri, repo, commit_data, records): (
+        String,
+        String,
+        Option<Vec<u8>>,
+        Vec<ImportedRecord>,
+    ) = if bytes.len() >= 4 && bytes[..4] == STAR_MAGIC {
+        let archive = decode_star(&bytes)
+            .map_err(|error| ApiError::InvalidRequest(format!("bad repo archive: {error}")))?;
+        let meta = &archive.metadata;
+        let (space_uri, repo) = (
+            meta.get("space")
+                .and_then(Drisl::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            meta.get("repo")
+                .and_then(Drisl::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        );
+        let commit_data = match meta.get("data") {
+            Some(Drisl::Bytes(b)) => Some(b.clone()),
+            _ => None,
         };
+        let mut records = Vec::with_capacity(archive.pairs.len());
+        for (path, value) in &archive.pairs {
+            let (collection, rkey) = path
+                .split_once('/')
+                .ok_or_else(|| ApiError::InvalidRequest(format!("bad record path: {path}")))?;
+            let cid = cid_for_block(DAG_CBOR, value).to_string();
+            let mut pos = 0;
+            let decoded = Drisl::decode(value, &mut pos)
+                .map_err(|error| ApiError::InvalidRequest(format!("bad record bytes: {error}")))?;
+            records.push(ImportedRecord {
+                collection: collection.to_string(),
+                rkey: rkey.to_string(),
+                cid,
+                bytes: value.clone(),
+                blob_cids: blob_cids_in_record(&decoded.to_json()),
+            });
+        }
+        (space_uri, repo, commit_data, records)
+    } else {
+        let validator = RepoCarValidator::new(&bytes[..])
+            .await
+            .map_err(|error| ApiError::InvalidRequest(format!("bad repo archive: {error}")))?;
+        let commit = validator.commit().clone();
+        let commit_hash = commit.hash.to_vec();
+        let raw = validator
+            .into_records(&commit_hash)
+            .await
+            .map_err(|error| ApiError::InvalidRequest(format!("bad repo archive: {error}")))?;
+        let mut records = Vec::with_capacity(raw.len());
+        for (path, cid, value) in raw {
+            let (collection, rkey) = path
+                .split_once('/')
+                .ok_or_else(|| ApiError::InvalidRequest(format!("bad record path: {path}")))?;
+            let value_json: serde_json::Value =
+                rsky_common::cbor_to_struct(value.clone()).map_err(|_| ApiError::RuntimeError)?;
+            records.push(ImportedRecord {
+                collection: collection.to_string(),
+                rkey: rkey.to_string(),
+                cid: cid.to_string(),
+                bytes: value,
+                blob_cids: blob_cids_in_record(&value_json),
+            });
+        }
+        // The CAR commit does not name its space or repo; the space
+        // comes from the query param and the repo is the authenticated
+        // account's own.
+        (
+            space.clone().unwrap_or_default(),
+            did.clone(),
+            Some(commit_hash),
+            records,
+        )
+    };
 
     if space_uri.is_empty() {
         return Err(ApiError::InvalidRequest(
@@ -140,7 +144,11 @@ pub async fn space_import_repo(
         ));
     }
     // A create grant is required for every collection in the archive.
-    for collection in records.iter().map(|r| r.collection.clone()).collect::<std::collections::BTreeSet<_>>() {
+    for collection in records
+        .iter()
+        .map(|r| r.collection.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+    {
         if !session_permits(
             &credentials,
             &did,

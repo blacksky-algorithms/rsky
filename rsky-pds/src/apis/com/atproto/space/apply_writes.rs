@@ -1,11 +1,11 @@
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::space::SpaceWrite;
 use crate::actor_store::ActorStore;
+use crate::apis::com::atproto::space::publish::reject_managed_collections;
 use crate::apis::com::atproto::space::{
     apply_space_writes, commit_meta, parse_space_uri, require_repo_matches_subject, valid_key_part,
 };
 use crate::apis::ApiError;
-use crate::apis::com::atproto::space::publish::reject_managed_collections;
 use crate::auth_verifier::AccessSpace;
 use crate::config::ServerConfig;
 use crate::space_auth::session_permits;

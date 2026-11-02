@@ -38,13 +38,13 @@ pub mod get_repo_state;
 pub mod get_space;
 pub mod get_space_credential;
 pub mod host;
+pub mod import_repo;
+pub mod import_space_meta;
 pub mod list_blobs;
 pub mod list_records;
 pub mod list_repo_ops;
 pub mod list_repos;
 pub mod list_spaces;
-pub mod import_repo;
-pub mod import_space_meta;
 pub mod notify_credential_revoked;
 pub mod notify_space_deleted;
 pub mod notify_write;
@@ -218,9 +218,7 @@ pub async fn open_local_repo(
             .await
             .unwrap_or(false)
         {
-            return Err(ApiError::InvalidToken(
-                "Token is invalid".to_string(),
-            ));
+            return Err(ApiError::InvalidToken("Token is invalid".to_string()));
         }
     }
     Ok(reader)
