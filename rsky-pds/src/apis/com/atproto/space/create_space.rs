@@ -1,28 +1,28 @@
 use crate::actor_store::blobstore::BlobstoreFactory;
-use crate::actor_store::space::SpaceDefRow;
+use crate::actor_store::space::{SpaceDefRow, SpacePolicy};
 use crate::actor_store::ActorStore;
-use crate::apis::com::atproto::simplespace::{merge_config, require_manage, space_error};
-use crate::apis::com::atproto::space::host::{APP_ACCESS_OPEN, POLICY_MEMBER_LIST};
-use crate::apis::com::atproto::space::valid_key_part;
+use crate::apis::com::atproto::space::host::parse_policy;
+use crate::apis::com::atproto::space::{require_manage, space_def_error, valid_key_part};
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessSpace;
 use crate::space_scope::ManageOp;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_common::tid::TID;
-use rsky_lexicon::com::atproto::simplespace::{CreateSpaceInput, CreateSpaceOutput};
+use rsky_lexicon::com::atproto::space::{CreateSpaceInput, CreateSpaceOutput};
 use rsky_space::space_id::SpaceId;
 use rsky_syntax::nsid::ensure_valid_nsid;
 
-/// Create a space anchored on the caller's DID: the caller becomes the
-/// authority. Defaults: `member-list` policy, `open` app access.
+/// Create a space with a given policy: the caller becomes the authority.
+/// Unknown policy `$type`s are rejected as `UnsupportedPolicy` (spec §Space
+/// policy).
 #[tracing::instrument(skip_all)]
 #[rocket::post(
-    "/xrpc/com.atproto.simplespace.createSpace",
+    "/xrpc/com.atproto.space.createSpace",
     format = "json",
     data = "<body>"
 )]
-pub async fn simplespace_create_space(
+pub async fn space_create_space(
     body: Json<CreateSpaceInput>,
     auth: AccessSpace,
     actor_store: &State<ActorStore>,
@@ -31,7 +31,7 @@ pub async fn simplespace_create_space(
     let CreateSpaceInput {
         space_type,
         skey,
-        config,
+        policy,
     } = body.into_inner();
     let credentials = auth.access.credentials.expect("credentials populated");
     let did = credentials.did.clone().expect("did populated");
@@ -40,6 +40,7 @@ pub async fn simplespace_create_space(
             "invalid space type: {space_type}"
         )));
     }
+    let policy = parse_policy(policy)?;
     let skey = match skey {
         Some(skey) if valid_key_part(&skey, 512) => skey,
         Some(skey) => return Err(ApiError::InvalidRequest(format!("invalid skey: {skey}"))),
@@ -48,19 +49,13 @@ pub async fn simplespace_create_space(
     let space = SpaceId::new(did.clone(), space_type.clone(), skey.clone());
     require_manage(&credentials, &did, &space, ManageOp::Create)?;
 
-    let mut def = SpaceDefRow {
+    let def = SpaceDefRow {
         space_uri: space.uri(),
         space_type,
         skey,
-        policy: POLICY_MEMBER_LIST.to_string(),
-        app_access: APP_ACCESS_OPEN.to_string(),
-        allowed_clients: None,
-        managing_app: None,
+        policy,
         deleted: false,
     };
-    if let Some(ref config) = config {
-        def = merge_config(def, config)?;
-    }
     let reader = actor_store
         .read(did.clone(), blobstore_factory.blobstore(did.clone()))
         .await
@@ -69,13 +64,24 @@ pub async fn simplespace_create_space(
         .space
         .create_space_def(def)
         .await
-        .map_err(space_error)?;
-    // The creator is the first member, as the reference seeds it: the
-    // authority must pass their own member-list policy for whole-space reads.
-    reader
-        .space
-        .add_member(&space.uri(), &did)
-        .await
-        .map_err(space_error)?;
+        .map_err(space_def_error)?;
+    if matches!(
+        reader
+            .space
+            .live_space_def(&space.uri())
+            .await
+            .map_err(space_def_error)?
+            .policy,
+        SpacePolicy::Memberspace(_)
+    ) {
+        // The creator is the first member of a memberspace, as the reference
+        // seeds it: the authority must pass their own member list for
+        // whole-space reads and writer tracking.
+        reader
+            .space
+            .put_member(&space.uri(), &did, true, true)
+            .await
+            .map_err(space_def_error)?;
+    }
     Ok(Json(CreateSpaceOutput { uri: space.uri() }))
 }

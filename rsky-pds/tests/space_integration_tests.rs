@@ -220,9 +220,9 @@ async fn setup() -> Setup {
     let member_token = create_active_account(&client, MEMBER_DID, "spcmember").await;
     let (status, body) = post_json(
         &client,
-        "/xrpc/com.atproto.simplespace.createSpace",
+        "/xrpc/com.atproto.space.createSpace",
         &author_token,
-        json!({"type": SPACE_TYPE, "skey": "main"}),
+        json!({"type": SPACE_TYPE, "skey": "main", "policy": {"$type": "com.atproto.memberspace.policy"}}),
     )
     .await;
     assert_eq!(status, Status::Ok, "{body}");
@@ -230,9 +230,9 @@ async fn setup() -> Setup {
     assert_eq!(space, format!("at://{AUTHOR_DID}/space/{SPACE_TYPE}/main"));
     let (status, _) = post_json(
         &client,
-        "/xrpc/com.atproto.simplespace.addMember",
+        "/xrpc/com.atproto.memberspace.putMember",
         &author_token,
-        json!({"space": space, "did": MEMBER_DID}),
+        json!({"space": space, "did": MEMBER_DID, "read": true, "write": true}),
     )
     .await;
     assert_eq!(status, Status::Ok);
@@ -290,19 +290,19 @@ async fn create_post(setup: &Setup, rkey: &str, text: &str) -> Value {
 }
 
 #[tokio::test]
-async fn simplespace_management() {
+async fn memberspace_management() {
     let s = setup().await;
 
     // duplicate creation is rejected
     let (status, body) = post_json(
         &s.client,
-        "/xrpc/com.atproto.simplespace.createSpace",
+        "/xrpc/com.atproto.space.createSpace",
         &s.author_token,
-        json!({"type": SPACE_TYPE, "skey": "main"}),
+        json!({"type": SPACE_TYPE, "skey": "main", "policy": {"$type": "com.atproto.memberspace.policy"}}),
     )
     .await;
     assert_eq!(status, Status::BadRequest);
-    assert_eq!(body["error"], "SpaceExists");
+    assert_eq!(body["error"], "SpaceAlreadyExists");
 
     // invalid space type / skey are rejected
     for bad in [
@@ -311,7 +311,7 @@ async fn simplespace_management() {
     ] {
         let (status, _) = post_json(
             &s.client,
-            "/xrpc/com.atproto.simplespace.createSpace",
+            "/xrpc/com.atproto.space.createSpace",
             &s.author_token,
             bad,
         )
@@ -322,9 +322,9 @@ async fn simplespace_management() {
     // omitted skey defaults to a TID
     let (status, body) = post_json(
         &s.client,
-        "/xrpc/com.atproto.simplespace.createSpace",
+        "/xrpc/com.atproto.space.createSpace",
         &s.author_token,
-        json!({"type": "com.example.other"}),
+        json!({"type": "com.example.other", "policy": {"$type": "com.atproto.memberspace.policy"}}),
     )
     .await;
     assert_eq!(status, Status::Ok);
@@ -336,18 +336,18 @@ async fn simplespace_management() {
     // non-authority cannot manage
     let (status, _) = post_json(
         &s.client,
-        "/xrpc/com.atproto.simplespace.addMember",
+        "/xrpc/com.atproto.memberspace.putMember",
         &s.member_token,
-        json!({"space": s.space, "did": MEMBER_DID}),
+        json!({"space": s.space, "did": MEMBER_DID, "read": true, "write": true}),
     )
     .await;
     assert_ne!(status, Status::Ok);
     // invalid member did
     let (status, _) = post_json(
         &s.client,
-        "/xrpc/com.atproto.simplespace.addMember",
+        "/xrpc/com.atproto.memberspace.putMember",
         &s.author_token,
-        json!({"space": s.space, "did": "not-a-did"}),
+        json!({"space": s.space, "did": "not-a-did", "read": true, "write": true}),
     )
     .await;
     assert_eq!(status, Status::BadRequest);
@@ -355,7 +355,7 @@ async fn simplespace_management() {
     let (status, body) = get_json(
         &s.client,
         &format!(
-            "/xrpc/com.atproto.simplespace.listMembers?space={}",
+            "/xrpc/com.atproto.memberspace.listMembers?space={}",
             s.space
         ),
         &s.author_token,
@@ -371,8 +371,11 @@ async fn simplespace_management() {
         dids.contains(&AUTHOR_DID) && dids.contains(&MEMBER_DID),
         "{body}"
     );
-    // The metadata clients render: when added, and at what rev.
+    // The spec-required read/write booleans, plus the metadata clients
+    // render: when added, and at what rev.
     for m in members {
+        assert_eq!(m["read"], true);
+        assert_eq!(m["write"], true);
         assert!(!m["memberRev"].as_str().unwrap().is_empty());
         assert!(!m["addedAt"].as_str().unwrap().is_empty());
     }
@@ -380,16 +383,16 @@ async fn simplespace_management() {
     // removeMember empties the list
     let (status, _) = post_json(
         &s.client,
-        "/xrpc/com.atproto.simplespace.removeMember",
+        "/xrpc/com.atproto.memberspace.removeMember",
         &s.author_token,
-        json!({"space": s.space, "did": MEMBER_DID}),
+        json!({"space": s.space, "did": MEMBER_DID, "read": true, "write": true}),
     )
     .await;
     assert_eq!(status, Status::Ok);
     let (_, body) = get_json(
         &s.client,
         &format!(
-            "/xrpc/com.atproto.simplespace.listMembers?space={}",
+            "/xrpc/com.atproto.memberspace.listMembers?space={}",
             s.space
         ),
         &s.author_token,
@@ -403,18 +406,18 @@ async fn simplespace_management() {
     // managing-app policy requires a managingApp
     let (status, _) = post_json(
         &s.client,
-        "/xrpc/com.atproto.simplespace.updateSpace",
+        "/xrpc/com.atproto.space.updateSpace",
         &s.author_token,
-        json!({"space": s.space, "config": {"policy": "managing-app"}}),
+        json!({"space": s.space, "policy": {"$type": "com.atproto.managedspace.policy"}}),
     )
     .await;
     assert_eq!(status, Status::BadRequest);
     // a valid update round-trips through getSpace (checked in host tests)
     let (status, _) = post_json(
         &s.client,
-        "/xrpc/com.atproto.simplespace.updateSpace",
+        "/xrpc/com.atproto.space.updateSpace",
         &s.author_token,
-        json!({"space": s.space, "config": {"policy": "public"}}),
+        json!({"space": s.space, "policy": {"$type": "com.atproto.memberspace.policy", "publicRead": true, "publicWrite": true}}),
     )
     .await;
     assert_eq!(status, Status::Ok);
@@ -518,15 +521,13 @@ async fn credential_mint_flow() {
     // allow-list app access requires an attestation
     let (status, _) = post_json(
         &s.client,
-        "/xrpc/com.atproto.simplespace.updateSpace",
+        "/xrpc/com.atproto.space.updateSpace",
         &s.author_token,
         json!({
             "space": s.space,
-            "config": {
-                "appAccess": {
-                    "$type": "com.atproto.simplespace.defs#appAccessAllowList",
-                    "allowed": ["https://app.example.com/client-metadata.json"]
-                }
+            "policy": {
+                "$type": "com.atproto.memberspace.policy",
+                "allowedApps": ["https://app.example.com/client-metadata.json"]
             }
         }),
     )
@@ -989,7 +990,7 @@ async fn host_methods_and_notifications() {
     let credential = mint_credential(&s).await;
     create_post(&s, "3kfirst", "hello space").await;
 
-    // getSpace surfaces the simplespace config
+    // getSpace surfaces the space policy
     let (status, body) = get_json(
         &s.client,
         &format!("/xrpc/com.atproto.space.getSpace?space={}", s.space),
@@ -997,19 +998,15 @@ async fn host_methods_and_notifications() {
     )
     .await;
     assert_eq!(status, Status::Ok, "{body}");
-    assert_eq!(body["config"]["policy"], "member-list");
-    assert_eq!(
-        body["config"]["appAccess"]["$type"],
-        "com.atproto.simplespace.defs#appAccessOpen"
-    );
-    // a session token is not a space credential
+    assert_eq!(body["policy"]["$type"], "com.atproto.memberspace.policy");
+    // an OAuth read_self session is also accepted (spec §XRPC API)
     let (status, _) = get_json(
         &s.client,
         &format!("/xrpc/com.atproto.space.getSpace?space={}", s.space),
         &s.member_token,
     )
     .await;
-    assert_ne!(status, Status::Ok);
+    assert_eq!(status, Status::Ok);
 
     // a credential offered as a bearer token is refused even with a valid
     // proof beside it: the scheme is not an opt-out from the binding
@@ -1120,7 +1117,7 @@ async fn host_methods_and_notifications() {
     let service_token = mint_space_service_token(
         &member_keypair,
         MEMBER_DID,
-        &format!("{AUTHOR_DID}#atproto_space_host"),
+        &format!("{AUTHOR_DID}#atproto_pds"),
         NOTIFY_WRITE_LXM,
     )
     .unwrap();
@@ -1190,7 +1187,7 @@ async fn delete_space_flow() {
     // only the authority can delete
     let (status, _) = post_json(
         &s.client,
-        "/xrpc/com.atproto.simplespace.deleteSpace",
+        "/xrpc/com.atproto.space.deleteSpace",
         &s.member_token,
         json!({"space": s.space}),
     )
@@ -1199,7 +1196,7 @@ async fn delete_space_flow() {
 
     let (status, _) = post_json(
         &s.client,
-        "/xrpc/com.atproto.simplespace.deleteSpace",
+        "/xrpc/com.atproto.space.deleteSpace",
         &s.author_token,
         json!({"space": s.space}),
     )
@@ -1272,7 +1269,7 @@ async fn delete_space_flow() {
     // deleting twice fails cleanly
     let (status, _) = post_json(
         &s.client,
-        "/xrpc/com.atproto.simplespace.deleteSpace",
+        "/xrpc/com.atproto.space.deleteSpace",
         &s.author_token,
         json!({"space": s.space}),
     )
@@ -1710,7 +1707,7 @@ async fn credential_edge_cases() {
         let claims = SpaceClaims {
             iss: "did:plc:notonthishost".to_string(),
             sub: s.space.clone(),
-            aud: Some(format!("{AUTHOR_DID}#atproto_space_host")),
+            aud: Some(format!("{AUTHOR_DID}#atproto_pds")),
             iat: now,
             exp: now + 60,
             jti: "foreign".to_string(),
@@ -1733,11 +1730,11 @@ async fn credential_edge_cases() {
     // managing-app policy: the app's service endpoint is unresolvable here
     let (status, _) = post_json(
         &s.client,
-        "/xrpc/com.atproto.simplespace.updateSpace",
+        "/xrpc/com.atproto.space.updateSpace",
         &s.author_token,
         json!({
             "space": s.space,
-            "config": {"policy": "managing-app", "managingApp": "did:plc:someapp#managing_app"}
+            "policy": {"$type": "com.atproto.managedspace.policy", "managingApp": "did:plc:someapp#managing_app"}
         }),
     )
     .await;
@@ -1745,9 +1742,9 @@ async fn credential_edge_cases() {
     // an invalid managingApp identifier is rejected
     let (status, _) = post_json(
         &s.client,
-        "/xrpc/com.atproto.simplespace.updateSpace",
+        "/xrpc/com.atproto.space.updateSpace",
         &s.author_token,
-        json!({"space": s.space, "config": {"managingApp": "not-a-service-id"}}),
+        json!({"space": s.space, "policy": {"$type": "com.atproto.managedspace.policy", "managingApp": "not-a-service-id"}}),
     )
     .await;
     assert_eq!(status, Status::BadRequest);
@@ -1818,16 +1815,14 @@ async fn notify_edges_and_allowlist_view() {
     // an allow-list config is surfaced through getSpace
     let (status, _) = post_json(
         &s.client,
-        "/xrpc/com.atproto.simplespace.updateSpace",
+        "/xrpc/com.atproto.space.updateSpace",
         &s.author_token,
         json!({
             "space": s.space,
             "repo": AUTHOR_DID,
-            "config": {
-                "appAccess": {
-                    "$type": "com.atproto.simplespace.defs#appAccessAllowList",
-                    "allowed": ["https://app.example.com/client-metadata.json"]
-                }
+            "policy": {
+                "$type": "com.atproto.memberspace.policy",
+                "allowedApps": ["https://app.example.com/client-metadata.json"]
             }
         }),
     )
@@ -1841,18 +1836,18 @@ async fn notify_edges_and_allowlist_view() {
     .await;
     assert_eq!(status, Status::Ok);
     assert_eq!(
-        body["config"]["appAccess"]["$type"],
-        "com.atproto.simplespace.defs#appAccessAllowList"
+        body["policy"]["allowedApps"],
+        json!(["https://app.example.com/client-metadata.json"])
     );
     // and switching back to open clears the list
     let (status, _) = post_json(
         &s.client,
-        "/xrpc/com.atproto.simplespace.updateSpace",
+        "/xrpc/com.atproto.space.updateSpace",
         &s.author_token,
         json!({
             "space": s.space,
             "repo": AUTHOR_DID,
-            "config": {"appAccess": {"$type": "com.atproto.simplespace.defs#appAccessOpen"}}
+            "policy": {"$type": "com.atproto.memberspace.policy"}
         }),
     )
     .await;
@@ -1863,10 +1858,7 @@ async fn notify_edges_and_allowlist_view() {
         &credential,
     )
     .await;
-    assert_eq!(
-        body["config"]["appAccess"]["$type"],
-        "com.atproto.simplespace.defs#appAccessOpen"
-    );
+    assert!(body["policy"]["allowedApps"].is_null(), "{body}");
 }
 
 #[tokio::test]
@@ -1895,7 +1887,7 @@ async fn delete_space_notifies_remote_writers() {
 
     let (status, _) = post_json(
         &s.client,
-        "/xrpc/com.atproto.simplespace.deleteSpace",
+        "/xrpc/com.atproto.space.deleteSpace",
         &s.author_token,
         json!({"space": s.space}),
     )

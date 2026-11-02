@@ -419,7 +419,7 @@ pub fn mint_delegation_token(keypair: &Keypair, user_did: &str, space: &SpaceId)
     let claims = SpaceClaims {
         iss: user_did.to_string(),
         sub: space.uri(),
-        aud: Some(format!("{}#atproto_space_host", space.authority)),
+        aud: Some(format!("{}#atproto_pds", space.authority)),
         iat: now,
         exp: now + DELEGATION_TTL_SECS,
         jti: get_random_str(),
@@ -774,7 +774,7 @@ mod tests {
         let token = mint_space_service_token(
             &keypair,
             "did:plc:writer",
-            "did:plc:auth#atproto_space_host",
+            "did:plc:auth#atproto_pds",
             NOTIFY_WRITE_LXM,
         )
         .unwrap();
@@ -788,7 +788,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(claims.iss, "did:plc:writer");
-        assert_eq!(claims.aud, "did:plc:auth#atproto_space_host");
+        assert_eq!(claims.aud, "did:plc:auth#atproto_pds");
 
         // wrong lxm
         let err = verify_space_service_token(

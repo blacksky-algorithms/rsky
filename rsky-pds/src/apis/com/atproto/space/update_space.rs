@@ -1,54 +1,56 @@
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
-use crate::apis::com::atproto::simplespace::{require_manage, space_error};
-use crate::apis::com::atproto::space::parse_space_uri;
+use crate::apis::com::atproto::space::host::parse_policy;
+use crate::apis::com::atproto::space::{parse_space_uri, require_manage, space_def_error};
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessSpace;
 use crate::space_scope::ManageOp;
 use rocket::serde::json::Json;
 use rocket::State;
-use rsky_lexicon::com::atproto::simplespace::RemoveMemberInput;
+use rsky_lexicon::com::atproto::space::UpdateSpaceInput;
 
+/// Replace a space's policy object wholesale. Same `$type` is a config
+/// change; a different `$type` migrates the policy and discards the previous
+/// policy's state, including the member list (spec §Space policy).
 #[tracing::instrument(skip_all)]
 #[rocket::post(
-    "/xrpc/com.atproto.simplespace.removeMember",
+    "/xrpc/com.atproto.space.updateSpace",
     format = "json",
     data = "<body>"
 )]
-pub async fn simplespace_remove_member(
-    body: Json<RemoveMemberInput>,
+pub async fn space_update_space(
+    body: Json<UpdateSpaceInput>,
     auth: AccessSpace,
     actor_store: &State<ActorStore>,
     blobstore_factory: &State<BlobstoreFactory>,
 ) -> Result<(), ApiError> {
-    let RemoveMemberInput { space, did: member } = body.into_inner();
+    let UpdateSpaceInput { space, policy } = body.into_inner();
     let space_id = parse_space_uri(&space)?;
     let credentials = auth.access.credentials.expect("credentials populated");
     let did = credentials.did.clone().expect("did populated");
     require_manage(&credentials, &did, &space_id, ManageOp::Update)?;
+    let policy = parse_policy(policy)?;
     let reader = actor_store
         .read(did.clone(), blobstore_factory.blobstore(did.clone()))
         .await
         .map_err(|error| ApiError::BadRequest("RepoNotFound".to_string(), error.to_string()))?;
-    reader
+    let mut def = reader
         .space
         .live_space_def(&space_id.uri())
         .await
-        .map_err(space_error)?;
+        .map_err(space_def_error)?;
+    if def.policy.type_name() != policy.type_name() {
+        reader
+            .space
+            .clear_members(&space_id.uri())
+            .await
+            .map_err(space_def_error)?;
+    }
+    def.policy = policy;
     reader
         .space
-        .remove_member(&space_id.uri(), &member)
+        .update_space_def(def)
         .await
-        .map_err(space_error)?;
-    if actor_store.exists(&member).await.unwrap_or(false) {
-        if let Ok(member_reader) = actor_store
-            .read(member.clone(), blobstore_factory.blobstore(member.clone()))
-            .await
-        {
-            if let Err(error) = member_reader.space.remove_joined(&space_id.uri()).await {
-                tracing::warn!(%error, "failed to unindex membership on the member's store");
-            }
-        }
-    }
+        .map_err(space_def_error)?;
     Ok(())
 }
