@@ -23,6 +23,7 @@ use rsky_space::space_id::SpaceId;
 use secp256k1::Keypair;
 
 pub mod apply_writes;
+pub mod clear_records;
 pub mod create_record;
 pub mod create_space;
 pub mod delete_record;
@@ -316,7 +317,7 @@ pub async fn apply_space_writes(
 /// space host is auto-registered as a subscriber on the first write into a
 /// shared space; a local authority is updated in place instead.
 #[allow(clippy::too_many_arguments)]
-async fn notify_after_write(
+pub async fn notify_after_write(
     actor_store: &State<ActorStore>,
     blobstore_factory: &State<BlobstoreFactory>,
     server_config: &State<ServerConfig>,
