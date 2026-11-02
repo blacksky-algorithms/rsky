@@ -6,7 +6,6 @@ use rsky_identity::did::did_resolver::DidResolver;
 use rsky_identity::types::{DidResolverOpts, MemoryCache};
 use rsky_oauth::dpop::{DpopManager, InMemoryReplayStore};
 use rsky_space::space_id::SpaceId;
-use rsky_space_host::appaccess::AppAccess;
 use rsky_space_host::attestation::HttpMetadataFetcher;
 use rsky_space_host::authority::Authority;
 use rsky_space_host::config::{Config, PolicyMode};
@@ -53,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg.space_type().to_string(),
         cfg.space_skey().to_string(),
     );
-    let authority = Authority::new(space, signer.clone(), AppAccess::Open);
+    let authority = Authority::new(space, signer.clone());
 
     let now: Arc<dyn Fn() -> u64 + Send + Sync> = Arc::new(unix_now);
     let jti: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(random_jti);
@@ -63,12 +62,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         did_cache: std::sync::Arc::new(MemoryCache::new(None, None)),
     })));
     let policy = match cfg.policy {
-        PolicyMode::Public => Policy::Public,
-        PolicyMode::MemberList => {
-            Policy::MemberList(Arc::new(InMemoryMembership::new(cfg.member_dids())))
-        }
-        PolicyMode::ManagingApp => Policy::ManagingApp {
+        PolicyMode::Personalspace => Policy::Personalspace,
+        PolicyMode::Memberspace => Policy::Memberspace {
+            public_read: cfg.public_read,
+            public_write: cfg.public_write,
+            allowed_apps: cfg.allowed_app_list(),
+            publish_policy: false,
+            publish_members: false,
+            members: Arc::new(InMemoryMembership::new(cfg.member_dids())),
+        },
+        PolicyMode::Managedspace => Policy::Managedspace {
             service_id: cfg.managing_app.clone(),
+            publish_policy: false,
             client: Arc::new(HttpManagingApp::new(
                 cfg.managing_app.clone(),
                 cfg.authority_did.clone(),
