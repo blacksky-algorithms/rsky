@@ -1,4 +1,3 @@
-use crate::com::atproto::simplespace::Config as SimplespaceConfig;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
@@ -45,11 +44,30 @@ pub struct CommitMeta {
     pub hash: String,
 }
 
+/// A space's policy object (spec §Space policy): a `$type`-tagged union of
+/// the baseline policies every PDS must support. Policy parsing happens at
+/// the API boundary, where an unrecognized `$type` is an `UnsupportedPolicy`
+/// error rather than a generic deserialization failure.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "$type")]
-pub enum SpaceConfig {
-    #[serde(rename = "com.atproto.simplespace.defs#config")]
-    Simplespace(SimplespaceConfig),
+pub enum Policy {
+    #[serde(rename = "com.atproto.personalspace.policy")]
+    Personalspace(crate::com::atproto::personalspace::Policy),
+    #[serde(rename = "com.atproto.memberspace.policy")]
+    Memberspace(crate::com::atproto::memberspace::Policy),
+    #[serde(rename = "com.atproto.managedspace.policy")]
+    Managedspace(crate::com::atproto::managedspace::Policy),
+}
+
+impl Policy {
+    /// The policy's `$type` identifier.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Policy::Personalspace(_) => "com.atproto.personalspace.policy",
+            Policy::Memberspace(_) => "com.atproto.memberspace.policy",
+            Policy::Managedspace(_) => "com.atproto.managedspace.policy",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,13 +78,56 @@ pub struct GetSpaceParams {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GetSpaceOutput {
     pub space: String,
-    pub config: SpaceConfig,
+    pub policy: Policy,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSpaceInput {
+    #[serde(rename = "type")]
+    pub space_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skey: Option<String>,
+    /// Raw policy object; decode to [`Policy`] at the boundary so an
+    /// unrecognized `$type` maps to `UnsupportedPolicy`. Absent is `Null`,
+    /// which fails the same way.
+    #[serde(default)]
+    pub policy: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateSpaceOutput {
+    pub uri: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateSpaceInput {
+    pub space: String,
+    /// Raw policy object; see [`CreateSpaceInput::policy`].
+    #[serde(default)]
+    pub policy: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteSpaceInput {
+    pub space: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoveWriterInput {
+    pub space: String,
+    pub did: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetSpaceCredentialInput {
     pub space: String,
+    /// The delegation token, when the space requires one. Also accepted as
+    /// the request's bearer credential for pre-amendment clients; the body
+    /// field wins when both are sent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delegation_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_attestation: Option<String>,
 }
@@ -418,7 +479,6 @@ pub struct NotifySpaceDeletedInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::com::atproto::simplespace::{AppAccess, AppAccessOpen, Policy};
     use chrono::TimeZone;
     use serde::de::DeserializeOwned;
     use serde::Serialize;
@@ -547,13 +607,12 @@ mod tests {
         roundtrip(
             &GetSpaceOutput {
                 space: SPACE.to_string(),
-                config: SpaceConfig::Simplespace(SimplespaceConfig {
-                    policy: Some(Policy::MemberList),
-                    app_access: Some(AppAccess::Open(AppAccessOpen {})),
-                    managing_app: None,
+                policy: Policy::Memberspace(crate::com::atproto::memberspace::Policy {
+                    public_read: Some(true),
+                    ..Default::default()
                 }),
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","config":{"$type":"com.atproto.simplespace.defs#config","policy":"member-list","appAccess":{"$type":"com.atproto.simplespace.defs#appAccessOpen"}}}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","policy":{"$type":"com.atproto.memberspace.policy","publicRead":true}}"#,
         );
     }
 
@@ -562,9 +621,10 @@ mod tests {
         roundtrip(
             &GetSpaceCredentialInput {
                 space: SPACE.to_string(),
+                delegation_token: Some("dt.jwt".to_string()),
                 client_attestation: Some("ca.jwt".to_string()),
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","clientAttestation":"ca.jwt"}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","delegationToken":"dt.jwt","clientAttestation":"ca.jwt"}"#,
         );
         roundtrip(
             &GetSpaceCredentialOutput {
