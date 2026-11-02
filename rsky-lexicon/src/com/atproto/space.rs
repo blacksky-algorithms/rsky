@@ -113,6 +113,24 @@ pub struct DeleteSpaceInput {
     pub space: String,
 }
 
+/// `com.atproto.space.clearRecords`: delete every record in the
+/// authenticated account's space repo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClearRecordsInput {
+    pub space: String,
+    /// The DID of the repo to clear; must equal the authenticated member.
+    pub repo: String,
+}
+
+/// `com.atproto.space.notifyCredentialRevoked`: jtis of credentials a repo
+/// host must now reject (service auth from the space authority).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotifyCredentialRevokedInput {
+    pub space: String,
+    /// The `jti` of each revoked credential (1–100).
+    pub credentials: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoveWriterInput {
     pub space: String,
