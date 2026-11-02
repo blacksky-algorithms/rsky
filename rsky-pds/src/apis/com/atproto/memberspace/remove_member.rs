@@ -3,6 +3,8 @@ use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::memberspace::require_memberspace;
 use crate::apis::com::atproto::space::{parse_space_uri, require_manage, space_def_error};
 use crate::apis::ApiError;
+use crate::apis::com::atproto::space::publish::unpublish_member;
+use crate::config::ServerConfig;
 use crate::auth_verifier::AccessSpace;
 use crate::space_scope::ManageOp;
 use rocket::serde::json::Json;
@@ -21,6 +23,7 @@ pub async fn memberspace_remove_member(
     auth: AccessSpace,
     actor_store: &State<ActorStore>,
     blobstore_factory: &State<BlobstoreFactory>,
+    server_config: &State<ServerConfig>,
 ) -> Result<(), ApiError> {
     let RemoveMemberInput { space, did: member } = body.into_inner();
     let space_id = parse_space_uri(&space)?;
@@ -47,6 +50,15 @@ pub async fn memberspace_remove_member(
         .remove_writer(&space_id.uri(), &member)
         .await
         .map_err(space_def_error)?;
+    unpublish_member(
+        actor_store,
+        blobstore_factory,
+        server_config,
+        &did,
+        &space_id,
+        &member,
+    )
+    .await?;
     if actor_store.exists(&member).await.unwrap_or(false) {
         if let Ok(member_reader) = actor_store
             .read(member.clone(), blobstore_factory.blobstore(member.clone()))

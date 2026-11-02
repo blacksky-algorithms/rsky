@@ -3,6 +3,9 @@ use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::space::host::parse_policy;
 use crate::apis::com::atproto::space::{parse_space_uri, require_manage, space_def_error};
 use crate::apis::ApiError;
+use crate::actor_store::space::SpacePolicy;
+use crate::apis::com::atproto::space::publish::{member_dids, reconcile_published};
+use crate::config::ServerConfig;
 use crate::auth_verifier::AccessSpace;
 use crate::space_scope::ManageOp;
 use rocket::serde::json::Json;
@@ -23,6 +26,7 @@ pub async fn space_update_space(
     auth: AccessSpace,
     actor_store: &State<ActorStore>,
     blobstore_factory: &State<BlobstoreFactory>,
+    server_config: &State<ServerConfig>,
 ) -> Result<(), ApiError> {
     let UpdateSpaceInput { space, policy } = body.into_inner();
     let space_id = parse_space_uri(&space)?;
@@ -39,6 +43,14 @@ pub async fn space_update_space(
         .live_space_def(&space_id.uri())
         .await
         .map_err(space_def_error)?;
+    // Capture the outgoing member list before a policy migration clears it:
+    // its published member records have to come down too.
+    let was_memberspace = matches!(def.policy, SpacePolicy::Memberspace(_));
+    let dropped_members = if was_memberspace {
+        member_dids(&reader.space, &space_id.uri()).await?
+    } else {
+        Vec::new()
+    };
     if def.policy.type_name() != policy.type_name() {
         reader
             .space
@@ -46,11 +58,22 @@ pub async fn space_update_space(
             .await
             .map_err(space_def_error)?;
     }
-    def.policy = policy;
+    def.policy = policy.clone();
     reader
         .space
         .update_space_def(def)
         .await
         .map_err(space_def_error)?;
+    reconcile_published(
+        actor_store,
+        blobstore_factory,
+        server_config,
+        &reader.space,
+        &did,
+        &space_id,
+        &policy,
+        if was_memberspace { dropped_members } else { Vec::new() },
+    )
+    .await?;
     Ok(())
 }

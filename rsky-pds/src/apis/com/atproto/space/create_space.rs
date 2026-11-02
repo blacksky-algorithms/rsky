@@ -4,6 +4,8 @@ use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::space::host::parse_policy;
 use crate::apis::com::atproto::space::{require_manage, space_def_error, valid_key_part};
 use crate::apis::ApiError;
+use crate::apis::com::atproto::space::publish::reconcile_published;
+use crate::config::ServerConfig;
 use crate::auth_verifier::AccessSpace;
 use crate::space_scope::ManageOp;
 use rocket::serde::json::Json;
@@ -27,6 +29,7 @@ pub async fn space_create_space(
     auth: AccessSpace,
     actor_store: &State<ActorStore>,
     blobstore_factory: &State<BlobstoreFactory>,
+    server_config: &State<ServerConfig>,
 ) -> Result<Json<CreateSpaceOutput>, ApiError> {
     let CreateSpaceInput {
         space_type,
@@ -53,7 +56,7 @@ pub async fn space_create_space(
         space_uri: space.uri(),
         space_type,
         skey,
-        policy,
+        policy: policy.clone(),
         deleted: false,
     };
     let reader = actor_store
@@ -83,5 +86,16 @@ pub async fn space_create_space(
             .await
             .map_err(space_def_error)?;
     }
+    reconcile_published(
+        actor_store,
+        blobstore_factory,
+        server_config,
+        &reader.space,
+        &did,
+        &space,
+        &policy,
+        Vec::new(),
+    )
+    .await?;
     Ok(Json(CreateSpaceOutput { uri: space.uri() }))
 }

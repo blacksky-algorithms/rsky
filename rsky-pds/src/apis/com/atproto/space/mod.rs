@@ -43,6 +43,7 @@ pub mod list_repos;
 pub mod list_spaces;
 pub mod notify_space_deleted;
 pub mod notify_write;
+pub mod publish;
 pub mod put_record;
 pub mod register_notify;
 pub mod remove_writer;

@@ -3,6 +3,8 @@ use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::memberspace::require_memberspace;
 use crate::apis::com::atproto::space::{parse_space_uri, require_manage, space_def_error};
 use crate::apis::ApiError;
+use crate::apis::com::atproto::space::publish::publish_member;
+use crate::config::ServerConfig;
 use crate::auth_verifier::AccessSpace;
 use crate::space_scope::ManageOp;
 use rocket::serde::json::Json;
@@ -22,6 +24,7 @@ pub async fn memberspace_put_member(
     auth: AccessSpace,
     actor_store: &State<ActorStore>,
     blobstore_factory: &State<BlobstoreFactory>,
+    server_config: &State<ServerConfig>,
 ) -> Result<(), ApiError> {
     let PutMemberInput {
         space,
@@ -51,6 +54,18 @@ pub async fn memberspace_put_member(
         .put_member(&space_id.uri(), &member, read, write)
         .await
         .map_err(space_def_error)?;
+    publish_member(
+        actor_store,
+        blobstore_factory,
+        server_config,
+        &did,
+        &space_id,
+        &def.policy,
+        &member,
+        read,
+        write,
+    )
+    .await?;
     if !write {
         reader
             .space

@@ -5,6 +5,7 @@ use crate::apis::com::atproto::space::{
     apply_space_writes, commit_meta, parse_space_uri, require_repo_matches_subject, valid_key_part,
 };
 use crate::apis::ApiError;
+use crate::apis::com::atproto::space::publish::reject_managed_collections;
 use crate::auth_verifier::AccessSpace;
 use crate::config::ServerConfig;
 use crate::space_auth::session_permits;
@@ -86,6 +87,7 @@ pub async fn space_apply_writes(
                 "invalid collection: {collection}"
             )));
         }
+        reject_managed_collections(&space_id, &did, &collection)?;
         if !valid_key_part(&rkey, 512) {
             return Err(ApiError::InvalidRequest(format!("invalid rkey: {rkey}")));
         }

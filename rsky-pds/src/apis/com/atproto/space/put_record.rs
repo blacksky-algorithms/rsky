@@ -1,6 +1,7 @@
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::space::SpaceWrite;
 use crate::actor_store::ActorStore;
+use crate::apis::com::atproto::space::publish::reject_managed_collections;
 use crate::apis::com::atproto::space::{
     apply_space_writes, commit_meta, parse_space_uri, require_repo_matches_subject, space_error,
     valid_key_part,
@@ -38,6 +39,7 @@ pub async fn space_put_record(
     let credentials = auth.access.credentials.expect("credentials populated");
     let did = credentials.did.clone().expect("did populated");
     require_repo_matches_subject(&repo, &did)?;
+    reject_managed_collections(&space_id, &did, &collection)?;
     if ensure_valid_nsid(&collection).is_err() {
         return Err(ApiError::InvalidRequest(format!(
             "invalid collection: {collection}"
