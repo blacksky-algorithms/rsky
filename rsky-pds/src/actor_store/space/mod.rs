@@ -30,6 +30,8 @@ pub enum SpaceStoreError {
     SpaceNotFound(String),
     #[error("SpaceDeleted: `{0}` belongs to a deleted space")]
     SpaceDeleted(String),
+    #[error("MemberNotFound: `{0}` is not a member")]
+    MemberNotFound(String),
     #[error("RecordExists: `{0}`")]
     RecordExists(String),
     #[error("RecordNotFound: `{0}`")]
@@ -134,16 +136,28 @@ pub struct SpaceOplogRow {
     pub value: Option<Vec<u8>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpaceDefRow {
     pub space_uri: String,
     pub space_type: String,
     pub skey: String,
-    pub policy: String,
-    pub app_access: String,
-    pub allowed_clients: Option<Vec<String>>,
-    pub managing_app: Option<String>,
+    /// The space's `$type`-tagged policy object, stored as JSON.
+    pub policy: SpacePolicy,
     pub deleted: bool,
+}
+
+/// The policy union: `com.atproto.{personalspace,memberspace,managedspace}.policy`.
+pub type SpacePolicy = rsky_lexicon::com::atproto::space::Policy;
+
+/// A member-list entry: `read`/`write` booleans plus the rsky bookkeeping
+/// fields (`member_rev`/`added_at`, empty for rows that predate them).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberRow {
+    pub did: String,
+    pub read: bool,
+    pub write: bool,
+    pub member_rev: String,
+    pub added_at: String,
 }
 
 /// A registered write-notification subscriber.
@@ -673,9 +687,7 @@ impl SpaceStore {
                     .optional()?;
                 match existing {
                     Some(0) => {
-                        return Err(
-                            SpaceStoreError::RecordExists(def.space_uri.clone()).into()
-                        )
+                        return Err(SpaceStoreError::RecordExists(def.space_uri.clone()).into())
                     }
                     Some(_) => {
                         return Err(SpaceStoreError::SpaceDeleted(def.space_uri.clone()).into())
@@ -684,18 +696,13 @@ impl SpaceStore {
                 }
                 conn.execute(
                     "INSERT INTO space_def \
-                     (space_uri, space_type, skey, policy, app_access, allowed_clients, managing_app, deleted, created_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)",
+                     (space_uri, space_type, skey, policy, deleted, created_at) \
+                     VALUES (?1, ?2, ?3, ?4, 0, ?5)",
                     params![
                         def.space_uri,
                         def.space_type,
                         def.skey,
-                        def.policy,
-                        def.app_access,
-                        def.allowed_clients
-                            .as_ref()
-                            .map(|list| serde_json::to_string(list).expect("string list")),
-                        def.managing_app,
+                        serde_json::to_string(&def.policy).expect("policy object"),
                         created_at
                     ],
                 )?;
@@ -710,7 +717,7 @@ impl SpaceStore {
             .run(move |conn| {
                 let row = conn
                     .query_row(
-                        "SELECT space_uri, space_type, skey, policy, app_access, allowed_clients, managing_app, deleted \
+                        "SELECT space_uri, space_type, skey, policy, deleted \
                          FROM space_def WHERE space_uri = ?1",
                         [&space_uri],
                         |row| {
@@ -719,31 +726,19 @@ impl SpaceStore {
                                 row.get::<_, String>(1)?,
                                 row.get::<_, String>(2)?,
                                 row.get::<_, String>(3)?,
-                                row.get::<_, String>(4)?,
-                                row.get::<_, Option<String>>(5)?,
-                                row.get::<_, Option<String>>(6)?,
-                                row.get::<_, i64>(7)?,
+                                row.get::<_, i64>(4)?,
                             ))
                         },
                     )
                     .optional()?;
-                let Some((space_uri, space_type, skey, policy, app_access, allowed, managing_app, deleted)) =
-                    row
-                else {
+                let Some((space_uri, space_type, skey, policy, deleted)) = row else {
                     return Ok(None);
-                };
-                let allowed_clients = match allowed {
-                    Some(json) => Some(serde_json::from_str(&json)?),
-                    None => None,
                 };
                 Ok(Some(SpaceDefRow {
                     space_uri,
                     space_type,
                     skey,
-                    policy,
-                    app_access,
-                    allowed_clients,
-                    managing_app,
+                    policy: serde_json::from_str(&policy)?,
                     deleted: deleted != 0,
                 }))
             })
@@ -766,16 +761,11 @@ impl SpaceStore {
         self.db
             .run(move |conn| {
                 let n = conn.execute(
-                    "UPDATE space_def SET policy = ?2, app_access = ?3, allowed_clients = ?4, managing_app = ?5 \
+                    "UPDATE space_def SET policy = ?2 \
                      WHERE space_uri = ?1 AND deleted = 0",
                     params![
                         def.space_uri,
-                        def.policy,
-                        def.app_access,
-                        def.allowed_clients
-                            .as_ref()
-                            .map(|list| serde_json::to_string(list).expect("string list")),
-                        def.managing_app
+                        serde_json::to_string(&def.policy).expect("policy object"),
                     ],
                 )?;
                 if n == 0 {
@@ -799,22 +789,34 @@ impl SpaceStore {
             .await
     }
 
-    pub async fn add_member(&self, space_uri: &str, did: &str) -> Result<()> {
+    /// `putMember` semantics: add a member or replace their `read`/`write`
+    /// access together, restamping the row's rev and timestamp.
+    pub async fn put_member(
+        &self,
+        space_uri: &str,
+        did: &str,
+        read: bool,
+        write: bool,
+    ) -> Result<()> {
         let member_rev = TID::next_str(None)?;
         let added_at = rsky_common::now();
         let (space_uri, did) = (space_uri.to_string(), did.to_string());
         self.db
             .run(move |conn| {
                 conn.execute(
-                    // Re-adding is idempotent and preserves the original
-                    // metadata -- except when the row predates the metadata
-                    // columns (empty strings), which a re-add fills in.
-                    "INSERT INTO space_member (space_uri, did, member_rev, added_at) \
-                     VALUES (?1, ?2, ?3, ?4) \
+                    "INSERT INTO space_member (space_uri, did, read, write, member_rev, added_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
                      ON CONFLICT(space_uri, did) DO UPDATE SET \
-                     member_rev = excluded.member_rev, added_at = excluded.added_at \
-                     WHERE space_member.member_rev = ''",
-                    params![space_uri, did, member_rev, added_at],
+                     read = excluded.read, write = excluded.write, \
+                     member_rev = excluded.member_rev, added_at = excluded.added_at",
+                    params![
+                        space_uri,
+                        did,
+                        read as i64,
+                        write as i64,
+                        member_rev,
+                        added_at
+                    ],
                 )?;
                 Ok(())
             })
@@ -825,11 +827,59 @@ impl SpaceStore {
         let (space_uri, did) = (space_uri.to_string(), did.to_string());
         self.db
             .run(move |conn| {
-                conn.execute(
+                let n = conn.execute(
                     "DELETE FROM space_member WHERE space_uri = ?1 AND did = ?2",
                     params![space_uri, did],
                 )?;
+                if n == 0 {
+                    return Err(SpaceStoreError::MemberNotFound(did.clone()).into());
+                }
                 Ok(())
+            })
+            .await
+    }
+
+    /// A member's `read`/`write` booleans, `None` for a non-member.
+    pub async fn member_access(&self, space_uri: &str, did: &str) -> Result<Option<(bool, bool)>> {
+        let (space_uri, did) = (space_uri.to_string(), did.to_string());
+        self.db
+            .run(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT read, write FROM space_member WHERE space_uri = ?1 AND did = ?2",
+                        params![space_uri, did],
+                        |row| Ok((row.get::<_, i64>(0)? != 0, row.get::<_, i64>(1)? != 0)),
+                    )
+                    .optional()?)
+            })
+            .await
+    }
+
+    /// Drop the whole member list: a policy migration discards the previous
+    /// policy's state (spec §Space policy).
+    pub async fn clear_members(&self, space_uri: &str) -> Result<()> {
+        let space_uri = space_uri.to_string();
+        self.db
+            .run(move |conn| {
+                conn.execute(
+                    "DELETE FROM space_member WHERE space_uri = ?1",
+                    params![space_uri],
+                )?;
+                Ok(())
+            })
+            .await
+    }
+
+    /// Drop an account from the writer set (`com.atproto.space.removeWriter`,
+    /// and the `removeMember`/`putMember` write-revocation SHOULD).
+    pub async fn remove_writer(&self, space_uri: &str, did: &str) -> Result<bool> {
+        let (space_uri, did) = (space_uri.to_string(), did.to_string());
+        self.db
+            .run(move |conn| {
+                Ok(conn.execute(
+                    "DELETE FROM space_writer WHERE space_uri = ?1 AND did = ?2",
+                    params![space_uri, did],
+                )? > 0)
             })
             .await
     }
@@ -839,19 +889,26 @@ impl SpaceStore {
         space_uri: &str,
         limit: usize,
         cursor: Option<String>,
-    ) -> Result<Vec<(String, String, String)>> {
+    ) -> Result<Vec<MemberRow>> {
         let space_uri = space_uri.to_string();
         self.db
             .run(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT did, member_rev, added_at FROM space_member WHERE space_uri = ?1 \
-                     AND (?2 IS NULL OR did > ?2) ORDER BY did LIMIT ?3",
+                    "SELECT did, read, write, member_rev, added_at FROM space_member \
+                     WHERE space_uri = ?1 AND (?2 IS NULL OR did > ?2) \
+                     ORDER BY did LIMIT ?3",
                 )?;
                 let rows = stmt
                     .query_map(params![space_uri, cursor, limit as i64], |row| {
-                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                        Ok(MemberRow {
+                            did: row.get(0)?,
+                            read: row.get::<_, i64>(1)? != 0,
+                            write: row.get::<_, i64>(2)? != 0,
+                            member_rev: row.get(3)?,
+                            added_at: row.get(4)?,
+                        })
                     })?
-                    .collect::<Result<Vec<(String, String, String)>, rusqlite::Error>>()?;
+                    .collect::<Result<Vec<MemberRow>, rusqlite::Error>>()?;
                 Ok(rows)
             })
             .await
