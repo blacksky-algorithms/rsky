@@ -17,7 +17,7 @@ const ROLES: [&str; 1] = ["pds"];
 /// Held to the mounted routes by `described_methods_match_the_mounted_routes`
 /// in the integration tests: a description that overstates the surface is worse
 /// than none, because a caller can handle silence.
-const METHODS: [&str; 112] = [
+const METHODS: [&str; 117] = [
     "app.bsky.actor.getPreferences",
     "app.bsky.actor.getProfile",
     "app.bsky.actor.getProfiles",
@@ -91,8 +91,13 @@ const METHODS: [&str; 112] = [
     "com.atproto.memberspace.putMember",
     "com.atproto.memberspace.removeMember",
     "com.atproto.space.applyWrites",
+    "com.atproto.space.clearRecords",
     "com.atproto.space.createSpace",
     "com.atproto.space.deleteSpace",
+    "com.atproto.space.exportSpaceMeta",
+    "com.atproto.space.importRepo",
+    "com.atproto.space.importSpaceMeta",
+    "com.atproto.space.notifyCredentialRevoked",
     "com.atproto.space.createRecord",
     "com.atproto.space.deleteRecord",
     "com.atproto.space.getBlob",

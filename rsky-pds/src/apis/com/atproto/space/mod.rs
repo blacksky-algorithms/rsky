@@ -43,6 +43,7 @@ pub mod list_records;
 pub mod list_repo_ops;
 pub mod list_repos;
 pub mod list_spaces;
+pub mod import_repo;
 pub mod import_space_meta;
 pub mod notify_credential_revoked;
 pub mod notify_space_deleted;
