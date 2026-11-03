@@ -508,12 +508,15 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blobs::DeliveryStore;
     use crate::credentials::StaticCredential;
-    use crate::index::InMemoryIndex;
+    use crate::index::{InMemoryIndex, SpaceIndex};
     use crate::recovery::tests::{AUTHOR, Author, FixedKey, Fixture, SPACE, author, fixture};
-    use crate::repohost::OplogPage;
+    use crate::repohost::{BlobResponse, OplogPage};
+    use crate::sqlite_index::{SpaceScopedIndex, SqliteIndex};
     use async_trait::async_trait;
     use chrono::{DateTime, TimeZone, Utc};
+    use lexicon_cid::multihash::Multihash;
     use rsky_lexicon::com::atproto::space::ListReposOutput;
     use rsky_space::car::repo_car_bytes;
     use rsky_space::commit::{build_ctx, compute_mac};
@@ -537,6 +540,7 @@ mod tests {
     use serde_bytes::ByteBuf;
     use sha2::{Digest, Sha256};
     use std::collections::HashMap;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const COLL: &str = "community.blacksky.feed.post";
@@ -1292,6 +1296,257 @@ mod tests {
     struct GuardedBlobHost {
         repeat_cursor: bool,
         calls: AtomicUsize,
+    }
+
+    struct BlobHost {
+        cids: Vec<String>,
+        response: BlobResponse,
+    }
+
+    #[async_trait]
+    impl RepoHostClient for BlobHost {
+        async fn list_repo_ops(
+            &self,
+            _space: &str,
+            _did: &str,
+            _since: Option<&str>,
+            _cursor: Option<&str>,
+        ) -> Result<OplogPage> {
+            Err(DaemonError::Xrpc("unused".to_string()))
+        }
+
+        async fn get_repo_car(&self, _space: &str, _did: &str) -> Result<Vec<u8>> {
+            Err(DaemonError::Xrpc("unused".to_string()))
+        }
+
+        async fn get_latest_commit(&self, _space: &str, _did: &str) -> Result<SignedCommit> {
+            Err(DaemonError::Xrpc("unused".to_string()))
+        }
+
+        async fn list_blobs(
+            &self,
+            _space: &str,
+            _did: &str,
+            _cursor: Option<&str>,
+        ) -> Result<rsky_lexicon::com::atproto::space::ListBlobsOutput> {
+            Ok(rsky_lexicon::com::atproto::space::ListBlobsOutput {
+                cids: self.cids.clone(),
+                cursor: None,
+            })
+        }
+
+        async fn get_blob(
+            &self,
+            _space: &str,
+            _did: &str,
+            _cid: &str,
+            _max_bytes: usize,
+        ) -> Result<BlobResponse> {
+            Ok(BlobResponse {
+                content_type: self.response.content_type.clone(),
+                bytes: self.response.bytes.clone(),
+            })
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum DeliveryCall {
+        Put(String),
+        Delete(String),
+    }
+
+    #[derive(Default)]
+    struct RecordingStore(Mutex<Vec<DeliveryCall>>);
+
+    #[async_trait]
+    impl DeliveryStore for RecordingStore {
+        async fn put(&self, key: &str, _content_type: &str, _bytes: Vec<u8>) -> Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(DeliveryCall::Put(key.to_string()));
+            Ok(())
+        }
+
+        async fn delete(&self, key: &str) -> Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(DeliveryCall::Delete(key.to_string()));
+            Ok(())
+        }
+    }
+
+    fn cid_for(bytes: &[u8]) -> String {
+        let digest = Sha256::digest(bytes);
+        lexicon_cid::Cid::new_v1(0x55, Multihash::<64>::wrap(0x12, &digest).unwrap()).to_string()
+    }
+
+    fn blob_index() -> (tempfile::TempDir, Arc<SqliteIndex>, SpaceScopedIndex) {
+        let dir = tempfile::tempdir().unwrap();
+        let db =
+            Arc::new(SqliteIndex::open(dir.path().join("index.sqlite").to_str().unwrap()).unwrap());
+        let index = db.for_space(SPACE);
+        (dir, db, index)
+    }
+
+    fn blob_host(cids: Vec<String>, content_type: &str, bytes: Vec<u8>) -> BlobHost {
+        BlobHost {
+            cids,
+            response: BlobResponse {
+                content_type: content_type.to_string(),
+                bytes,
+            },
+        }
+    }
+
+    fn blob_space_host() -> PagedSpaceHost {
+        PagedSpaceHost::new(vec![ListReposOutput {
+            cursor: None,
+            repos: vec![repo_ref(AUTHOR, "3a", None)],
+        }])
+    }
+
+    async fn reconcile_blob_test(
+        index: &SpaceScopedIndex,
+        client: &BlobHost,
+        store: &RecordingStore,
+        max_bytes: usize,
+        quota_bytes: u64,
+    ) -> Result<usize> {
+        reconcile_blobs_once(
+            &blob_space_host(),
+            client,
+            index,
+            SPACE,
+            "sc.jwt",
+            true,
+            Some(store),
+            max_bytes,
+            quota_bytes,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn reconcile_blobs_rejects_a_body_that_does_not_match_its_cid() {
+        let (_dir, _db, index) = blob_index();
+        let cid = cid_for(b"expected image");
+        let client = blob_host(vec![cid.clone()], "image/png", b"different image".to_vec());
+        let store = RecordingStore::default();
+
+        assert!(
+            reconcile_blob_test(&index, &client, &store, 1024, 1024)
+                .await
+                .is_err()
+        );
+        assert!(store.0.lock().unwrap().is_empty());
+        assert_eq!(index.blob_ledger(AUTHOR).await.unwrap()[0].state, "pending");
+    }
+
+    #[tokio::test]
+    async fn reconcile_blobs_rejects_a_body_over_the_size_cap() {
+        let (_dir, _db, index) = blob_index();
+        let bytes = vec![7; 5];
+        let client = blob_host(vec![cid_for(&bytes)], "image/png", bytes);
+        let store = RecordingStore::default();
+
+        assert!(
+            reconcile_blob_test(&index, &client, &store, 4, 1024)
+                .await
+                .is_err()
+        );
+        assert!(store.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconcile_blobs_skips_a_disallowed_mime_type() {
+        let (_dir, _db, index) = blob_index();
+        let bytes = b"not an image".to_vec();
+        let client = blob_host(vec![cid_for(&bytes)], "application/octet-stream", bytes);
+        let store = RecordingStore::default();
+
+        reconcile_blob_test(&index, &client, &store, 1024, 1024)
+            .await
+            .unwrap();
+        assert!(store.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconcile_blobs_enforces_a_per_space_quota() {
+        let (_dir, db, index) = blob_index();
+        let prior = cid_for(b"prior image");
+        let bytes = b"next image".to_vec();
+        let cid = cid_for(&bytes);
+        index
+            .reconcile_blob_ledger(AUTHOR, &[prior.clone(), cid.clone()])
+            .await
+            .unwrap();
+        index.mark_blob_fetched(AUTHOR, &prior, 3).await.unwrap();
+        let client = blob_host(vec![prior, cid], "image/png", bytes);
+        let store = RecordingStore::default();
+
+        reconcile_blob_test(&index, &client, &store, 1024, 3)
+            .await
+            .unwrap();
+        assert!(store.0.lock().unwrap().is_empty());
+
+        let other_index = db.for_space("at://did:plc:other/space/community.blacksky.feed/other");
+        other_index
+            .reconcile_blob_ledger(AUTHOR, &[cid_for(b"other image")])
+            .await
+            .unwrap();
+        other_index
+            .mark_blob_fetched(AUTHOR, &cid_for(b"other image"), 10_000)
+            .await
+            .unwrap();
+        assert_eq!(other_index.fetched_blob_bytes().await.unwrap(), 10_000);
+        assert_eq!(index.fetched_blob_bytes().await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn reconcile_blobs_deletes_only_after_the_last_reference_is_removed() {
+        let (_dir, _db, index) = blob_index();
+        let cid = cid_for(b"referenced image");
+        index
+            .update_blob_ledger(AUTHOR, COLL, "one", &[cid.clone()])
+            .await
+            .unwrap();
+        index
+            .update_blob_ledger(AUTHOR, COLL, "two", &[cid.clone()])
+            .await
+            .unwrap();
+        index
+            .reconcile_blob_ledger(AUTHOR, &[cid.clone()])
+            .await
+            .unwrap();
+        index.mark_blob_fetched(AUTHOR, &cid, 1).await.unwrap();
+        let store = RecordingStore::default();
+        let client = blob_host(vec![cid.clone()], "image/png", Vec::new());
+
+        index
+            .update_blob_ledger(AUTHOR, COLL, "one", &[])
+            .await
+            .unwrap();
+        reconcile_blob_test(&index, &client, &store, 1024, 1024)
+            .await
+            .unwrap();
+        assert!(store.0.lock().unwrap().is_empty());
+
+        index
+            .update_blob_ledger(AUTHOR, COLL, "two", &[])
+            .await
+            .unwrap();
+        let empty = blob_host(Vec::new(), "image/png", Vec::new());
+        reconcile_blob_test(&index, &empty, &store, 1024, 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            *store.0.lock().unwrap(),
+            vec![DeliveryCall::Delete(
+                crate::blobs::object_key(SPACE, AUTHOR, &cid).unwrap()
+            )]
+        );
     }
 
     #[async_trait]
