@@ -29,6 +29,11 @@ pub struct OplogPage {
     pub cursor: Option<String>,
 }
 
+pub struct BlobResponse {
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+}
+
 /// Reads permissioned repos from their hosts.
 #[async_trait]
 pub trait RepoHostClient: Send + Sync {
@@ -53,6 +58,17 @@ pub trait RepoHostClient: Send + Sync {
         let _ = (space, did, cursor);
         Err(crate::error::DaemonError::Xrpc(
             "listBlobs is not implemented by this repo host".to_string(),
+        ))
+    }
+    async fn get_blob(
+        &self,
+        _space: &str,
+        _did: &str,
+        _cid: &str,
+        _max_bytes: usize,
+    ) -> Result<BlobResponse> {
+        Err(crate::error::DaemonError::Xrpc(
+            "getBlob is not implemented by this repo host".to_string(),
         ))
     }
 }
@@ -193,6 +209,31 @@ impl RepoHostClient for HttpRepoHost {
         }
         limited_json(self.get("com.atproto.space.listBlobs", &query).await?).await
     }
+
+    async fn get_blob(
+        &self,
+        space: &str,
+        did: &str,
+        cid: &str,
+        max_bytes: usize,
+    ) -> Result<BlobResponse> {
+        let response = self
+            .get(
+                "com.atproto.space.getBlob",
+                &[("space", space), ("repo", did), ("cid", cid)],
+            )
+            .await?;
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        Ok(BlobResponse {
+            content_type,
+            bytes: limited_bytes_with_limit(response, max_bytes).await?,
+        })
+    }
 }
 
 /// Sends each repo's requests to the PDS named by that account's DID
@@ -308,6 +349,19 @@ impl RepoHostClient for ResolvingRepoHost {
         self.host(did, cursor.is_some())
             .await?
             .list_blobs(space, did, cursor)
+            .await
+    }
+
+    async fn get_blob(
+        &self,
+        space: &str,
+        did: &str,
+        cid: &str,
+        max_bytes: usize,
+    ) -> Result<BlobResponse> {
+        self.host(did, false)
+            .await?
+            .get_blob(space, did, cid, max_bytes)
             .await
     }
 }

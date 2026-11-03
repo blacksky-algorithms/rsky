@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS blob_state (
     repo       TEXT NOT NULL,
     cid        TEXT NOT NULL,
     state      TEXT NOT NULL CHECK (state IN ('pending', 'fetched', 'orphaned')),
+    size       INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (space_uri, repo, cid)
 );
 CREATE TABLE IF NOT EXISTS blob_ref (
@@ -124,6 +125,7 @@ impl SqliteIndex {
         conn.execute_batch(SCHEMA).map_err(db_err)?;
         Self::migrate_blob_ledger(&conn)?;
         Self::add_missing_failure_columns(&conn)?;
+        Self::add_missing_blob_columns(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -219,6 +221,25 @@ impl SqliteIndex {
         Ok(())
     }
 
+    fn add_missing_blob_columns(conn: &Connection) -> Result<()> {
+        let present = conn
+            .query_row(
+                "SELECT 1 FROM pragma_table_info('blob_state') WHERE name = 'size'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(db_err)?;
+        if present.is_none() {
+            conn.execute(
+                "ALTER TABLE blob_state ADD COLUMN size INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(db_err)?;
+        }
+        Ok(())
+    }
+
     /// A [`SpaceIndex`] handle scoped to one space.
     pub fn for_space(self: &Arc<Self>, space_uri: impl Into<String>) -> SpaceScopedIndex {
         SpaceScopedIndex {
@@ -238,7 +259,7 @@ impl SpaceScopedIndex {
         let conn = self.db.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT space_uri, repo, cid, state
+                "SELECT space_uri, repo, cid, state, size
                  FROM blob_state WHERE space_uri = ?1 AND repo = ?2
                  ORDER BY cid",
             )
@@ -250,6 +271,7 @@ impl SpaceScopedIndex {
                     repo: row.get(1)?,
                     cid: row.get(2)?,
                     state: row.get(3)?,
+                    size: row.get::<_, i64>(4)? as u64,
                 })
             })
             .map_err(db_err)?;
@@ -747,6 +769,69 @@ impl SpaceIndex for SpaceScopedIndex {
                )",
             params![self.space_uri],
         )
+        .map_err(db_err)
+    }
+
+    async fn pending_blobs(&self, did: &str) -> Result<Vec<BlobLedgerEntry>> {
+        let conn = self.db.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT space_uri, repo, cid, state, size FROM blob_state WHERE space_uri = ?1 AND repo = ?2 AND state = 'pending' ORDER BY cid")
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![self.space_uri, did], |row| {
+                Ok(BlobLedgerEntry {
+                    space: row.get(0)?,
+                    repo: row.get(1)?,
+                    cid: row.get(2)?,
+                    state: row.get(3)?,
+                    size: row.get::<_, i64>(4)? as u64,
+                })
+            })
+            .map_err(db_err)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_err)
+    }
+
+    async fn orphaned_blobs(&self) -> Result<Vec<BlobLedgerEntry>> {
+        let conn = self.db.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT space_uri, repo, cid, state, size FROM blob_state WHERE space_uri = ?1 AND state = 'orphaned' ORDER BY repo, cid")
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![self.space_uri], |row| {
+                Ok(BlobLedgerEntry {
+                    space: row.get(0)?,
+                    repo: row.get(1)?,
+                    cid: row.get(2)?,
+                    state: row.get(3)?,
+                    size: row.get::<_, i64>(4)? as u64,
+                })
+            })
+            .map_err(db_err)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_err)
+    }
+
+    async fn mark_blob_fetched(&self, did: &str, cid: &str, size: u64) -> Result<()> {
+        let conn = self.db.conn.lock().unwrap();
+        conn.execute("UPDATE blob_state SET state = 'fetched', size = ?4 WHERE space_uri = ?1 AND repo = ?2 AND cid = ?3", params![self.space_uri, did, cid, size as i64])
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn remove_blob(&self, did: &str, cid: &str) -> Result<()> {
+        let conn = self.db.conn.lock().unwrap();
+        conn.execute("DELETE FROM blob_state WHERE space_uri = ?1 AND repo = ?2 AND cid = ?3 AND state = 'orphaned'", params![self.space_uri, did, cid])
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn fetched_blob_bytes(&self) -> Result<u64> {
+        let conn = self.db.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(SUM(size), 0) FROM blob_state WHERE space_uri = ?1 AND state = 'fetched'",
+            params![self.space_uri],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|value| value as u64)
         .map_err(db_err)
     }
 }

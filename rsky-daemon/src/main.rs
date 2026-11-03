@@ -2,6 +2,7 @@
 //! listener, and the run loop, with graceful shutdown on ctrl-c.
 
 use clap::Parser;
+use rsky_daemon::blobs::{DeliveryStore, S3DeliveryStore};
 use rsky_daemon::config::Config;
 use rsky_daemon::engine::CommitKeyResolver;
 use rsky_daemon::runner::SpaceWorkerParts;
@@ -273,6 +274,14 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         service_identity: cfg.service_identity.clone(),
         now_fn: rsky_daemon::unix_now,
         blob_fetch_enabled: cfg.blob_fetch_enabled,
+        delivery_store: match cfg.delivery_bucket_config() {
+            Some(config) => {
+                Some(Arc::new(S3DeliveryStore::new(config).await) as Arc<dyn DeliveryStore>)
+            }
+            None => None,
+        },
+        blob_max_bytes: cfg.blob_max_bytes,
+        blob_space_quota_bytes: cfg.blob_space_quota_bytes,
     };
     let runner = tokio::spawn(run_multi(
         opts,

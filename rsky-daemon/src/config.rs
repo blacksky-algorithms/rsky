@@ -154,6 +154,31 @@ pub struct Config {
     #[arg(long, env = "DAEMON_BLOB_FETCH_ENABLED", default_value_t = false)]
     pub blob_fetch_enabled: bool,
 
+    #[arg(long, env = "DAEMON_DELIVERY_BUCKET_ENDPOINT", default_value = "")]
+    pub delivery_bucket_endpoint: String,
+
+    #[arg(long, env = "DAEMON_DELIVERY_BUCKET_REGION", default_value = "")]
+    pub delivery_bucket_region: String,
+
+    #[arg(long, env = "DAEMON_DELIVERY_BUCKET_NAME", default_value = "")]
+    pub delivery_bucket_name: String,
+
+    #[arg(long, env = "DAEMON_DELIVERY_BUCKET_ACCESS_KEY_ID", default_value = "")]
+    pub delivery_bucket_access_key_id: String,
+
+    #[arg(
+        long,
+        env = "DAEMON_DELIVERY_BUCKET_SECRET_ACCESS_KEY",
+        default_value = ""
+    )]
+    pub delivery_bucket_secret_access_key: String,
+
+    #[arg(long, env = "DAEMON_BLOB_MAX_BYTES", default_value_t = 20 * 1024 * 1024)]
+    pub blob_max_bytes: usize,
+
+    #[arg(long, env = "DAEMON_BLOB_SPACE_QUOTA_BYTES", default_value_t = 1024 * 1024 * 1024)]
+    pub blob_space_quota_bytes: u64,
+
     /// Accept a plain-http `localhost`/`127.0.0.1` PDS from a DID document.
     /// Only for local development networks.
     #[arg(long, env = "DAEMON_ALLOW_HTTP_LOOPBACK_PDS", default_value_t = false)]
@@ -161,7 +186,45 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn delivery_bucket_config(&self) -> Option<crate::blobs::DeliveryBucketConfig> {
+        let values = [
+            &self.delivery_bucket_endpoint,
+            &self.delivery_bucket_region,
+            &self.delivery_bucket_name,
+            &self.delivery_bucket_access_key_id,
+            &self.delivery_bucket_secret_access_key,
+        ];
+        if values.iter().all(|value| value.is_empty()) {
+            return None;
+        }
+        if values.iter().any(|value| value.is_empty()) {
+            return None;
+        }
+        Some(crate::blobs::DeliveryBucketConfig {
+            endpoint: self.delivery_bucket_endpoint.clone(),
+            region: self.delivery_bucket_region.clone(),
+            bucket: self.delivery_bucket_name.clone(),
+            access_key_id: self.delivery_bucket_access_key_id.clone(),
+            secret_access_key: self.delivery_bucket_secret_access_key.clone(),
+        })
+    }
+
     pub fn validate(&self) -> std::result::Result<(), String> {
+        let delivery_values = [
+            &self.delivery_bucket_endpoint,
+            &self.delivery_bucket_region,
+            &self.delivery_bucket_name,
+            &self.delivery_bucket_access_key_id,
+            &self.delivery_bucket_secret_access_key,
+        ];
+        if delivery_values.iter().any(|value| !value.is_empty())
+            && delivery_values.iter().any(|value| value.is_empty())
+        {
+            return Err("all DAEMON_DELIVERY_BUCKET_* values are required together".into());
+        }
+        if self.blob_fetch_enabled && self.delivery_bucket_config().is_none() {
+            return Err("DAEMON_BLOB_FETCH_ENABLED requires DAEMON_DELIVERY_BUCKET_*".into());
+        }
         if self.space_uri.is_empty() && self.spaces_url.is_empty() {
             return Err("DAEMON_SPACE_URI or DAEMON_SPACES_URL is required".into());
         }

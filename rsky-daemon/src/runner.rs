@@ -9,12 +9,13 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
+use crate::blobs::{DeliveryStore, allowed_image_mime, object_key, verify_cid};
 use crate::credentials::CredentialSource;
-use crate::engine::{sync_repo, CommitKeyResolver, SyncOutcome};
+use crate::engine::{CommitKeyResolver, SyncOutcome, sync_repo};
 use crate::error::{DaemonError, Result};
 use crate::feeds::SpaceLifecycleAcker;
 use crate::index::SpaceIndex;
-use crate::journal::{drain_all, drain_all_sweep, SharedJournalConsumer};
+use crate::journal::{SharedJournalConsumer, drain_all, drain_all_sweep};
 use crate::notify::WriteNotice;
 use crate::recovery::recover_repo;
 use crate::repohost::RepoHostClient;
@@ -57,6 +58,9 @@ pub struct MultiRunnerOptions {
     pub service_identity: String,
     pub now_fn: fn() -> u64,
     pub blob_fetch_enabled: bool,
+    pub delivery_store: Option<Arc<dyn DeliveryStore>>,
+    pub blob_max_bytes: usize,
+    pub blob_space_quota_bytes: u64,
 }
 
 /// Supervises one existing `run` worker per discovered space. Source errors
@@ -92,7 +96,7 @@ pub async fn run_multi(
                 for (space, target) in &desired { if workers.contains_key(space) { continue; }
                     let (creds, repo, index, projectors, acker) = match factory(space, target.generation) { Ok(parts) => parts, Err(error) => { tracing::warn!(%space, error = %error, "cannot prepare space worker"); continue; } };
                     let (tx, rx) = mpsc::channel(256); let (stop, stop_rx) = watch::channel(false);
-                    let worker_opts = RunnerOptions { space_uri: space.clone(), sweep_interval_secs: opts.sweep_interval_secs, notify_endpoint: opts.notify_endpoint.clone(), service_identity: opts.service_identity.clone(), generation: target.generation, now_fn: opts.now_fn, blob_fetch_enabled: opts.blob_fetch_enabled };
+                    let worker_opts = RunnerOptions { space_uri: space.clone(), sweep_interval_secs: opts.sweep_interval_secs, notify_endpoint: opts.notify_endpoint.clone(), service_identity: opts.service_identity.clone(), generation: target.generation, now_fn: opts.now_fn, blob_fetch_enabled: opts.blob_fetch_enabled, delivery_store: opts.delivery_store.clone(), blob_max_bytes: opts.blob_max_bytes, blob_space_quota_bytes: opts.blob_space_quota_bytes };
                     let handle = tokio::spawn(run(worker_opts, host.clone(), creds, repo, index, keys.clone(), projectors, acker, rx, stop_rx));
                     workers.insert(space.clone(), Worker { generation: target.generation, stop, notices: tx, handle });
                 }
@@ -201,6 +205,7 @@ pub async fn sync_space_once(
     Ok(report)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn reconcile_blobs_once(
     host: &dyn SpaceHostClient,
     client: &dyn RepoHostClient,
@@ -208,6 +213,9 @@ pub async fn reconcile_blobs_once(
     space_uri: &str,
     credential: &str,
     blob_fetch_enabled: bool,
+    delivery_store: Option<&dyn DeliveryStore>,
+    blob_max_bytes: usize,
+    blob_space_quota_bytes: u64,
 ) -> Result<usize> {
     let mut repos_cursor = None;
     let mut repos_seen = 0;
@@ -239,13 +247,45 @@ pub async fn reconcile_blobs_once(
             }
             index.reconcile_blob_ledger(&repo.did, &remote_cids).await?;
             if blob_fetch_enabled {
-                tracing::debug!(did = %repo.did, "blob fetch is not implemented");
+                if let Some(store) = delivery_store {
+                    let mut used = index.fetched_blob_bytes().await?;
+                    for blob in index.pending_blobs(&repo.did).await? {
+                        let response = client
+                            .get_blob(space_uri, &repo.did, &blob.cid, blob_max_bytes)
+                            .await?;
+                        if !allowed_image_mime(&response.content_type) {
+                            tracing::warn!(did = %repo.did, cid = %blob.cid, content_type = %response.content_type, "skipping disallowed blob MIME type");
+                            continue;
+                        }
+                        let size = response.bytes.len() as u64;
+                        if used.saturating_add(size) > blob_space_quota_bytes {
+                            tracing::warn!(did = %repo.did, cid = %blob.cid, "space blob quota exceeded");
+                            continue;
+                        }
+                        verify_cid(&blob.cid, &response.bytes)?;
+                        let key = object_key(space_uri, &repo.did, &blob.cid)?;
+                        store
+                            .put(&key, &response.content_type, response.bytes)
+                            .await?;
+                        index.mark_blob_fetched(&repo.did, &blob.cid, size).await?;
+                        used += size;
+                    }
+                }
             }
             repos_seen += 1;
         }
         match page.cursor {
             Some(next) => repos_cursor = Some(next),
             None => break,
+        }
+    }
+    if blob_fetch_enabled {
+        if let Some(store) = delivery_store {
+            for blob in index.orphaned_blobs().await? {
+                let key = object_key(space_uri, &blob.repo, &blob.cid)?;
+                store.delete(&key).await?;
+                index.remove_blob(&blob.repo, &blob.cid).await?;
+            }
         }
     }
     Ok(repos_seen)
@@ -263,6 +303,9 @@ pub struct RunnerOptions {
     pub generation: i64,
     pub now_fn: fn() -> u64,
     pub blob_fetch_enabled: bool,
+    pub delivery_store: Option<Arc<dyn DeliveryStore>>,
+    pub blob_max_bytes: usize,
+    pub blob_space_quota_bytes: u64,
 }
 
 async fn register(
@@ -326,6 +369,9 @@ async fn sweep(
                 &opts.space_uri,
                 &credential,
                 opts.blob_fetch_enabled,
+                opts.delivery_store.as_deref(),
+                opts.blob_max_bytes,
+                opts.blob_space_quota_bytes,
             )
             .await?;
         }
@@ -447,14 +493,14 @@ mod tests {
     use super::*;
     use crate::credentials::StaticCredential;
     use crate::index::InMemoryIndex;
-    use crate::recovery::tests::{author, fixture, Author, FixedKey, Fixture, AUTHOR, SPACE};
+    use crate::recovery::tests::{AUTHOR, Author, FixedKey, Fixture, SPACE, author, fixture};
     use crate::repohost::OplogPage;
     use async_trait::async_trait;
     use chrono::{DateTime, TimeZone, Utc};
     use rsky_lexicon::com::atproto::space::ListReposOutput;
     use rsky_space::car::repo_car_bytes;
     use rsky_space::commit::{build_ctx, compute_mac};
-    use rsky_space::lthash::{element, LtHash};
+    use rsky_space::lthash::{LtHash, element};
 
     #[tokio::test]
     async fn a_full_notice_channel_does_not_backpressure_routing() {
@@ -909,10 +955,12 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, DaemonError::Index(_)));
         assert!(BrokenIndexHost.get_repo_car(SPACE, AUTHOR).await.is_err());
-        assert!(BrokenIndexHost
-            .get_latest_commit(SPACE, AUTHOR)
-            .await
-            .is_err());
+        assert!(
+            BrokenIndexHost
+                .get_latest_commit(SPACE, AUTHOR)
+                .await
+                .is_err()
+        );
         assert!(BrokenHost.get_repo_car(SPACE, AUTHOR).await.is_err());
         assert!(BrokenHost.get_latest_commit(SPACE, AUTHOR).await.is_err());
     }
@@ -977,6 +1025,9 @@ mod tests {
             generation: 1,
             now_fn: fixed_now,
             blob_fetch_enabled: false,
+            delivery_store: None,
+            blob_max_bytes: 20 * 1024 * 1024,
+            blob_space_quota_bytes: 1024 * 1024 * 1024,
         }
     }
 
@@ -1046,12 +1097,12 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_worker_drains_each_projector_independently() {
-        use crate::feeds::tests::{post_created, CapturingIngress};
         use crate::feeds::FeedsProjector;
+        use crate::feeds::tests::{CapturingIngress, post_created};
         use crate::index::IndexMutation;
         use crate::journal::JournalConsumer;
         use crate::projection::Projector;
-        use crate::router::{Router, SyncEvent, POST_COLLECTION};
+        use crate::router::{POST_COLLECTION, Router, SyncEvent};
         use rsky_space::record::encode_record;
         use rsky_space::space_id::SpaceId;
 
@@ -1245,16 +1296,35 @@ mod tests {
             .await
             .unwrap();
         for enabled in [false, true] {
-            let seen =
-                reconcile_blobs_once(&host, &PagedBlobHost, &index, SPACE, "sc.jwt", enabled)
-                    .await
-                    .unwrap();
+            let seen = reconcile_blobs_once(
+                &host,
+                &PagedBlobHost,
+                &index,
+                SPACE,
+                "sc.jwt",
+                enabled,
+                None,
+                20 * 1024 * 1024,
+                1024 * 1024 * 1024,
+            )
+            .await
+            .unwrap();
             assert_eq!(seen, 2);
         }
         let memory = InMemoryIndex::new();
-        reconcile_blobs_once(&host, &PagedBlobHost, &memory, SPACE, "sc.jwt", false)
-            .await
-            .unwrap();
+        reconcile_blobs_once(
+            &host,
+            &PagedBlobHost,
+            &memory,
+            SPACE,
+            "sc.jwt",
+            false,
+            None,
+            20 * 1024 * 1024,
+            1024 * 1024 * 1024,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             index.blob_ledger("did:plc:one").await.unwrap()[0].state,
             "pending"

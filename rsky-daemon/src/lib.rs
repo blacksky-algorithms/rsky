@@ -20,6 +20,7 @@
 //! - [`index`] / [`sqlite_index`] — the synced record index.
 
 pub mod appview;
+pub mod blobs;
 pub mod config;
 pub mod credentials;
 pub mod dpop;
@@ -59,7 +60,7 @@ pub use journal::{drain_all, drain_all_sweep, JournalConsumer, SharedJournalCons
 pub use notify::{router as notify_router, NotifyState, WriteNotice};
 pub use projection::Projector;
 pub use recovery::recover_repo;
-pub use repohost::{HttpRepoHost, OplogPage, RepoHostClient, ResolvingRepoHost};
+pub use repohost::{BlobResponse, HttpRepoHost, OplogPage, RepoHostClient, ResolvingRepoHost};
 pub use router::{Router, SyncEvent};
 pub use runner::{
     reconcile_blobs_once, run, run_multi, sync_repo_healing, sync_space_once, MultiRunnerOptions,

@@ -64,6 +64,7 @@ pub struct BlobLedgerEntry {
     pub repo: String,
     pub cid: String,
     pub state: String,
+    pub size: u64,
 }
 
 /// Per-author sync state + records the daemon holds for a space.
@@ -166,6 +167,26 @@ pub trait SpaceIndex: Send + Sync {
     }
 
     async fn gc_orphaned_blobs(&self) -> Result<usize> {
+        Ok(0)
+    }
+
+    async fn pending_blobs(&self, _did: &str) -> Result<Vec<BlobLedgerEntry>> {
+        Ok(Vec::new())
+    }
+
+    async fn orphaned_blobs(&self) -> Result<Vec<BlobLedgerEntry>> {
+        Ok(Vec::new())
+    }
+
+    async fn mark_blob_fetched(&self, _did: &str, _cid: &str, _size: u64) -> Result<()> {
+        Ok(())
+    }
+
+    async fn remove_blob(&self, _did: &str, _cid: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn fetched_blob_bytes(&self) -> Result<u64> {
         Ok(0)
     }
 }
