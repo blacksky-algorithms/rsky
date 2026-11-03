@@ -178,6 +178,10 @@ pub trait SpaceIndex: Send + Sync {
         Ok(Vec::new())
     }
 
+    async fn fetched_blobs(&self) -> Result<Vec<BlobLedgerEntry>> {
+        Ok(Vec::new())
+    }
+
     async fn mark_blob_fetched(&self, _did: &str, _cid: &str, _size: u64) -> Result<()> {
         Ok(())
     }

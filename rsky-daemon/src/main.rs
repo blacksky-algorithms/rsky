@@ -171,6 +171,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let (refresh_tx, refresh_rx) = mpsc::channel(64);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let notify_endpoint = cfg.notify_endpoint();
+    let delivery_store = match cfg.delivery_bucket_config() {
+        Some(config) => {
+            Some(Arc::new(S3DeliveryStore::new(config).await) as Arc<dyn DeliveryStore>)
+        }
+        None => None,
+    };
     let notify_state = NotifyState {
         space_uri: cfg.space_uri.clone(),
         registry: registry.clone(),
@@ -179,6 +185,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         notify_endpoint: notify_endpoint.clone(),
         resolver: keys.clone(),
         index: Arc::new(InMemoryIndex::new()),
+        delivery_store: delivery_store.clone(),
         tx: notify_tx,
         refresh_tx,
         refresh_issuer: (!cfg.refresh_issuer_did.is_empty())
@@ -274,12 +281,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         service_identity: cfg.service_identity.clone(),
         now_fn: rsky_daemon::unix_now,
         blob_fetch_enabled: cfg.blob_fetch_enabled,
-        delivery_store: match cfg.delivery_bucket_config() {
-            Some(config) => {
-                Some(Arc::new(S3DeliveryStore::new(config).await) as Arc<dyn DeliveryStore>)
-            }
-            None => None,
-        },
+        delivery_store,
         blob_max_bytes: cfg.blob_max_bytes,
         blob_space_quota_bytes: cfg.blob_space_quota_bytes,
     };

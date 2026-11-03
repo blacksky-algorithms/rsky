@@ -16,6 +16,7 @@ use sha2::Digest;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+use crate::blobs::{object_key, DeliveryStore};
 use crate::engine::CommitKeyResolver;
 use crate::error::{DaemonError, Result};
 use crate::index::SpaceIndex;
@@ -122,6 +123,7 @@ pub struct NotifyState {
     pub notify_endpoint: String,
     pub resolver: Arc<dyn CommitKeyResolver>,
     pub index: Arc<dyn SpaceIndex>,
+    pub delivery_store: Option<Arc<dyn DeliveryStore>>,
     pub tx: mpsc::Sender<WriteNotice>,
     pub refresh_tx: mpsc::Sender<()>,
     pub refresh_issuer: Option<String>,
@@ -282,6 +284,33 @@ async fn notify_space_deleted(
             error_body("AuthenticationRequired", e),
         );
     }
+    if let Some(store) = state.delivery_store.as_deref() {
+        for blob in match state.index.fetched_blobs().await {
+            Ok(blobs) => blobs,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error_body("InternalServerError", e),
+                )
+            }
+        } {
+            let key = match object_key(&input.space, &blob.repo, &blob.cid) {
+                Ok(key) => key,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        error_body("InternalServerError", e),
+                    )
+                }
+            };
+            if let Err(e) = store.delete(&key).await {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error_body("InternalServerError", e),
+                );
+            }
+        }
+    }
     tracing::warn!(space = %input.space, "space deleted; purging all synced data");
     if let Err(e) = state.index.purge_space().await {
         return (
@@ -430,6 +459,7 @@ mod tests {
             notify_endpoint: SYNCER_ENDPOINT.to_string(),
             resolver: Arc::new(FixedKey(did_key.to_string())),
             index,
+            delivery_store: None,
             tx,
             refresh_tx: mpsc::channel(1).0,
             refresh_issuer: None,
@@ -866,6 +896,7 @@ mod tests {
                 ("did:plc:authority2".to_string(), key_b),
             ]))),
             index: Arc::new(InMemoryIndex::new()),
+            delivery_store: None,
             tx,
             refresh_tx: mpsc::channel(1).0,
             refresh_issuer: None,

@@ -700,7 +700,7 @@ impl SpaceIndex for SpaceScopedIndex {
                 "INSERT INTO blob_state (space_uri, repo, cid, state)
                  VALUES (?1, ?2, ?3, 'pending')
                  ON CONFLICT (space_uri, repo, cid) DO UPDATE SET state =
-                     CASE WHEN blob_state.state = 'orphaned' THEN 'pending'
+                     CASE WHEN blob_state.state IN ('orphaned', 'rejected') THEN 'pending'
                           ELSE blob_state.state END",
                 params![self.space_uri, did, cid],
             )
@@ -748,9 +748,7 @@ impl SpaceIndex for SpaceScopedIndex {
             tx.execute(
                 "INSERT INTO blob_state (space_uri, repo, cid, state)
                  VALUES (?1, ?2, ?3, 'pending')
-                 ON CONFLICT (space_uri, repo, cid) DO UPDATE SET state =
-                     CASE WHEN blob_state.state = 'orphaned' THEN 'pending'
-                          ELSE blob_state.state END",
+                 ON CONFLICT (space_uri, repo, cid) DO NOTHING",
                 params![self.space_uri, did, cid],
             )
             .map_err(db_err)?;
@@ -811,6 +809,25 @@ impl SpaceIndex for SpaceScopedIndex {
         let conn = self.db.conn.lock().unwrap();
         let mut stmt = conn
             .prepare("SELECT space_uri, repo, cid, state, size FROM blob_state WHERE space_uri = ?1 AND state = 'orphaned' ORDER BY repo, cid")
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![self.space_uri], |row| {
+                Ok(BlobLedgerEntry {
+                    space: row.get(0)?,
+                    repo: row.get(1)?,
+                    cid: row.get(2)?,
+                    state: row.get(3)?,
+                    size: row.get::<_, i64>(4)? as u64,
+                })
+            })
+            .map_err(db_err)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_err)
+    }
+
+    async fn fetched_blobs(&self) -> Result<Vec<BlobLedgerEntry>> {
+        let conn = self.db.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT space_uri, repo, cid, state, size FROM blob_state WHERE space_uri = ?1 AND state = 'fetched' ORDER BY repo, cid")
             .map_err(db_err)?;
         let rows = stmt
             .query_map(params![self.space_uri], |row| {
@@ -1521,7 +1538,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ledger_tracks_pending_and_orphaned_refs_and_requeues_missing_remote_blobs() {
+    async fn ledger_requeues_orphaned_and_rejected_blobs_only_on_record_change() {
         let dir = tempfile::tempdir().unwrap();
         let db = open_at(&dir);
         let index = db.for_space(SPACE);
@@ -1623,8 +1640,22 @@ mod tests {
                 .find(|entry| entry.cid == "bafyA")
                 .unwrap()
                 .state,
-            "pending"
+            "orphaned"
         );
+        index
+            .update_blob_ledger(AUTHOR, "c.o.l", "3ka", &["bafyA".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(index.blob_ledger(AUTHOR).await.unwrap()[0].state, "pending");
+        index
+            .mark_blob_rejected(AUTHOR, "bafyA", "bad MIME", 1)
+            .await
+            .unwrap();
+        index
+            .update_blob_ledger(AUTHOR, "c.o.l", "3ka", &["bafyA".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(index.blob_ledger(AUTHOR).await.unwrap()[0].state, "pending");
     }
 
     #[tokio::test]

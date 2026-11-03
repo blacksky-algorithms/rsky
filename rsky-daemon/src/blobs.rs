@@ -98,7 +98,7 @@ pub fn object_key(space: &str, did: &str, cid: &str) -> Result<String> {
     if parts.next() != Some("space") {
         return Err(DaemonError::Xrpc("invalid space URI".to_string()));
     }
-    let _space_type = parts
+    let space_type = parts
         .next()
         .filter(|value| !value.is_empty())
         .ok_or_else(|| DaemonError::Xrpc("invalid space URI".to_string()))?;
@@ -106,7 +106,9 @@ pub fn object_key(space: &str, did: &str, cid: &str) -> Result<String> {
         .next()
         .filter(|value| !value.is_empty() && parts.next().is_none())
         .ok_or_else(|| DaemonError::Xrpc("invalid space URI".to_string()))?;
-    Ok(format!("spaces/{authority}/{skey}/{did}/{cid}"))
+    Ok(format!(
+        "spaces/{authority}/{space_type}/{skey}/{did}/{cid}"
+    ))
 }
 
 pub fn verify_cid(cid: &str, bytes: &[u8]) -> Result<()> {
@@ -165,7 +167,7 @@ mod tests {
                 "bafyblob",
             )
             .unwrap(),
-            "spaces/did:plc:authority/main/did:plc:author/bafyblob",
+            "spaces/did:plc:authority/community.blacksky.feed/main/did:plc:author/bafyblob",
         );
         assert!(object_key(
             "at://did:plc:authority/not-space/type/key",

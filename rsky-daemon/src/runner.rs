@@ -1357,6 +1357,12 @@ mod tests {
         response: BlobResponse,
     }
 
+    struct FailingFirstBlobHost {
+        first: String,
+        second: String,
+        bytes: Vec<u8>,
+    }
+
     #[async_trait]
     impl RepoHostClient for BlobHost {
         async fn list_repo_ops(
@@ -1399,6 +1405,55 @@ mod tests {
             Ok(BlobResponse {
                 content_type: self.response.content_type.clone(),
                 bytes: self.response.bytes.clone(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl RepoHostClient for FailingFirstBlobHost {
+        async fn list_repo_ops(
+            &self,
+            _space: &str,
+            _did: &str,
+            _since: Option<&str>,
+            _cursor: Option<&str>,
+        ) -> Result<OplogPage> {
+            Err(DaemonError::Xrpc("unused".to_string()))
+        }
+
+        async fn get_repo_car(&self, _space: &str, _did: &str) -> Result<Vec<u8>> {
+            Err(DaemonError::Xrpc("unused".to_string()))
+        }
+
+        async fn get_latest_commit(&self, _space: &str, _did: &str) -> Result<SignedCommit> {
+            Err(DaemonError::Xrpc("unused".to_string()))
+        }
+
+        async fn list_blobs(
+            &self,
+            _space: &str,
+            _did: &str,
+            _cursor: Option<&str>,
+        ) -> Result<rsky_lexicon::com::atproto::space::ListBlobsOutput> {
+            Ok(rsky_lexicon::com::atproto::space::ListBlobsOutput {
+                cids: vec![self.first.clone(), self.second.clone()],
+                cursor: None,
+            })
+        }
+
+        async fn get_blob(
+            &self,
+            _space: &str,
+            _did: &str,
+            cid: &str,
+            _max_bytes: usize,
+        ) -> Result<BlobResponse> {
+            if cid == self.first {
+                return Err(DaemonError::Xrpc("404".to_string()));
+            }
+            Ok(BlobResponse {
+                content_type: "image/png".to_string(),
+                bytes: self.bytes.clone(),
             })
         }
     }
@@ -1463,7 +1518,7 @@ mod tests {
 
     async fn reconcile_blob_test(
         index: &SpaceScopedIndex,
-        client: &BlobHost,
+        client: &dyn RepoHostClient,
         store: &RecordingStore,
         max_bytes: usize,
         quota_bytes: u64,
@@ -1480,6 +1535,44 @@ mod tests {
             quota_bytes,
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn reconcile_blobs_continues_after_a_blob_fetch_failure() {
+        let (_dir, _db, index) = blob_index();
+        let bytes = b"second image".to_vec();
+        let first = cid_for(b"missing image");
+        let second = cid_for(&bytes);
+        let orphan = cid_for(b"orphaned image");
+        index
+            .reconcile_blob_ledger(AUTHOR, &[orphan.clone()])
+            .await
+            .unwrap();
+        index.mark_blob_fetched(AUTHOR, &orphan, 1).await.unwrap();
+        let client = FailingFirstBlobHost {
+            first: first.clone(),
+            second: second.clone(),
+            bytes,
+        };
+        let store = RecordingStore::default();
+
+        assert_eq!(
+            reconcile_blob_test(&index, &client, &store, 1024, 1024)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            index.blob_ledger(AUTHOR).await.unwrap()[0].state,
+            "rejected"
+        );
+        assert_eq!(
+            *store.0.lock().unwrap(),
+            vec![
+                DeliveryCall::Put(crate::blobs::object_key(SPACE, AUTHOR, &second).unwrap()),
+                DeliveryCall::Delete(crate::blobs::object_key(SPACE, AUTHOR, &orphan).unwrap()),
+            ]
+        );
     }
 
     #[tokio::test]

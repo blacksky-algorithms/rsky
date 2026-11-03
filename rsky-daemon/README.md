@@ -16,3 +16,5 @@ Do not enable `DAEMON_BLOB_FETCH_ENABLED` until the daemon's recovery procedure 
 | `DAEMON_BLOB_SPACE_QUOTA_BYTES` | `1073741824` |
 
 All delivery bucket variables are required together. When the bucket is unset, fetch cannot be enabled.
+
+Mirrored objects use `spaces/{authority}/{type}/{skey}/{did}/{cid}`.
