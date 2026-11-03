@@ -1,8 +1,10 @@
 use async_trait::async_trait;
+use aws_config::timeout::TimeoutConfig;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 use sha2::{Digest, Sha256};
+use std::time::Duration;
 
 use crate::error::{DaemonError, Result};
 
@@ -38,6 +40,12 @@ impl S3DeliveryStore {
                 None,
                 "rsky-daemon-delivery",
             ))
+            .timeout_config(
+                TimeoutConfig::builder()
+                    .operation_timeout(Duration::from_secs(30))
+                    .operation_attempt_timeout(Duration::from_secs(10))
+                    .build(),
+            )
             .load()
             .await;
         Self {
@@ -62,7 +70,7 @@ impl DeliveryStore for S3DeliveryStore {
             .body(ByteStream::from(bytes))
             .send()
             .await
-            .map_err(|error| DaemonError::Xrpc(format!("delivery PUT: {error}")))?;
+            .map_err(|error| DaemonError::DeliveryBucket(format!("PUT: {error}")))?;
         Ok(())
     }
 
@@ -73,7 +81,7 @@ impl DeliveryStore for S3DeliveryStore {
             .key(key)
             .send()
             .await
-            .map_err(|error| DaemonError::Xrpc(format!("delivery DELETE: {error}")))?;
+            .map_err(|error| DaemonError::DeliveryBucket(format!("DELETE: {error}")))?;
         Ok(())
     }
 }
@@ -105,7 +113,11 @@ pub fn verify_cid(cid: &str, bytes: &[u8]) -> Result<()> {
     let cid = cid
         .parse::<lexicon_cid::Cid>()
         .map_err(|_| DaemonError::Xrpc("invalid blob CID".to_string()))?;
-    if cid.hash().code() != 0x12 {
+    if cid.version() != lexicon_cid::Version::V1
+        || cid.codec() != 0x55
+        || cid.hash().code() != 0x12
+        || cid.hash().size() != 32
+    {
         return Err(DaemonError::Xrpc("unsupported blob CID hash".to_string()));
     }
     let digest = Sha256::digest(bytes);

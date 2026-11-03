@@ -169,7 +169,8 @@ pub struct Config {
     #[arg(
         long,
         env = "DAEMON_DELIVERY_BUCKET_SECRET_ACCESS_KEY",
-        default_value = ""
+        default_value = "",
+        hide_env_values = true
     )]
     pub delivery_bucket_secret_access_key: String,
 
@@ -187,13 +188,7 @@ pub struct Config {
 
 impl Config {
     pub fn delivery_bucket_config(&self) -> Option<crate::blobs::DeliveryBucketConfig> {
-        let values = [
-            &self.delivery_bucket_endpoint,
-            &self.delivery_bucket_region,
-            &self.delivery_bucket_name,
-            &self.delivery_bucket_access_key_id,
-            &self.delivery_bucket_secret_access_key,
-        ];
+        let values = self.delivery_bucket_values();
         if values.iter().all(|value| value.is_empty()) {
             return None;
         }
@@ -210,13 +205,7 @@ impl Config {
     }
 
     pub fn validate(&self) -> std::result::Result<(), String> {
-        let delivery_values = [
-            &self.delivery_bucket_endpoint,
-            &self.delivery_bucket_region,
-            &self.delivery_bucket_name,
-            &self.delivery_bucket_access_key_id,
-            &self.delivery_bucket_secret_access_key,
-        ];
+        let delivery_values = self.delivery_bucket_values();
         if delivery_values.iter().any(|value| !value.is_empty())
             && delivery_values.iter().any(|value| value.is_empty())
         {
@@ -261,6 +250,16 @@ impl Config {
             return Err("Auth delegation and legacy minting are mutually exclusive".into());
         }
         Ok(())
+    }
+
+    fn delivery_bucket_values(&self) -> [&String; 5] {
+        [
+            &self.delivery_bucket_endpoint,
+            &self.delivery_bucket_region,
+            &self.delivery_bucket_name,
+            &self.delivery_bucket_access_key_id,
+            &self.delivery_bucket_secret_access_key,
+        ]
     }
 
     /// `(base url, audience)` for the feed service, or `None` when the daemon
@@ -397,6 +396,14 @@ mod tests {
             Some(("http://localhost:2584", "did:web:appview.example"))
         );
         assert!(cfg.validate().is_ok());
+
+        let partial_delivery = Config::try_parse_from(
+            REQUIRED
+                .into_iter()
+                .chain(["--delivery-bucket-region", "nyc3"]),
+        )
+        .unwrap();
+        assert!(partial_delivery.validate().is_err());
 
         let mut audienceless = Config::try_parse_from(
             REQUIRED

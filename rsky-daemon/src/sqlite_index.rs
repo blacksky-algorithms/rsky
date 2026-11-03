@@ -82,8 +82,9 @@ CREATE TABLE IF NOT EXISTS blob_state (
     space_uri  TEXT NOT NULL,
     repo       TEXT NOT NULL,
     cid        TEXT NOT NULL,
-    state      TEXT NOT NULL CHECK (state IN ('pending', 'fetched', 'orphaned')),
+    state      TEXT NOT NULL CHECK (state IN ('pending', 'fetched', 'rejected', 'orphaned')),
     size       INTEGER NOT NULL DEFAULT 0,
+    rejection_reason TEXT,
     PRIMARY KEY (space_uri, repo, cid)
 );
 CREATE TABLE IF NOT EXISTS blob_ref (
@@ -233,6 +234,21 @@ impl SqliteIndex {
         if present.is_none() {
             conn.execute(
                 "ALTER TABLE blob_state ADD COLUMN size INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(db_err)?;
+        }
+        let rejection_reason = conn
+            .query_row(
+                "SELECT 1 FROM pragma_table_info('blob_state') WHERE name = 'rejection_reason'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(db_err)?;
+        if rejection_reason.is_none() {
+            conn.execute(
+                "ALTER TABLE blob_state ADD COLUMN rejection_reason TEXT",
                 [],
             )
             .map_err(db_err)?;
@@ -813,6 +829,19 @@ impl SpaceIndex for SpaceScopedIndex {
     async fn mark_blob_fetched(&self, did: &str, cid: &str, size: u64) -> Result<()> {
         let conn = self.db.conn.lock().unwrap();
         conn.execute("UPDATE blob_state SET state = 'fetched', size = ?4 WHERE space_uri = ?1 AND repo = ?2 AND cid = ?3", params![self.space_uri, did, cid, size as i64])
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn mark_blob_rejected(
+        &self,
+        did: &str,
+        cid: &str,
+        reason: &str,
+        size: u64,
+    ) -> Result<()> {
+        let conn = self.db.conn.lock().unwrap();
+        conn.execute("UPDATE blob_state SET state = 'rejected', size = ?4, rejection_reason = ?5 WHERE space_uri = ?1 AND repo = ?2 AND cid = ?3", params![self.space_uri, did, cid, size as i64, reason])
             .map_err(db_err)?;
         Ok(())
     }

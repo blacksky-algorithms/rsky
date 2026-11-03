@@ -6,16 +6,16 @@ use rsky_lexicon::com::atproto::space::RepoRef;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::time::Instant;
 
-use crate::blobs::{DeliveryStore, allowed_image_mime, object_key, verify_cid};
+use crate::blobs::{allowed_image_mime, object_key, verify_cid, DeliveryStore};
 use crate::credentials::CredentialSource;
-use crate::engine::{CommitKeyResolver, SyncOutcome, sync_repo};
+use crate::engine::{sync_repo, CommitKeyResolver, SyncOutcome};
 use crate::error::{DaemonError, Result};
 use crate::feeds::SpaceLifecycleAcker;
 use crate::index::SpaceIndex;
-use crate::journal::{SharedJournalConsumer, drain_all, drain_all_sweep};
+use crate::journal::{drain_all, drain_all_sweep, SharedJournalConsumer};
 use crate::notify::WriteNotice;
 use crate::recovery::recover_repo;
 use crate::repohost::RepoHostClient;
@@ -28,6 +28,9 @@ const MIN_REREGISTER_SECS: u64 = 30;
 /// destination that was down recovers without waiting for the next write.
 const PROJECTION_DRAIN_SECS: u64 = 30;
 const MAX_BLOB_LIST_PAGES: usize = 1_000;
+const MAX_BLOBS_PER_SWEEP: usize = 50;
+const BLOB_SWEEP_BUDGET: Duration = Duration::from_secs(120);
+static BLOB_TRANSFER_LIMIT: std::sync::OnceLock<Semaphore> = std::sync::OnceLock::new();
 
 /// Builds a repo-host client bound to the current space credential.
 pub type RepoHostFactory = Box<dyn Fn(String) -> Arc<dyn RepoHostClient> + Send + Sync>;
@@ -231,7 +234,9 @@ pub async fn reconcile_blobs_once(
             let mut pages = 0;
             let listed = loop {
                 if pages == MAX_BLOB_LIST_PAGES {
-                    break Err(DaemonError::Xrpc("listBlobs page limit reached".to_string()));
+                    break Err(DaemonError::Xrpc(
+                        "listBlobs page limit reached".to_string(),
+                    ));
                 }
                 pages += 1;
                 match client
@@ -241,7 +246,9 @@ pub async fn reconcile_blobs_once(
                     Ok(page) => {
                         remote_cids.extend(page.cids);
                         match page.cursor {
-                            Some(next) if seen_cursors.insert(next.clone()) => blobs_cursor = Some(next),
+                            Some(next) if seen_cursors.insert(next.clone()) => {
+                                blobs_cursor = Some(next)
+                            }
                             Some(_) => {
                                 break Err(DaemonError::Xrpc(
                                     "listBlobs cursor did not advance".to_string(),
@@ -257,35 +264,85 @@ pub async fn reconcile_blobs_once(
                 tracing::warn!(did = %repo.did, error = %error, "listBlobs failed; skipping member");
                 continue;
             }
+            let remote_cids = remote_cids
+                .into_iter()
+                .filter_map(|cid| {
+                    cid.parse::<lexicon_cid::Cid>()
+                        .ok()
+                        .map(|cid| cid.to_string())
+                })
+                .collect::<Vec<_>>();
             index.reconcile_blob_ledger(&repo.did, &remote_cids).await?;
             if blob_fetch_enabled {
                 if let Some(store) = delivery_store {
                     let mut used = index.fetched_blob_bytes().await?;
-                    for blob in index.pending_blobs(&repo.did).await? {
-                        let response = client
-                            .get_blob(space_uri, &repo.did, &blob.cid, blob_max_bytes)
-                            .await?;
-                        if response.bytes.len() > blob_max_bytes {
-                            return Err(DaemonError::Xrpc(
-                                "blob body exceeds size limit".to_string(),
-                            ));
+                    let started = Instant::now();
+                    for blob in index
+                        .pending_blobs(&repo.did)
+                        .await?
+                        .into_iter()
+                        .take(MAX_BLOBS_PER_SWEEP)
+                    {
+                        if started.elapsed() >= BLOB_SWEEP_BUDGET {
+                            break;
                         }
-                        if !allowed_image_mime(&response.content_type) {
-                            tracing::warn!(did = %repo.did, cid = %blob.cid, content_type = %response.content_type, "skipping disallowed blob MIME type");
+                        if blob.size > 0 && used.saturating_add(blob.size) > blob_space_quota_bytes
+                        {
+                            index
+                                .mark_blob_rejected(
+                                    &repo.did,
+                                    &blob.cid,
+                                    "space blob quota exceeded",
+                                    blob.size,
+                                )
+                                .await?;
                             continue;
                         }
-                        let size = response.bytes.len() as u64;
-                        if used.saturating_add(size) > blob_space_quota_bytes {
-                            tracing::warn!(did = %repo.did, cid = %blob.cid, "space blob quota exceeded");
-                            continue;
+                        let result = async {
+                            let _permit = BLOB_TRANSFER_LIMIT
+                                .get_or_init(|| Semaphore::new(1))
+                                .acquire()
+                                .await
+                                .expect("semaphore is never closed");
+                            let response = client
+                                .get_blob(space_uri, &repo.did, &blob.cid, blob_max_bytes)
+                                .await?;
+                            let size = response.bytes.len() as u64;
+                            if !allowed_image_mime(&response.content_type) {
+                                return Err(DaemonError::Xrpc(
+                                    "disallowed blob MIME type".to_string(),
+                                ));
+                            }
+                            if used.saturating_add(size) > blob_space_quota_bytes {
+                                return Err(DaemonError::Xrpc(
+                                    "space blob quota exceeded".to_string(),
+                                ));
+                            }
+                            verify_cid(&blob.cid, &response.bytes)?;
+                            let key = object_key(space_uri, &repo.did, &blob.cid)?;
+                            let content_type =
+                                response.content_type.split(';').next().unwrap_or("").trim();
+                            store.put(&key, content_type, response.bytes).await?;
+                            Ok::<u64, DaemonError>(size)
                         }
-                        verify_cid(&blob.cid, &response.bytes)?;
-                        let key = object_key(space_uri, &repo.did, &blob.cid)?;
-                        store
-                            .put(&key, &response.content_type, response.bytes)
-                            .await?;
-                        index.mark_blob_fetched(&repo.did, &blob.cid, size).await?;
-                        used += size;
+                        .await;
+                        match result {
+                            Ok(size) => {
+                                index.mark_blob_fetched(&repo.did, &blob.cid, size).await?;
+                                used += size;
+                            }
+                            Err(error) => {
+                                tracing::warn!(did = %repo.did, cid = %blob.cid, error = %error, "rejecting blob");
+                                index
+                                    .mark_blob_rejected(
+                                        &repo.did,
+                                        &blob.cid,
+                                        &error.to_string(),
+                                        blob.size,
+                                    )
+                                    .await?;
+                            }
+                        }
                     }
                 }
             }
@@ -296,13 +353,11 @@ pub async fn reconcile_blobs_once(
             None => break,
         }
     }
-    if blob_fetch_enabled {
-        if let Some(store) = delivery_store {
-            for blob in index.orphaned_blobs().await? {
-                let key = object_key(space_uri, &blob.repo, &blob.cid)?;
-                store.delete(&key).await?;
-                index.remove_blob(&blob.repo, &blob.cid).await?;
-            }
+    if let Some(store) = delivery_store {
+        for blob in index.orphaned_blobs().await? {
+            let key = object_key(space_uri, &blob.repo, &blob.cid)?;
+            store.delete(&key).await?;
+            index.remove_blob(&blob.repo, &blob.cid).await?;
         }
     }
     Ok(repos_seen)
@@ -452,6 +507,7 @@ pub async fn run(
 ) {
     let mut sweep_timer =
         tokio::time::interval(Duration::from_secs(opts.sweep_interval_secs.max(1)));
+    sweep_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut drain_timer = tokio::time::interval(Duration::from_secs(PROJECTION_DRAIN_SECS));
     let mut register_at = Instant::now();
     let mut acknowledged = false;
@@ -511,7 +567,7 @@ mod tests {
     use crate::blobs::DeliveryStore;
     use crate::credentials::StaticCredential;
     use crate::index::{InMemoryIndex, SpaceIndex};
-    use crate::recovery::tests::{AUTHOR, Author, FixedKey, Fixture, SPACE, author, fixture};
+    use crate::recovery::tests::{author, fixture, Author, FixedKey, Fixture, AUTHOR, SPACE};
     use crate::repohost::{BlobResponse, OplogPage};
     use crate::sqlite_index::{SpaceScopedIndex, SqliteIndex};
     use async_trait::async_trait;
@@ -520,7 +576,7 @@ mod tests {
     use rsky_lexicon::com::atproto::space::ListReposOutput;
     use rsky_space::car::repo_car_bytes;
     use rsky_space::commit::{build_ctx, compute_mac};
-    use rsky_space::lthash::{LtHash, element};
+    use rsky_space::lthash::{element, LtHash};
 
     #[tokio::test]
     async fn a_full_notice_channel_does_not_backpressure_routing() {
@@ -540,8 +596,8 @@ mod tests {
     use serde_bytes::ByteBuf;
     use sha2::{Digest, Sha256};
     use std::collections::HashMap;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     const COLL: &str = "community.blacksky.feed.post";
 
@@ -976,12 +1032,10 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, DaemonError::Index(_)));
         assert!(BrokenIndexHost.get_repo_car(SPACE, AUTHOR).await.is_err());
-        assert!(
-            BrokenIndexHost
-                .get_latest_commit(SPACE, AUTHOR)
-                .await
-                .is_err()
-        );
+        assert!(BrokenIndexHost
+            .get_latest_commit(SPACE, AUTHOR)
+            .await
+            .is_err());
         assert!(BrokenHost.get_repo_car(SPACE, AUTHOR).await.is_err());
         assert!(BrokenHost.get_latest_commit(SPACE, AUTHOR).await.is_err());
     }
@@ -1118,12 +1172,12 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_worker_drains_each_projector_independently() {
+        use crate::feeds::tests::{post_created, CapturingIngress};
         use crate::feeds::FeedsProjector;
-        use crate::feeds::tests::{CapturingIngress, post_created};
         use crate::index::IndexMutation;
         use crate::journal::JournalConsumer;
         use crate::projection::Projector;
-        use crate::router::{POST_COLLECTION, Router, SyncEvent};
+        use crate::router::{Router, SyncEvent, POST_COLLECTION};
         use rsky_space::record::encode_record;
         use rsky_space::space_id::SpaceId;
 
@@ -1435,28 +1489,28 @@ mod tests {
         let client = blob_host(vec![cid.clone()], "image/png", b"different image".to_vec());
         let store = RecordingStore::default();
 
-        assert!(
-            reconcile_blob_test(&index, &client, &store, 1024, 1024)
-                .await
-                .is_err()
-        );
+        reconcile_blob_test(&index, &client, &store, 1024, 1024)
+            .await
+            .unwrap();
         assert!(store.0.lock().unwrap().is_empty());
-        assert_eq!(index.blob_ledger(AUTHOR).await.unwrap()[0].state, "pending");
+        assert_eq!(
+            index.blob_ledger(AUTHOR).await.unwrap()[0].state,
+            "rejected"
+        );
     }
 
     #[tokio::test]
-    async fn reconcile_blobs_rejects_a_body_over_the_size_cap() {
+    async fn reconcile_blobs_uses_the_client_bounded_body() {
         let (_dir, _db, index) = blob_index();
         let bytes = vec![7; 5];
         let client = blob_host(vec![cid_for(&bytes)], "image/png", bytes);
         let store = RecordingStore::default();
 
-        assert!(
-            reconcile_blob_test(&index, &client, &store, 4, 1024)
-                .await
-                .is_err()
-        );
-        assert!(store.0.lock().unwrap().is_empty());
+        reconcile_blob_test(&index, &client, &store, 4, 1024)
+            .await
+            .unwrap();
+        assert_eq!(store.0.lock().unwrap().len(), 1);
+        assert_eq!(index.blob_ledger(AUTHOR).await.unwrap()[0].state, "fetched");
     }
 
     #[tokio::test]
@@ -1612,7 +1666,11 @@ mod tests {
             assert_eq!(seen, 0);
             assert_eq!(
                 client.calls.load(Ordering::SeqCst),
-                if repeat_cursor { 2 } else { MAX_BLOB_LIST_PAGES },
+                if repeat_cursor {
+                    2
+                } else {
+                    MAX_BLOB_LIST_PAGES
+                },
             );
         }
     }

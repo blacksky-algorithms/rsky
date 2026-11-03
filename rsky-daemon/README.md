@@ -2,7 +2,7 @@
 
 ## Delivery-bucket mirroring
 
-Do not enable `DAEMON_BLOB_FETCH_ENABLED` until a full recovery has completed for every repo in every configured space. The unset delivery bucket is ledger-only mode. If mirroring must be disabled, unset the delivery bucket configuration and disable fetch; after correcting the problem, run a full recovery of every repo before enabling fetch again.
+Do not enable `DAEMON_BLOB_FETCH_ENABLED` until the daemon's recovery procedure has completed for every repo in every configured space. The unset delivery bucket is ledger-only mode. If mirroring must be disabled, disable fetch while retaining delivery bucket configuration so orphan cleanup continues; after a rollback past the ledger migration and subsequent roll-forward, run a full recovery before enabling fetch again.
 
 | Variable | Default |
 | --- | --- |

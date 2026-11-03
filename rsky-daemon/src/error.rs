@@ -4,6 +4,8 @@ use thiserror::Error;
 pub enum DaemonError {
     #[error("xrpc request failed: {0}")]
     Xrpc(String),
+    #[error("delivery bucket request failed: {0}")]
+    DeliveryBucket(String),
     #[error("index error: {0}")]
     Index(String),
     #[error("key resolution failed: {0}")]

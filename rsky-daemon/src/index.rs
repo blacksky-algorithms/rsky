@@ -182,6 +182,16 @@ pub trait SpaceIndex: Send + Sync {
         Ok(())
     }
 
+    async fn mark_blob_rejected(
+        &self,
+        _did: &str,
+        _cid: &str,
+        _reason: &str,
+        _size: u64,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     async fn remove_blob(&self, _did: &str, _cid: &str) -> Result<()> {
         Ok(())
     }
