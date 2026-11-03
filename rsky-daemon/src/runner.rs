@@ -1289,6 +1289,79 @@ mod tests {
         }
     }
 
+    struct GuardedBlobHost {
+        repeat_cursor: bool,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl RepoHostClient for GuardedBlobHost {
+        async fn list_repo_ops(
+            &self,
+            _space: &str,
+            _did: &str,
+            _since: Option<&str>,
+            _cursor: Option<&str>,
+        ) -> Result<OplogPage> {
+            Err(DaemonError::Xrpc("unused".to_string()))
+        }
+        async fn get_repo_car(&self, _space: &str, _did: &str) -> Result<Vec<u8>> {
+            Err(DaemonError::Xrpc("unused".to_string()))
+        }
+        async fn get_latest_commit(&self, _space: &str, _did: &str) -> Result<SignedCommit> {
+            Err(DaemonError::Xrpc("unused".to_string()))
+        }
+        async fn list_blobs(
+            &self,
+            _space: &str,
+            _did: &str,
+            cursor: Option<&str>,
+        ) -> Result<rsky_lexicon::com::atproto::space::ListBlobsOutput> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let next = if self.repeat_cursor {
+                Some(cursor.unwrap_or("repeat").to_string())
+            } else {
+                Some((cursor.unwrap_or("0").parse::<usize>().unwrap() + 1).to_string())
+            };
+            Ok(rsky_lexicon::com::atproto::space::ListBlobsOutput {
+                cids: vec![],
+                cursor: next,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn list_blobs_cursor_guards_stop_a_member_without_looping() {
+        let host = PagedSpaceHost::new(vec![ListReposOutput {
+            cursor: None,
+            repos: vec![repo_ref("did:plc:one", "3a", None)],
+        }]);
+        for repeat_cursor in [true, false] {
+            let client = GuardedBlobHost {
+                repeat_cursor,
+                calls: AtomicUsize::new(0),
+            };
+            let seen = reconcile_blobs_once(
+                &host,
+                &client,
+                &InMemoryIndex::new(),
+                SPACE,
+                "sc.jwt",
+                false,
+                None,
+                20 * 1024 * 1024,
+                1024 * 1024 * 1024,
+            )
+            .await
+            .unwrap();
+            assert_eq!(seen, 0);
+            assert_eq!(
+                client.calls.load(Ordering::SeqCst),
+                if repeat_cursor { 2 } else { MAX_BLOB_LIST_PAGES },
+            );
+        }
+    }
+
     #[tokio::test]
     async fn reconcile_blobs_walks_every_repo_and_blob_page() {
         let _guard = trace_guard();
