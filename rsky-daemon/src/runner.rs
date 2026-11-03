@@ -27,6 +27,7 @@ const MIN_REREGISTER_SECS: u64 = 30;
 /// How often pending batches are retried when no sync has happened, so a
 /// destination that was down recovers without waiting for the next write.
 const PROJECTION_DRAIN_SECS: u64 = 30;
+const MAX_BLOB_LIST_PAGES: usize = 1_000;
 
 /// Builds a repo-host client bound to the current space credential.
 pub type RepoHostFactory = Box<dyn Fn(String) -> Arc<dyn RepoHostClient> + Send + Sync>;
@@ -226,7 +227,13 @@ pub async fn reconcile_blobs_once(
         for repo in page.repos {
             let mut blobs_cursor = None;
             let mut remote_cids = Vec::new();
+            let mut seen_cursors = std::collections::HashSet::new();
+            let mut pages = 0;
             let listed = loop {
+                if pages == MAX_BLOB_LIST_PAGES {
+                    break Err(DaemonError::Xrpc("listBlobs page limit reached".to_string()));
+                }
+                pages += 1;
                 match client
                     .list_blobs(space_uri, &repo.did, blobs_cursor.as_deref())
                     .await
@@ -234,7 +241,12 @@ pub async fn reconcile_blobs_once(
                     Ok(page) => {
                         remote_cids.extend(page.cids);
                         match page.cursor {
-                            Some(next) => blobs_cursor = Some(next),
+                            Some(next) if seen_cursors.insert(next.clone()) => blobs_cursor = Some(next),
+                            Some(_) => {
+                                break Err(DaemonError::Xrpc(
+                                    "listBlobs cursor did not advance".to_string(),
+                                ));
+                            }
                             None => break Ok(()),
                         }
                     }
@@ -253,6 +265,11 @@ pub async fn reconcile_blobs_once(
                         let response = client
                             .get_blob(space_uri, &repo.did, &blob.cid, blob_max_bytes)
                             .await?;
+                        if response.bytes.len() > blob_max_bytes {
+                            return Err(DaemonError::Xrpc(
+                                "blob body exceeds size limit".to_string(),
+                            ));
+                        }
                         if !allowed_image_mime(&response.content_type) {
                             tracing::warn!(did = %repo.did, cid = %blob.cid, content_type = %response.content_type, "skipping disallowed blob MIME type");
                             continue;

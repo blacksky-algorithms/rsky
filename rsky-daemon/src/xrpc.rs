@@ -201,15 +201,14 @@ fn is_nonce_challenge(
 ) -> bool {
     body.error.as_deref() == Some("use_dpop_nonce")
         || (status == reqwest::StatusCode::UNAUTHORIZED
-            && headers
-                .get("WWW-Authenticate")
-                .and_then(|value| value.to_str().ok())
-                .is_some_and(|value| {
-                    value.to_ascii_lowercase().contains("dpop")
-                        && value
-                            .to_ascii_lowercase()
-                            .contains("error=\"use_dpop_nonce\"")
-                }))
+            && headers.get_all("WWW-Authenticate").iter().any(|value| {
+                value.to_str().ok().is_some_and(|value| {
+                    let value = value.to_ascii_lowercase();
+                    value.contains("dpop")
+                        && (value.contains("error=use_dpop_nonce")
+                            || value.contains("error=\"use_dpop_nonce\""))
+                })
+            }))
 }
 
 pub(crate) async fn send_with_dpop_retry<F>(
@@ -842,6 +841,24 @@ mod tests {
         let host = HttpSpaceHost::new(server.uri(), test_dpop());
         assert!(host.list_repos(SPACE, "sc.jwt", None, None).await.is_ok());
         assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn recognizes_an_unquoted_nonce_error_in_any_authenticate_header() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.append(
+            "WWW-Authenticate",
+            reqwest::header::HeaderValue::from_static("Bearer realm=space"),
+        );
+        headers.append(
+            "WWW-Authenticate",
+            reqwest::header::HeaderValue::from_static("DPoP error=use_dpop_nonce"),
+        );
+        assert!(is_nonce_challenge(
+            reqwest::StatusCode::UNAUTHORIZED,
+            &headers,
+            &XrpcErrorBody::default(),
+        ));
     }
 
     #[tokio::test]

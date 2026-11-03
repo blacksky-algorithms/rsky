@@ -41,7 +41,11 @@ impl S3DeliveryStore {
             .load()
             .await;
         Self {
-            client: Client::new(&sdk_config),
+            client: Client::from_conf(
+                aws_sdk_s3::config::Builder::from(&sdk_config)
+                    .force_path_style(true)
+                    .build(),
+            ),
             bucket: config.bucket,
         }
     }
@@ -124,6 +128,8 @@ pub fn allowed_image_mime(content_type: &str) -> bool {
 mod tests {
     use super::*;
     use lexicon_cid::multihash::Multihash;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn cid_for(bytes: &[u8]) -> String {
         let digest = Sha256::digest(bytes);
@@ -161,5 +167,34 @@ mod tests {
     fn allows_only_images() {
         assert!(allowed_image_mime("image/png; charset=binary"));
         assert!(!allowed_image_mime("video/mp4"));
+    }
+
+    #[tokio::test]
+    async fn puts_and_deletes_the_space_scoped_key_against_an_s3_compatible_fake() {
+        let server = MockServer::start().await;
+        let key = "spaces/did:plc:authority/main/did:plc:author/bafyblob";
+        let encoded_key = "spaces/did%3Aplc%3Aauthority/main/did%3Aplc%3Aauthor/bafyblob";
+        Mock::given(method("PUT"))
+            .and(path(format!("/delivery/{encoded_key}")))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(format!("/delivery/{encoded_key}")))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let store = S3DeliveryStore::new(DeliveryBucketConfig {
+            endpoint: server.uri(),
+            region: "nyc3".to_string(),
+            bucket: "delivery".to_string(),
+            access_key_id: "write-key".to_string(),
+            secret_access_key: "write-secret".to_string(),
+        })
+        .await;
+        store.put(key, "image/png", vec![1, 2, 3]).await.unwrap();
+        store.delete(key).await.unwrap();
     }
 }
