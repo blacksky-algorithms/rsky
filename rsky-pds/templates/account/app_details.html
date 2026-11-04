@@ -1,0 +1,26 @@
+{% extends "layouts/account_shell.html" %}
+{% import "components/macros.html" as ui %}
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <h1 class="card-title">{{ name }}</h1>
+    <p class="card-description"><code>{{ identifier }}</code></p>
+  </div>
+  <div class="card-content">
+    {% if only_atproto %}
+    <p>This app can uniquely identify you through your account.</p>
+    {% else %}
+    <p>This app has access to your account with the following permissions:</p>
+    <div class="permission-groups" role="list">
+      {% for group in groups %}{% include "components/permission_group.html" %}{% endfor %}
+    </div>
+    {% endif %}
+    <form method="post" action="{{ revoke_action }}" class="action-row">
+      {% call ui::csrf_fields(nav.csrf) %}
+      <input type="hidden" name="token_id" value="{{ token_id }}">
+      <button type="submit" class="btn btn-destructive">Revoke access</button>
+      <a class="btn btn-secondary" href="{{ back_href }}">Close</a>
+    </form>
+  </div>
+</div>
+{% endblock %}

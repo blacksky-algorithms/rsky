@@ -1,0 +1,113 @@
+{% extends "layouts/account_shell.html" %}
+{% import "components/macros.html" as ui %}
+{% block content %}
+<div class="card">
+  {% match mode %}
+  {% when HandleMode::Choose %}
+  <div class="card-header">
+    <h1 class="card-title">Update your username</h1>
+    <p class="card-description">Choose how you want to be known.</p>
+  </div>
+  <div class="card-content">
+    <div class="item-group">
+      {% if !domains.is_empty() %}
+      <a class="item item-outline" href="{{ default_href }}">
+        <span class="item-content">
+          <span class="item-title">Use a default username</span>
+          <span class="item-description">e.g. <em>alice{{ domains[0] }}</em></span>
+        </span>
+        <span class="item-actions">{% include "icons/chevron-right.svg.html" %}</span>
+      </a>
+      {% endif %}
+      <a class="item item-outline" href="{{ custom_href }}">
+        <span class="item-content">
+          <span class="item-title">Use a domain name I own</span>
+          <span class="item-description">e.g. <em>alice.com</em></span>
+        </span>
+        <span class="item-actions">{% include "icons/chevron-right.svg.html" %}</span>
+      </a>
+    </div>
+    <div class="action-row"><a class="btn btn-secondary" href="{{ cancel_href }}">Cancel</a></div>
+  </div>
+  {% when HandleMode::Default %}
+  <div class="card-header">
+    <h1 class="card-title">Update your username</h1>
+    <p class="card-description">Choose a new default username.</p>
+  </div>
+  <div class="card-content">
+    <form method="post" action="{{ submit_action }}" class="form">
+      {% call ui::csrf_fields(nav.csrf) %}
+      <input type="hidden" name="mode" value="default">
+      {% if let Some(message) = error %}{% call ui::error_notice(message) %}{% endif %}
+      <div class="field">
+        <label class="label" for="handle">Username</label>
+        <div class="input-wrap">
+          <span class="input-icon">{% include "icons/at-sign.svg.html" %}</span>
+          <input class="input" type="text" id="handle" name="handle" value="{{ segment }}" title="Type your username" placeholder="yourname" minlength="3" maxlength="18" autocapitalize="none" autocomplete="off" autocorrect="off" spellcheck="false" required>
+        </div>
+        <p class="hint">Use 3–18 letters, numbers or hyphens</p>
+      </div>
+      {% if domains.len() > 1 %}
+      <fieldset class="field">
+        <legend class="label">Select domain</legend>
+        {% for domain in domains %}
+        <label class="radio-row"><input type="radio" name="domain" value="{{ domain }}"{% if domain.as_str() == selected_domain.as_str() %} checked{% endif %}> <span>{{ domain }}</span></label>
+        {% endfor %}
+      </fieldset>
+      {% else %}
+      <input type="hidden" name="domain" value="{{ selected_domain }}">
+      <p class="text-sm muted">Your full username will be <b>@{{ segment }}{{ selected_domain }}</b></p>
+      {% endif %}
+      <div class="action-row">
+        <button type="submit" class="btn btn-default">Save</button>
+        <a class="btn btn-secondary" href="{{ cancel_href }}">Cancel</a>
+      </div>
+    </form>
+  </div>
+  {% when HandleMode::Custom %}
+  <div class="card-header">
+    <h1 class="card-title">Update your username</h1>
+    <p class="card-description">Update your username to a domain name you own to self-verify your identity.</p>
+  </div>
+  <div class="card-content">
+    <form method="post" action="{{ submit_action }}" class="form">
+      {% call ui::csrf_fields(nav.csrf) %}
+      <input type="hidden" name="mode" value="custom">
+      {% if let Some(message) = error %}{% call ui::error_notice(message) %}{% endif %}
+      <div class="field">
+        <label class="label" for="domain">Enter the domain you want to use</label>
+        <div class="input-wrap">
+          <span class="input-icon">{% include "icons/at-sign.svg.html" %}</span>
+          <input class="input" type="text" id="domain" name="domain" value="{{ custom }}" title="Type your domain" placeholder="alice.com" autocapitalize="none" autocomplete="off" autocorrect="off" spellcheck="false" required>
+        </div>
+      </div>
+      <div class="instructions text-sm">
+        <p class="font-medium">Verification method</p>
+        <div>
+          <p><b>DNS</b> <span class="muted">If you have access to your domain's DNS configuration panel (e.g. via your domain registrar)</span></p>
+          <p>Add the following record to your domain's DNS configuration.</p>
+          <dl>
+            <dt>Host</dt><dd><code>_atproto.{% if custom.is_empty() %}&lt;your-domain&gt;{% else %}{{ custom }}{% endif %}</code></dd>
+            <dt>Type</dt><dd><code>TXT</code></dd>
+            <dt>Value</dt><dd><code>did={{ did }}</code></dd>
+          </dl>
+        </div>
+        <div>
+          <p><b>HTTP</b> <span class="muted">If you have access to your domain's web hosting configuration (e.g. via FTP)</span></p>
+          <p>Make a text file with the contents below available at the following URL.</p>
+          <dl>
+            <dt>URL</dt><dd><code>https://{% if custom.is_empty() %}&lt;your-domain&gt;{% else %}{{ custom }}{% endif %}/.well-known/atproto-did</code></dd>
+            <dt>File contents</dt><dd><code>{{ did }}</code></dd>
+          </dl>
+        </div>
+        {% if !custom.is_empty() %}<p><a class="underline" href="{{ mailto_href }}">Email these instructions</a></p>{% endif %}
+      </div>
+      <div class="action-row">
+        <button type="submit" class="btn btn-default">Verify and Save</button>
+        <a class="btn btn-secondary" href="{{ cancel_href }}">Cancel</a>
+      </div>
+    </form>
+  </div>
+  {% endmatch %}
+</div>
+{% endblock %}

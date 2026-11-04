@@ -5,26 +5,30 @@ use crate::apis::com::atproto::repo::assert_repo_availability;
 use crate::apis::ApiError;
 use crate::auth_verifier;
 use crate::auth_verifier::OptionalAccessOrAdminToken;
+use crate::exports::{CarStream, ExportGuard, Exports};
 use anyhow::{bail, Result};
-use rocket::{Responder, State};
-
-#[derive(Responder)]
-#[response(status = 200, content_type = "application/vnd.ipld.car")]
-pub struct BlockResponder(Vec<u8>);
+use rocket::State;
 
 async fn get_car_stream(
     blobstore_factory: &State<BlobstoreFactory>,
     did: String,
     since: Option<String>,
     actor_store: &State<ActorStore>,
-) -> Result<Vec<u8>> {
-    let actor_store = actor_store
+    guard: ExportGuard,
+) -> Result<CarStream> {
+    let reader = actor_store
         .read(did.clone(), blobstore_factory.blobstore(did.clone()))
         .await?;
-    let storage_guard = actor_store.storage.read().await;
-    match storage_guard.get_car_stream(since).await {
+    let storage_guard = reader.storage.read().await;
+    if let Ok(root) = storage_guard.get_root_detailed().await {
+        actor_store.note_exposure(&did, &root.rev).await?;
+    }
+    match storage_guard
+        .car_stream_within(since, crate::actor_store::repo::sql_repo::EXPORT_DEADLINE)
+        .await
+    {
         Err(_) => bail!("Could not find repo for DID: {did}"),
-        Ok(carstream) => Ok(carstream),
+        Ok(stream) => Ok(CarStream::new(stream, guard)),
     }
 }
 
@@ -35,20 +39,22 @@ async fn inner_get_repo(
     auth: OptionalAccessOrAdminToken,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
-) -> Result<Vec<u8>> {
+    guard: ExportGuard,
+) -> Result<CarStream> {
     let is_user_or_admin = if let Some(access) = auth.access {
         auth_verifier::is_user_or_admin(access, &did)
     } else {
         false
     };
     let _ = assert_repo_availability(&did, is_user_or_admin, &account_manager).await?;
-    get_car_stream(blobstore_factory, did, since, actor_store).await
+    get_car_stream(blobstore_factory, did, since, actor_store, guard).await
 }
 
 /// Download a repository export as CAR file. Optionally only a 'diff' since a previous revision.
 /// Does not require auth; implemented by PDS.
 #[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.sync.getRepo?<did>&<since>")]
+#[allow(clippy::too_many_arguments)]
 pub async fn get_repo(
     did: String,
     since: Option<String>, // The revision ('rev') of the repo to create a diff from.
@@ -56,7 +62,14 @@ pub async fn get_repo(
     auth: OptionalAccessOrAdminToken,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
-) -> Result<BlockResponder, ApiError> {
+    exports: &State<Exports>,
+    limits: &State<crate::rate_limits::RateLimits>,
+    caller: crate::rate_limits::Caller,
+) -> Result<CarStream, ApiError> {
+    limits
+        .consume_all(&crate::rate_limits::GET_REPO, &caller.ip, 1, caller.bypass)
+        .await?;
+    let guard = exports.repo_slot().await?;
     match inner_get_repo(
         did,
         since,
@@ -64,13 +77,14 @@ pub async fn get_repo(
         auth,
         actor_store,
         account_manager,
+        guard,
     )
     .await
     {
-        Ok(res) => Ok(BlockResponder(res)),
+        Ok(res) => Ok(res),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");
-            Err(ApiError::RuntimeError)
+            Err(ApiError::from(error))
         }
     }
 }

@@ -1,0 +1,1 @@
+{"did": "did:plc:ntjbr3p32v5hxth453hauf44", "verificationMethods": {"atproto": "did:key:zQ3shqqgcQN6Bm33uGSqcwGo4PjJkrL54gE4MvjvkyYnGeif5"}, "rotationKeys": ["did:key:zQ3shrk75wEcu2LSJ9VvVdT4J5LLQPgqtN7GA6K3w5rZ3yDwF"], "alsoKnownAs": ["at://frank.fixture.test"], "services": {"atproto_pds": {"type": "AtprotoPersonalDataServer", "endpoint": "https://fixture.test"}}}

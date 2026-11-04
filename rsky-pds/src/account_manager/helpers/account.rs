@@ -32,6 +32,21 @@ pub enum AccountStatus {
     Throttled,
 }
 
+impl AccountStatus {
+    /// The wire value the reference PDS reports in session and repo status outputs.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AccountStatus::Active => "active",
+            AccountStatus::Takendown => "takendown",
+            AccountStatus::Suspended => "suspended",
+            AccountStatus::Deleted => "deleted",
+            AccountStatus::Deactivated => "deactivated",
+            AccountStatus::Desynchronized => "desynchronized",
+            AccountStatus::Throttled => "throttled",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct FormattedAccountStatus {
     pub active: bool,
@@ -193,18 +208,15 @@ pub async fn register_actor(
 }
 
 pub async fn register_account(did: String, email: String, password: String, db: &Db) -> Result<()> {
-    let created_at = rsky_common::now();
-
-    // @TODO record recovery key for bring your own recovery key
     let registered = db
         .run(move |conn| {
             Ok(conn
                 .query_row(
-                    "INSERT INTO account (did, email, password, \"createdAt\") \
-                     VALUES (?1, ?2, ?3, ?4) \
+                    "INSERT INTO account (did, email, \"passwordScrypt\") \
+                     VALUES (?1, ?2, ?3) \
                      ON CONFLICT (did) DO NOTHING \
                      RETURNING did",
-                    params![did, email, password, created_at],
+                    params![did, email, password],
                     |row| row.get::<_, String>(0),
                 )
                 .optional()?)
@@ -218,15 +230,21 @@ pub async fn register_account(did: String, email: String, password: String, db: 
     }
 }
 
-pub async fn delete_account(did: &str, db: &Db) -> Result<()> {
+/// Deletes the account, including every OAuth session (`token` table row --
+/// unlike `authorized_client`/`account_device`, it carries no `ON DELETE
+/// CASCADE` from `account`, so it needs an explicit delete here). Returns
+/// the number of OAuth sessions revoked, for
+/// [`crate::metrics::record_oauth_sessions_revoked`].
+pub async fn delete_account(did: &str, db: &Db) -> Result<u64> {
     let did = did.to_owned();
     db.tx(move |tx| {
         tx.execute("DELETE FROM repo_root WHERE did = ?1", params![did])?;
         tx.execute("DELETE FROM email_token WHERE did = ?1", params![did])?;
         tx.execute("DELETE FROM refresh_token WHERE did = ?1", params![did])?;
+        let oauth_revoked = tx.execute("DELETE FROM token WHERE did = ?1", params![did])?;
         tx.execute("DELETE FROM account WHERE did = ?1", params![did])?;
         tx.execute("DELETE FROM actor WHERE did = ?1", params![did])?;
-        Ok(())
+        Ok(oauth_revoked as u64)
     })
     .await
 }
@@ -400,5 +418,26 @@ pub fn format_account_status(account: Option<ActorAccount>) -> FormattedAccountS
             active: true,
             status: None,
         },
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::AccountStatus;
+
+    #[test]
+    fn account_status_wire_names() {
+        let statuses = [
+            (AccountStatus::Active, "active"),
+            (AccountStatus::Takendown, "takendown"),
+            (AccountStatus::Suspended, "suspended"),
+            (AccountStatus::Deleted, "deleted"),
+            (AccountStatus::Deactivated, "deactivated"),
+            (AccountStatus::Desynchronized, "desynchronized"),
+            (AccountStatus::Throttled, "throttled"),
+        ];
+        for (status, name) in statuses {
+            assert_eq!(status.as_str(), name);
+        }
     }
 }

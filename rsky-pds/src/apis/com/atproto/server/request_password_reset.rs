@@ -1,19 +1,21 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::mailer;
 use crate::mailer::IdentifierAndTokenParams;
 use crate::models::models::EmailTokenPurpose;
+use crate::rate_limits::{Caller, RateLimits};
 use anyhow::{bail, Result};
 use rocket::serde::json::Json;
+use rocket::State;
 use rsky_lexicon::com::atproto::server::RequestPasswordResetInput;
 
-async fn inner_request_password_reset(
-    body: Json<RequestPasswordResetInput>,
-    account_manager: AccountManager,
+/// Mails a reset token to the account registered under `email`, for the
+/// XRPC method and the browser pages alike.
+pub(crate) async fn request_password_reset_for(
+    email: &str,
+    account_manager: &AccountManager,
 ) -> Result<()> {
-    let RequestPasswordResetInput { email } = body.into_inner();
     let email = email.to_lowercase();
 
     let account = account_manager
@@ -56,10 +58,20 @@ async fn inner_request_password_reset(
 )]
 pub async fn request_password_reset(
     body: Json<RequestPasswordResetInput>,
-    _auth: AccessStandardIncludeChecks,
     account_manager: AccountManager,
+    limits: &State<RateLimits>,
+    caller: Caller,
 ) -> Result<(), ApiError> {
-    match inner_request_password_reset(body, account_manager).await {
+    limits
+        .consume_all(
+            &crate::rate_limits::REQUEST_PASSWORD_RESET,
+            &caller.ip,
+            1,
+            caller.bypass,
+        )
+        .await?;
+    let RequestPasswordResetInput { email } = body.into_inner();
+    match request_password_reset_for(&email, &account_manager).await {
         Ok(_) => Ok(()),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

@@ -2,7 +2,7 @@ use crate::account_manager::AccountManager;
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
-use crate::auth_verifier::AccessStandard;
+use crate::auth_verifier::scope::{RpcProxy, Scoped};
 use crate::config::ServerConfig;
 use crate::read_after_write::types::LocalRecords;
 use crate::read_after_write::util::{handle_read_after_write, ReadAfterWriteResponse};
@@ -11,7 +11,7 @@ use crate::xrpc_server::types::HandlerPipeThrough;
 use crate::SharedLocalViewer;
 use anyhow::Result;
 use rocket::State;
-use rsky_lexicon::app::bsky::feed::AuthorFeed;
+use serde_json::Value;
 
 const METHOD_NSID: &str = "app.bsky.feed.getTimeline";
 
@@ -20,17 +20,14 @@ pub async fn inner_get_timeline(
     _algorithm: Option<String>,
     _limit: Option<u8>,
     _cursor: Option<String>,
-    auth: AccessStandard,
+    auth: Scoped<RpcProxy>,
     res: HandlerPipeThrough,
     blobstore_factory: &State<BlobstoreFactory>,
     state_local_viewer: &State<SharedLocalViewer>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
-) -> Result<ReadAfterWriteResponse<AuthorFeed>> {
-    let requester: Option<String> = match auth.access.credentials {
-        None => None,
-        Some(credentials) => credentials.did,
-    };
+) -> Result<ReadAfterWriteResponse<Value>> {
+    let requester: Option<String> = auth.did_opt().await?;
     match requester {
         None => Ok(ReadAfterWriteResponse::HandlerPipeThrough(res)),
         Some(requester) => {
@@ -59,14 +56,14 @@ pub async fn get_timeline(
     algorithm: Option<String>,
     limit: Option<u8>,
     cursor: Option<String>,
-    auth: AccessStandard,
+    auth: Scoped<RpcProxy>,
     res: HandlerPipeThrough,
     blobstore_factory: &State<BlobstoreFactory>,
     state_local_viewer: &State<SharedLocalViewer>,
     cfg: &State<ServerConfig>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
-) -> Result<ReadAfterWriteResponse<AuthorFeed>, ApiError> {
+) -> Result<ReadAfterWriteResponse<Value>, ApiError> {
     if let Some(limit) = limit {
         if !(1..=100).contains(&limit) {
             return Err(ApiError::InvalidRequest("invalid limit".to_string()));
@@ -95,17 +92,19 @@ pub async fn get_timeline(
     }
 }
 
-pub fn get_timeline_munge(
+pub async fn get_timeline_munge(
     local_viewer: LocalViewer,
-    original: AuthorFeed,
+    mut original: Value,
     local: LocalRecords,
     _requester: String,
-) -> Result<AuthorFeed> {
-    let feed = futures::executor::block_on(
-        local_viewer.format_and_insert_posts_in_feed(original.feed, local.posts),
-    )?;
-    Ok(AuthorFeed {
-        cursor: original.cursor,
-        feed,
-    })
+) -> Result<Value> {
+    let Some(feed) = original.get_mut("feed").and_then(Value::as_array_mut) else {
+        return Ok(original);
+    };
+    let feed = std::mem::take(feed);
+    let feed = local_viewer
+        .format_and_insert_posts_in_feed(feed, local.posts)
+        .await?;
+    original["feed"] = Value::Array(feed);
+    Ok(original)
 }

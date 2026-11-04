@@ -203,6 +203,14 @@ mod tests {
 
     type WsClient = WebSocket<StdTcpStream>;
 
+    static SHUTDOWN_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// `SHUTDOWN` is process-global: tests that flip it must not overlap with tests that
+    /// depend on it being clear.
+    fn shutdown_guard() -> std::sync::MutexGuard<'static, ()> {
+        SHUTDOWN_GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn build_worker() -> (Worker, rtrb::Producer<Command>, tempfile::TempDir, Keyspace) {
         let (tx, rx) = rtrb::RingBuffer::<Command>::new(64);
         let tmp = tempfile::tempdir().unwrap();
@@ -263,6 +271,7 @@ mod tests {
 
     #[test]
     fn run_processes_commands_then_exits_on_shutdown() {
+        let _guard = shutdown_guard();
         // Drive run(): start a thread that flips SHUTDOWN after a short delay so run returns.
         let (w, mut tx, _tmp, _ks) = build_worker();
         let (server_stream, peer_addr, client_handle) = ws_pair_for_worker();
@@ -320,6 +329,7 @@ mod tests {
 
     #[test]
     fn update_returns_false_when_shutdown_set() {
+        let _guard = shutdown_guard();
         let (mut w, _tx, _tmp, _ks) = build_worker();
         let mut seq = Cursor::from(0);
         SHUTDOWN.store(true, Ordering::SeqCst);
@@ -330,6 +340,7 @@ mod tests {
 
     #[test]
     fn update_broadcasts_new_events_to_caught_up_subscriber() {
+        let _guard = shutdown_guard();
         let (mut w, _tx, _tmp, ks) = build_worker();
         let (server_stream, peer_addr, client_handle) = ws_pair_for_worker();
         w.handle_command(
@@ -351,6 +362,7 @@ mod tests {
 
     #[test]
     fn update_lag_routes_to_poll_for_subscriber_starting_at_zero() {
+        let _guard = shutdown_guard();
         // The bug-fix scenario. cursor=0 subscriber + live events should still be delivered.
         let (mut w, _tx, _tmp, ks) = build_worker();
         let firehose = ks.open_partition("firehose", PartitionCreateOptions::default()).unwrap();
@@ -375,6 +387,7 @@ mod tests {
 
     #[test]
     fn run_exits_immediately_when_shutdown_already_set() {
+        let _guard = shutdown_guard();
         let (w, _tx, _tmp, _ks) = build_worker();
         SHUTDOWN.store(true, Ordering::SeqCst);
         let result = w.run();

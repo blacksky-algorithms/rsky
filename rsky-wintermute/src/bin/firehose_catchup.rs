@@ -4,10 +4,8 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use color_eyre::Result;
-use deadpool_postgres::{Config, ManagerConfig, RecyclingMethod, Runtime};
 use futures::StreamExt;
 use tokio::sync::Semaphore;
-use tokio_postgres::NoTls;
 use tokio_tungstenite::tungstenite::Message;
 
 use rsky_wintermute::indexer::IndexerManager;
@@ -74,17 +72,13 @@ async fn main() -> Result<()> {
     );
 
     // Setup database pool
-    let mut cfg = Config::new();
-    cfg.url = Some(args.database_url);
-    cfg.pool = Some(deadpool_postgres::PoolConfig {
-        max_size: args.pool_size,
-        ..Default::default()
-    });
-    cfg.manager = Some(ManagerConfig {
-        recycling_method: RecyclingMethod::Fast,
-    });
-
-    let pool = Arc::new(cfg.create_pool(Some(Runtime::Tokio1), NoTls)?);
+    let pool = Arc::new(rsky_wintermute::config::create_pg_pool(
+        &args.database_url,
+        deadpool_postgres::PoolConfig {
+            max_size: args.pool_size,
+            ..Default::default()
+        },
+    )?);
 
     // Test DB connection
     let test_client = pool.get().await?;

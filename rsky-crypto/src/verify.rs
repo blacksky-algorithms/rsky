@@ -49,6 +49,18 @@ mod tests {
 
     const MSG: &[u8] = b"test message for digest verification";
 
+    #[test]
+    fn truncated_did_key_is_rejected_not_panicked() {
+        for len in 0..=3usize {
+            let did = format!(
+                "did:key:{}",
+                multibase::encode(multibase::Base::Base58Btc, vec![0u8; len])
+            );
+            assert!(verify_signature(&did, MSG, &[0u8; 64], None).is_err());
+            assert!(verify_signature_digest(&did, &[0u8; 32], &[0u8; 64], None).is_err());
+        }
+    }
+
     fn secp256k1_fixture() -> (String, Vec<u8>, Vec<u8>) {
         use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
         let secret = SecretKey::from_slice(&[0x42u8; 32]).unwrap();

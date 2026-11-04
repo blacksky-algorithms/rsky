@@ -3,7 +3,7 @@ use crate::sequencer::events::{
     AccountEvt, CommitEvt, IdentityEvt, SeqEvt, SyncEvt, TypedAccountEvt, TypedCommitEvt,
     TypedIdentityEvt, TypedSyncEvt,
 };
-use crate::sequencer::outbox::{Outbox, OutboxOpts};
+use crate::sequencer::outbox::{Outbox, OutboxError};
 use crate::xrpc_server::stream::frames::{ErrorFrame, Frame, MessageFrame, MessageFrameOpts};
 use crate::xrpc_server::stream::types::{ErrorFrameBody, InfoFrameBody};
 use crate::SharedSequencer;
@@ -30,6 +30,22 @@ fn get_backfill_limit(ms: u64) -> String {
     format!("{}", dt.format(RFC3339_VARIANT))
 }
 
+/// Counts the connection for as long as its stream lives.
+struct SubscriberGauge;
+
+impl SubscriberGauge {
+    fn new() -> Self {
+        crate::metrics::METRICS.firehose_subscribers.inc();
+        SubscriberGauge
+    }
+}
+
+impl Drop for SubscriberGauge {
+    fn drop(&mut self) {
+        crate::metrics::METRICS.firehose_subscribers.dec();
+    }
+}
+
 /// Repository event stream, aka Firehose endpoint. Outputs repo commits with diff data,
 /// and identity update events, for all repositories on the current server. See the atproto
 /// specifications for details around stream sequencing, repo versioning, CAR diff format, and more.
@@ -45,13 +61,9 @@ pub async fn subscribe_repos<'a>(
     ws: ws::WebSocket,
 ) -> ws::Stream!['a] {
     ws::Stream! { ws =>
+        let _subscriber = SubscriberGauge::new();
         let sequencer_lock = sequencer.sequencer.read().await.clone();
-        let mut outbox = Outbox::new(
-            sequencer_lock.clone(),
-            Some(OutboxOpts {
-                max_buffer_size: cfg.subscription.max_buffer as usize,
-            })
-        );
+        let outbox = Outbox::new(sequencer_lock.clone());
 
         tracing::debug!("@LOG DEBUG: request to com.atproto.sync.subscribeRepos; Cursor={cursor:?}");
         let backfill_time = get_backfill_limit(cfg.subscription.repo_backfill_limit_ms);
@@ -137,8 +149,12 @@ pub async fn subscribe_repos<'a>(
                     let evt = match evt {
                         Some(Ok(evt)) => evt,
                         Some(Err(err)) => {
+                            let name = match err.downcast_ref::<OutboxError>() {
+                                Some(OutboxError::ConsumerTooSlow(_)) => "ConsumerTooSlow",
+                                _ => "EventStreamError",
+                            };
                             let error_frame = ErrorFrame::new(ErrorFrameBody {
-                                error: "EventStreamError".to_string(),
+                                error: name.to_string(),
                                 message: Some(err.to_string()),
                             });
                             yield Message::Binary(error_frame.to_bytes().expect("couldn't translate error to binary."));
@@ -178,7 +194,7 @@ pub async fn subscribe_repos<'a>(
                                     prev: op.prev,
                                     action: op.action.to_string()
                                 }).collect::<Vec<SubscribeReposCommitOperation>>(),
-                                blobs: blobs.into_iter().map(|blob| blob.to_string()).collect::<Vec<String>>(),
+                                blobs,
                                 prev_data,
                             };
                             let message_frame = MessageFrame::new(subscribe_commit_evt, Some(MessageFrameOpts { r#type: Some(format!("#{0}",r#type)) }));
@@ -323,5 +339,21 @@ pub async fn subscribe_repos<'a>(
                 _ = &mut shutdown => break
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SubscriberGauge;
+
+    #[test]
+    fn the_gauge_follows_the_connection() {
+        let gauge = &crate::metrics::METRICS.firehose_subscribers;
+        let before = gauge.get();
+        let guard = SubscriberGauge::new();
+        assert_eq!(gauge.get(), before + 1);
+        drop(guard);
+        assert_eq!(gauge.get(), before);
+        assert!(!super::get_backfill_limit(1000).is_empty());
     }
 }

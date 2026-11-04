@@ -5,19 +5,15 @@ use crate::apis::com::atproto::repo::assert_repo_availability;
 use crate::apis::ApiError;
 use crate::auth_verifier;
 use crate::auth_verifier::OptionalAccessOrAdminToken;
+use crate::exports::{BlobBody, ExportGuard, Exports};
 use anyhow::Result;
 #[cfg(feature = "aws-s3")]
 use aws_sdk_s3::operation::get_object::GetObjectError;
-use bytes::Bytes;
 use futures::TryStreamExt;
 use lexicon_cid::Cid;
-use rocket::http::Header;
-use rocket::{Responder, State};
+use rocket::State;
 use std::str::FromStr;
-
-#[derive(Responder)]
-#[response(status = 200)]
-pub struct BlobResponder(Vec<u8>, Header<'static>, Header<'static>, Header<'static>);
+use tokio_util::io::StreamReader;
 
 async fn inner_get_blob(
     did: String,
@@ -26,7 +22,8 @@ async fn inner_get_blob(
     auth: OptionalAccessOrAdminToken,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
-) -> Result<(Vec<u8>, Option<String>)> {
+    guard: ExportGuard,
+) -> Result<BlobBody> {
     let is_user_or_admin = if let Some(access) = auth.access {
         auth_verifier::is_user_or_admin(access, &did)
     } else {
@@ -40,9 +37,12 @@ async fn inner_get_blob(
         .await?;
 
     let found = actor_store.blob.get_blob(cid).await?;
-    let chunks: Vec<Bytes> = found.stream.try_collect().await?;
-    let bytes: Vec<u8> = chunks.iter().flat_map(|b| b.iter().copied()).collect();
-    Ok((bytes, found.mime_type))
+    Ok(BlobBody::new(
+        StreamReader::new(found.stream.map_err(std::io::Error::other)),
+        found.size as usize,
+        found.mime_type,
+        guard,
+    ))
 }
 
 /// Get a blob associated with a given account. Returns the full blob as originally uploaded.
@@ -56,7 +56,9 @@ pub async fn get_blob(
     auth: OptionalAccessOrAdminToken,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
-) -> Result<BlobResponder, ApiError> {
+    exports: &State<Exports>,
+) -> Result<BlobBody, ApiError> {
+    let guard = exports.blob_slot().await?;
     match inner_get_blob(
         did,
         cid,
@@ -64,21 +66,11 @@ pub async fn get_blob(
         auth,
         actor_store,
         account_manager,
+        guard,
     )
     .await
     {
-        Ok(res) => {
-            let (bytes, mime_type) = res;
-            Ok(BlobResponder(
-                bytes.clone(),
-                Header::new("content-length", bytes.len().to_string()),
-                Header::new(
-                    "content-type",
-                    mime_type.unwrap_or("application/octet-stream".to_string()),
-                ),
-                Header::new("content-security-policy", "default-src 'none'; sandbox"),
-            ))
-        }
+        Ok(body) => Ok(body),
         Err(error) => {
             tracing::error!("Error: {}", error);
             #[cfg(feature = "aws-s3")]
@@ -89,7 +81,7 @@ pub async fn get_blob(
             if is_blob_not_found {
                 Err(ApiError::BlobNotFound)
             } else {
-                Err(ApiError::RuntimeError)
+                Err(ApiError::from(error))
             }
             // @TODO: Need to update error handling to return 404 if we have it but it's in tmp
         }

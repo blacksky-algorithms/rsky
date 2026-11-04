@@ -1,0 +1,42 @@
+{% extends "layouts/account_shell.html" %}
+{% import "components/macros.html" as ui %}
+{% block content %}
+<p class="text-sm">Your account is signed in on the devices listed below. If your account was compromised, sign out all devices, change your password, and check your connected <a class="underline" href="{{ apps_href }}">apps</a>.</p>
+{% if total == 0 %}
+<div class="empty">
+  <span class="avatar avatar-sm">{% include "icons/monitor-smartphone.svg.html" %}</span>
+  <p>Looks like you aren't logged in on any other devices.</p>
+</div>
+{% else %}
+<form method="get" class="filter-form" role="search">
+  <div class="input-wrap">
+    <span class="input-icon">{% include "icons/search.svg.html" %}</span>
+    <input class="input" type="search" name="q" value="{{ filter }}" placeholder="Filter devices" aria-label="Filter devices">
+  </div>
+  <button type="submit" class="btn btn-secondary btn-sm">Filter</button>
+</form>
+{% if devices.is_empty() %}
+<p class="text-sm muted center">No matches</p>
+{% else %}
+<div class="table-wrap table-mobile"><table class="table">
+  <thead><tr><th>Device</th><th>IP address</th><th>Last seen</th><th class="right"><span class="sr-only">Actions</span></th></tr></thead>
+  <tbody>
+  {% for device in devices %}
+  <tr>
+    <td data-label="Device" class="font-medium">{% if device.name.is_empty() %}Unknown user agent{% else %}{{ device.name }}{% endif %}{% if device.current %} <span class="badge badge-secondary">This device</span>{% endif %}</td>
+    <td data-label="IP address"><code>{{ device.ip_address }}</code></td>
+    <td data-label="Last seen" class="muted">{{ device.last_seen }}</td>
+    <td class="right">
+      <form method="post" action="{{ sign_out_action }}">
+        {% call ui::csrf_fields(nav.csrf) %}
+        <input type="hidden" name="device_id" value="{{ device.device_id }}">
+        <button type="submit" class="btn btn-secondary btn-sm"{% if device.current %} title="Cannot remove current device" disabled{% endif %}>Sign out</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% endif %}
+{% endif %}
+{% endblock %}

@@ -88,6 +88,14 @@ mod tests {
     }
 
     #[test]
+    fn truncated_multikey_payload_is_rejected_not_panicked() {
+        for len in 0..=3usize {
+            let multikey = multibase::encode(multibase::Base::Base58Btc, vec![0u8; len]);
+            assert!(parse_multikey(multikey).is_err());
+        }
+    }
+
+    #[test]
     fn format_parse_roundtrip_p256() {
         use p256::ecdsa::SigningKey;
         let signing_key = SigningKey::from_slice(&[0x24u8; 32]).unwrap();

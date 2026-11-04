@@ -1,0 +1,41 @@
+{% extends "layouts/account_shell.html" %}
+{% import "components/macros.html" as ui %}
+{% block content %}
+<p class="text-sm">These apps have access to your account. An app may appear multiple times if you use it on different devices. You can revoke access to log out the app until you sign in again.</p>
+{% if total == 0 %}
+<div class="empty">
+  <span class="avatar avatar-sm">{% include "icons/globe.svg.html" %}</span>
+  <p>It appears that you haven't used this account to sign in to any apps yet.</p>
+</div>
+{% else %}
+<form method="get" class="filter-form" role="search">
+  <div class="input-wrap">
+    <span class="input-icon">{% include "icons/search.svg.html" %}</span>
+    <input class="input" type="search" name="q" value="{{ filter }}" placeholder="Filter apps" aria-label="Filter apps">
+  </div>
+  <button type="submit" class="btn btn-secondary btn-sm">Filter</button>
+</form>
+{% if apps.is_empty() %}
+<p class="text-sm muted center">No matches</p>
+{% else %}
+<div class="table-wrap table-mobile"><table class="table">
+  <thead><tr>
+    <th>App</th><th>Client</th><th>Authorized</th>
+    <th><details class="popover"><summary aria-label="Why is this time so recent?">Last accessed {% include "icons/circle-help.svg.html" %}</summary><p class="popover-body">Apps may access your account in the background (to check notifications, sync data, etc.) even when you're not actively using them. This is normal behavior and will update the "last accessed" time.</p></details></th>
+    <th class="right"><span class="sr-only">Actions</span></th>
+  </tr></thead>
+  <tbody>
+  {% for app in apps %}
+  <tr>
+    <td data-label="App" class="font-medium truncate">{{ app.name }}</td>
+    <td data-label="Client" class="truncate"><code>{{ app.identifier }}</code></td>
+    <td data-label="Authorized" class="muted">{{ app.authorized }}</td>
+    <td data-label="Last accessed" class="muted">{{ app.last_accessed }}</td>
+    <td class="right"><a class="btn btn-secondary btn-sm" href="{{ app.details_href }}">Details</a></td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% endif %}
+{% endif %}
+{% endblock %}

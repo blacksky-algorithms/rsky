@@ -1448,21 +1448,68 @@ impl MST {
         Ok(cids)
     }
 
+    /// A covering proof is all MST nodes (leaves excluded) needed to prove the value of a given leaf
+    /// and its siblings to its immediate right and left (if applicable)
+    pub async fn get_covering_proof(&mut self, key: &str) -> Result<BlockMap> {
+        let mut blocks = self.proof_for_key(key).await?;
+        blocks.add_map(self.proof_for_left_sib(key).await?)?;
+        blocks.add_map(self.proof_for_right_sib(key).await?)?;
+        Ok(blocks)
+    }
+
     #[async_recursion(Sync)]
-    pub async fn add_blocks_for_path(&mut self, key: String, blocks: &mut BlockMap) -> Result<()> {
+    pub async fn proof_for_key(&mut self, key: &str) -> Result<BlockMap> {
+        let index = self.find_gt_or_equal_leaf_index(key).await?;
+        let found = self.at_index(index).await?;
+        let mut blocks = match found {
+            Some(NodeEntry::Leaf(ref leaf)) if leaf.key == key => BlockMap::new(),
+            _ => match self.at_index(index - 1).await? {
+                Some(NodeEntry::MST(mut prev)) => prev.proof_for_key(key).await?,
+                _ => return Ok(BlockMap::new()),
+            },
+        };
         let serialized = self.serialize().await?;
         blocks.set(serialized.cid, serialized.bytes);
-        let index = self.find_gt_or_equal_leaf_index(&key).await?;
-        let found = self.at_index(index).await?;
-        if let Some(NodeEntry::Leaf(found)) = found {
-            if found.key == key {
-                return Ok(());
+        Ok(blocks)
+    }
+
+    #[async_recursion(Sync)]
+    pub async fn proof_for_left_sib(&mut self, key: &str) -> Result<BlockMap> {
+        let index = self.find_gt_or_equal_leaf_index(key).await?;
+        let mut blocks = match self.at_index(index - 1).await? {
+            Some(NodeEntry::MST(mut prev)) => prev.proof_for_left_sib(key).await?,
+            _ => BlockMap::new(),
+        };
+        let serialized = self.serialize().await?;
+        blocks.set(serialized.cid, serialized.bytes);
+        Ok(blocks)
+    }
+
+    #[async_recursion(Sync)]
+    pub async fn proof_for_right_sib(&mut self, key: &str) -> Result<BlockMap> {
+        let index = self.find_gt_or_equal_leaf_index(key).await?;
+        let mut found = self.at_index(index).await?;
+        if found.is_none() {
+            found = self.at_index(index - 1).await?;
+        }
+        let mut blocks = match found {
+            None => BlockMap::new(),
+            Some(NodeEntry::MST(mut subtree)) => subtree.proof_for_right_sib(key).await?,
+            Some(NodeEntry::Leaf(leaf)) => {
+                let sib = if leaf.key == key {
+                    self.at_index(index + 1).await?
+                } else {
+                    self.at_index(index - 1).await?
+                };
+                match sib {
+                    Some(NodeEntry::MST(mut sib)) => sib.proof_for_right_sib(key).await?,
+                    _ => BlockMap::new(),
+                }
             }
-        }
-        match self.at_index(index - 1).await? {
-            Some(NodeEntry::MST(mut prev)) => prev.add_blocks_for_path(key, blocks).await,
-            _ => Ok(()),
-        }
+        };
+        let serialized = self.serialize().await?;
+        blocks.set(serialized.cid, serialized.bytes);
+        Ok(blocks)
     }
 
     pub async fn save_mst(&self) -> Result<Cid> {
@@ -1545,7 +1592,7 @@ mod tests {
 
         let mut entries = mapping
             .iter()
-            .map(|e| (e.0.clone(), e.1.clone()))
+            .map(|e| (e.0.clone(), *e.1))
             .collect::<Vec<(String, Cid)>>();
         entries.shuffle(&mut rng);
 
@@ -1574,7 +1621,7 @@ mod tests {
 
         let mut entries = mapping
             .iter()
-            .map(|e| (e.0.clone(), e.1.clone()))
+            .map(|e| (e.0.clone(), *e.1))
             .collect::<Vec<(String, Cid)>>();
         entries.shuffle(&mut rng);
 
@@ -1608,7 +1655,7 @@ mod tests {
 
         let mut entries = mapping
             .iter()
-            .map(|e| (e.0.clone(), e.1.clone()))
+            .map(|e| (e.0.clone(), *e.1))
             .collect::<Vec<(String, Cid)>>();
         entries.shuffle(&mut rng);
 
@@ -1648,7 +1695,7 @@ mod tests {
 
         let mut entries = mapping
             .iter()
-            .map(|e| (e.0.clone(), e.1.clone()))
+            .map(|e| (e.0.clone(), *e.1))
             .collect::<Vec<(String, Cid)>>();
         entries.shuffle(&mut rng);
 
@@ -1661,7 +1708,7 @@ mod tests {
 
         let mut reshuffled = mapping
             .iter()
-            .map(|e| (e.0.clone(), e.1.clone()))
+            .map(|e| (e.0.clone(), *e.1))
             .collect::<Vec<(String, Cid)>>();
         reshuffled.shuffle(&mut rng);
 
@@ -1699,7 +1746,7 @@ mod tests {
         let mut mst = MST::create(Arc::new(RwLock::new(storage)), None, None).await?;
         let entries = mapping
             .iter()
-            .map(|e| (e.0.clone(), e.1.clone()))
+            .map(|e| (e.0.clone(), *e.1))
             .collect::<Vec<(String, Cid)>>();
 
         for entry in &entries {
@@ -2018,13 +2065,24 @@ mod tests {
             assert!(result.is_err(), "Key '{}' should be invalid", key);
         }
 
-        // Rejects keys over 256 chars
-        let long_key: String = "a".repeat(253);
+        // Allows the tilde the record key syntax permits
+        let key = "app.skytube.video.save/at~~~did~plc~abc~app.bsky.feed.post~3may7a7bamk2t";
+        let result = mst.add(&key.to_string(), cid1, None).await;
+        assert!(result.is_ok(), "Key '{}' should be valid", key);
+
+        // Rejects keys over 1024 chars
+        let long_key: String = "a".repeat(1020);
         let key = format!("coll/{}", long_key);
         let result = mst.add(&key, cid1, None).await;
         assert!(result.is_err());
 
-        // Allows long key under 256 chars
+        // Allows a full-length 512-char rkey
+        let long_key: String = "a".repeat(512);
+        let key = format!("coll/{}", long_key);
+        let result = mst.add(&key, cid1, None).await;
+        assert!(result.is_ok());
+
+        // Allows long key under the limit
         let long_key: String = "a".repeat(250);
         let key = format!("coll/{}", long_key);
         let result = mst.add(&key, cid1, None).await;

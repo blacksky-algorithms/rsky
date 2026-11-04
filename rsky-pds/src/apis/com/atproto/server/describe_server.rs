@@ -1,5 +1,7 @@
 use crate::apis::ApiError;
+use crate::config::ServerConfig;
 use rocket::serde::json::Json;
+use rocket::State;
 use rsky_common::env::{env_bool, env_list, env_str};
 use rsky_lexicon::com::atproto::server::{
     DescribeServerOutput, DescribeServerRefContact, DescribeServerRefLinks,
@@ -7,7 +9,9 @@ use rsky_lexicon::com::atproto::server::{
 
 #[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.server.describeServer")]
-pub async fn describe_server() -> Result<Json<DescribeServerOutput>, ApiError> {
+pub async fn describe_server(
+    cfg: &State<ServerConfig>,
+) -> Result<Json<DescribeServerOutput>, ApiError> {
     let available_user_domains = env_list("PDS_SERVICE_HANDLE_DOMAINS");
     let invite_code_required = env_bool("PDS_INVITE_REQUIRED");
     let privacy_policy = env_str("PDS_PRIVACY_POLICY_URL");
@@ -26,5 +30,6 @@ pub async fn describe_server() -> Result<Json<DescribeServerOutput>, ApiError> {
         contact: DescribeServerRefContact {
             email: contact_email_address,
         },
+        blob_upload_limit: Some(cfg.service.blob_upload_limit as u64),
     }))
 }

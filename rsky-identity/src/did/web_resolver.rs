@@ -1,5 +1,6 @@
 use crate::common::decode_uri_component;
 use crate::errors::Error;
+use crate::safe_fetch::{NetworkPolicy, Redirects, SafeClient};
 use crate::types::DidCache;
 use anyhow::{bail, Result};
 use serde_json::Value;
@@ -9,15 +10,29 @@ use url::Url;
 
 pub const DOC_PATH: &str = "/.well-known/did.json";
 
+/// The most a DID document may be.
+const DOCUMENT_LIMIT: usize = 64 * 1024;
+
 #[derive(Clone, Debug)]
 pub struct DidWebResolver {
     pub timeout: Duration,
     pub cache: Option<Arc<dyn DidCache>>,
+    client: SafeClient,
 }
 
 impl DidWebResolver {
     pub fn new(timeout: Duration, cache: Option<Arc<dyn DidCache>>) -> Self {
-        Self { timeout, cache }
+        Self {
+            timeout,
+            cache,
+            client: SafeClient::new(NetworkPolicy::PUBLIC, timeout).expect("reqwest client"),
+        }
+    }
+
+    /// Fetches documents under `policy` instead of the public default.
+    pub fn with_network(mut self, policy: NetworkPolicy) -> Self {
+        self.client = SafeClient::new(policy, self.timeout).expect("reqwest client");
+        self
     }
 
     pub async fn resolve_no_check(&self, did: String) -> Result<Option<Value>> {
@@ -42,20 +57,15 @@ impl DidWebResolver {
             let _ = url.set_scheme("http");
         }
 
-        let client = reqwest::Client::new();
-        let response = client
-            .get(url.to_string())
-            .timeout(self.timeout)
-            .header("Connection", "Keep-Alive")
-            .header("Keep-Alive", "timeout=5, max=1000")
-            .send()
-            .await?;
-        let res = &response;
-        match res.error_for_status_ref() {
-            Ok(_) => Ok(Some(response.json::<Value>().await?)),
+        let response = self.client.get(url, Redirects::Follow(3)).await?;
+        let (status, body) = SafeClient::read_bounded(response, DOCUMENT_LIMIT).await?;
+        if status == reqwest::StatusCode::NOT_FOUND {
             // Positively not found, versus due to e.g. network error
-            Err(error) if error.status() == Some(reqwest::StatusCode::NOT_FOUND) => Ok(None),
-            Err(error) => bail!(error.to_string()),
+            return Ok(None);
         }
+        if !status.is_success() {
+            bail!("did:web document request answered {status}")
+        }
+        Ok(Some(serde_json::from_slice::<Value>(&body)?))
     }
 }

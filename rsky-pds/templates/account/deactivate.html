@@ -1,0 +1,27 @@
+{% extends "layouts/account_shell.html" %}
+{% import "components/macros.html" as ui %}
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <h1 class="card-title">Deactivate account</h1>
+    <p class="card-description">Your content (profile, posts, feeds, lists, etc.) will be hidden {% if let Some(app) = shell.app_name %}from the {{ app }} app and across the Atmosphere network.{% else %}across the Atmosphere network.{% endif %}</p>
+  </div>
+  <div class="card-content">
+    <form method="post" action="{{ submit_action }}" class="form" autocomplete="off">
+      {% call ui::csrf_fields(nav.csrf) %}
+      {% if let Some(message) = error %}{% call ui::error_notice(message) %}{% endif %}
+      {% call ui::notice("note", "info", "", "There is no time limit for account deactivation, come back any time.") %}
+      {% call ui::notice("note", "info", "", "Every app currently connected to your account, as well as any \"app passwords\" you've created, will be revoked. You'll need to sign back in when you reactivate.") %}
+      {% call ui::notice("note", "warning", "", "If you're trying to change your handle or email, do so before you deactivate.") %}
+      <div class="field">
+        <label class="label" for="password">Password</label>
+        <input class="input" type="password" id="password" name="password" autocomplete="current-password" required>
+      </div>
+      <div class="action-row">
+        <button type="submit" class="btn btn-destructive">Yes, Deactivate</button>
+        <a class="btn btn-secondary" href="{{ cancel_href }}">Cancel</a>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}

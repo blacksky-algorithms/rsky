@@ -54,7 +54,7 @@ pub async fn resolve_did_doc(
     id_resolver: &State<SharedIdResolver>,
 ) -> Result<DidDocument, ApiError> {
     let doc = {
-        let lock = id_resolver.id_resolver.write().await;
+        let lock = id_resolver.id_resolver.read().await;
         lock.did.resolve(did.clone(), Some(force_refresh)).await
     };
     match doc {

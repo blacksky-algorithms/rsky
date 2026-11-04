@@ -31,6 +31,8 @@ pub struct AppConfig {
     pub playlist_redirect_max_age_secs: i64,
     /// Cache-Control max-age of the thumbnail 307 redirect, in seconds.
     pub thumbnail_redirect_max_age_secs: i64,
+    /// Secret used to verify private-space media URLs.
+    pub media_signing_secret: Option<String>,
 
     /// This service's DID (e.g., "did:web:video.blacksky.community")
     pub service_did: String,
@@ -87,6 +89,7 @@ impl AppConfig {
                         .expect("THUMBNAIL_REDIRECT_MAX_AGE_SECS must be an integer")
                 })
                 .unwrap_or(86400), // 24 hours
+            media_signing_secret: env::var("MEDIA_SIGNING_SECRET").ok(),
 
             service_did: env::var("VIDEO_SERVICE_DID")
                 .unwrap_or_else(|_| "did:web:video.blacksky.community".to_string()),

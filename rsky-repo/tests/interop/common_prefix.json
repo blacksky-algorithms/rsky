@@ -1,0 +1,15 @@
+[
+  { "left": "", "right": "", "len": 0 },
+  { "left": "abc", "right": "abc", "len": 3 },
+  { "left": "", "right": "abc", "len": 0 },
+  { "left": "abc", "right": "", "len": 0 },
+  { "left": "ab", "right": "abc", "len": 2 },
+  { "left": "abc", "right": "ab", "len": 2 },
+  { "left": "abcde", "right": "abc", "len": 3 },
+  { "left": "abc", "right": "abcde", "len": 3 },
+  { "left": "abcde", "right": "abc1", "len": 3 },
+  { "left": "abcde", "right": "abb", "len": 2 },
+  { "left": "abcde", "right": "qbb", "len": 0 },
+  { "left": "abc", "right": "abc\u0000", "len": 3 },
+  { "left": "abc\u0000", "right": "abc", "len": 3 }
+]

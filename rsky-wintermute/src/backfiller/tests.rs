@@ -6,6 +6,7 @@ mod backfiller_tests {
     use crate::storage::Storage;
     use crate::types::{BackfillJob, WintermuteError};
     use serde_json::json;
+    use serial_test::serial;
     use tempfile::TempDir;
 
     fn setup_test_storage() -> (Storage, TempDir) {
@@ -68,6 +69,7 @@ mod backfiller_tests {
             "did:plc:r7fdhqmw3h2cifeakw5hmvy6",
             &car_bytes,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -93,6 +95,7 @@ mod backfiller_tests {
             "did:plc:someotherdidentirely00000",
             &car_bytes,
             false,
+            None,
         )
         .await;
 
@@ -111,10 +114,11 @@ mod backfiller_tests {
             priority: false,
         };
 
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .unwrap();
+        let http_client = rsky_identity::safe_fetch::SafeClient::new(
+            rsky_identity::safe_fetch::NetworkPolicy::PERMISSIVE,
+            std::time::Duration::from_secs(60),
+        )
+        .unwrap();
 
         BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
             .await
@@ -123,7 +127,12 @@ mod backfiller_tests {
         assert!(storage.firehose_backfill_len().unwrap() > 0);
     }
 
+    // Enqueues BACKFILLER_OUTPUT_HIGH_WATER_MARK records one at a time, so its
+    // runtime scales with a production tuning constant that defaults to 100k.
+    // Ignored by default and run in CI with a small mark, the same way the video
+    // crate handles its ffmpeg-dependent tests.
     #[tokio::test]
+    #[ignore = "runtime scales with BACKFILLER_OUTPUT_HIGH_WATER_MARK; set a small mark and run with --ignored"]
     async fn test_backpressure_metric_tracking() {
         use crate::config::BACKFILLER_OUTPUT_HIGH_WATER_MARK;
         use crate::types::IndexJob;
@@ -140,6 +149,7 @@ mod backfiller_tests {
                 record: Some(json!({"text": "test"})),
                 indexed_at: "2024-01-01T00:00:00Z".to_owned(),
                 rev: "test".to_owned(),
+                provenance: None,
             };
             storage.enqueue_firehose_backfill(&job).unwrap();
         }
@@ -163,10 +173,11 @@ mod backfiller_tests {
             priority: false,
         };
 
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .unwrap();
+        let http_client = rsky_identity::safe_fetch::SafeClient::new(
+            rsky_identity::safe_fetch::NetworkPolicy::PERMISSIVE,
+            std::time::Duration::from_secs(10),
+        )
+        .unwrap();
 
         let result =
             BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
@@ -192,10 +203,11 @@ mod backfiller_tests {
             priority: false,
         };
 
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .unwrap();
+        let http_client = rsky_identity::safe_fetch::SafeClient::new(
+            rsky_identity::safe_fetch::NetworkPolicy::PERMISSIVE,
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
 
         let result =
             BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
@@ -373,7 +385,11 @@ mod backfiller_tests {
             priority: false,
         };
 
-        let http_client = reqwest::Client::new();
+        let http_client = rsky_identity::safe_fetch::SafeClient::new(
+            rsky_identity::safe_fetch::NetworkPolicy::PERMISSIVE,
+            std::time::Duration::from_secs(10),
+        )
+        .unwrap();
         let result =
             BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
                 .await;
@@ -387,7 +403,11 @@ mod backfiller_tests {
         }
     }
 
+    // Mutates the process-global SHUTDOWN flag, so it must not run beside the
+    // other tests that do: their reset lands while this one's run() is still
+    // looping on the flag, and that loop then never exits.
     #[test]
+    #[serial(shutdown_flag)]
     fn test_run_creates_runtime() {
         use std::sync::Arc;
 
@@ -406,6 +426,7 @@ mod backfiller_tests {
     }
 
     #[tokio::test]
+    #[serial(shutdown_flag)]
     async fn test_process_loop_exits_on_shutdown() {
         use std::sync::Arc;
 
@@ -423,6 +444,7 @@ mod backfiller_tests {
     }
 
     #[tokio::test]
+    #[serial(shutdown_flag)]
     async fn test_process_loop_handles_empty_queue() {
         use std::sync::Arc;
         use std::time::Duration;
@@ -470,7 +492,11 @@ mod backfiller_tests {
             priority: false,
         };
 
-        let http_client = reqwest::Client::new();
+        let http_client = rsky_identity::safe_fetch::SafeClient::new(
+            rsky_identity::safe_fetch::NetworkPolicy::PERMISSIVE,
+            std::time::Duration::from_secs(10),
+        )
+        .unwrap();
         let result =
             BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
                 .await;
@@ -492,7 +518,11 @@ mod backfiller_tests {
             priority: false,
         };
 
-        let http_client = reqwest::Client::new();
+        let http_client = rsky_identity::safe_fetch::SafeClient::new(
+            rsky_identity::safe_fetch::NetworkPolicy::PERMISSIVE,
+            std::time::Duration::from_secs(10),
+        )
+        .unwrap();
         let result =
             BackfillerManager::process_job(&storage, &http_client, &dashmap::DashMap::new(), &job)
                 .await;

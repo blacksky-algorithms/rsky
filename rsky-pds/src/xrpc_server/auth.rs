@@ -5,6 +5,7 @@ use base64ct::{Base64, Base64UrlUnpadded, Encoding};
 use reqwest::header::{HeaderValue, AUTHORIZATION};
 use rsky_crypto::types::VerifyOptions;
 use rsky_crypto::verify::verify_signature_digest;
+use secp256k1::Keypair;
 use sha2::{Digest, Sha256};
 use std::time::{Duration, SystemTime};
 
@@ -28,8 +29,11 @@ pub struct JwtPayload {
     pub lxm: Option<String>,
 }
 
-pub async fn create_service_auth_headers(params: ServiceJwtParams) -> Result<HeaderMap> {
-    let jwt = create_service_jwt(params).await?;
+pub async fn create_service_auth_headers(
+    params: ServiceJwtParams,
+    keypair: &Keypair,
+) -> Result<HeaderMap> {
+    let jwt = create_service_jwt(params, keypair).await?;
     let jwt_str = format!("Bearer {jwt}");
     let mut headers = HeaderMap::new();
     headers.insert(AUTHORIZATION, HeaderValue::from_str(&jwt_str)?);
@@ -157,30 +161,33 @@ where
 mod tests {
     use super::*;
 
+    fn issuer_keypair() -> Keypair {
+        // fixed secret so the test carries no unseeded randomness
+        let secret = secp256k1::SecretKey::from_slice(&[0x17u8; 32]).unwrap();
+        Keypair::from_secret_key(&secp256k1::Secp256k1::new(), &secret)
+    }
+
     /// A token minted by `create_service_jwt` must verify against the mint
     /// keypair's did:key — the full round trip other PDSes exercise. This is
     /// the test that catches an encode/verify mismatch a claims-only test
     /// cannot.
     #[tokio::test]
     async fn a_minted_token_verifies_end_to_end() {
-        use crate::context::PDS_REPO_SIGNING_KEYPAIR;
         use rsky_crypto::utils::encode_did_key;
-        if std::env::var("PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX").is_err() {
-            std::env::set_var(
-                "PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX",
-                "1717171717171717171717171717171717171717171717171717171717171717",
-            );
-        }
-        let jwt = create_service_jwt(ServiceJwtParams {
-            iss: "did:plc:issuer".to_string(),
-            aud: "did:web:service".to_string(),
-            exp: None,
-            lxm: Some("com.atproto.server.createAccount".to_string()),
-            jti: None,
-        })
+        let keypair = issuer_keypair();
+        let jwt = create_service_jwt(
+            ServiceJwtParams {
+                iss: "did:plc:issuer".to_string(),
+                aud: "did:web:service".to_string(),
+                exp: None,
+                lxm: Some("com.atproto.server.createAccount".to_string()),
+                jti: None,
+            },
+            &keypair,
+        )
         .await
         .unwrap();
-        let did_key = encode_did_key(&PDS_REPO_SIGNING_KEYPAIR.public_key());
+        let did_key = encode_did_key(&keypair.public_key());
         let payload = verify_jwt(
             jwt,
             Some("did:web:service".to_string()),

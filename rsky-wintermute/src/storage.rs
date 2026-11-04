@@ -2,6 +2,8 @@ use crate::config::{BLOCK_SIZE, CACHE_SIZE, FSYNC_MS, MEMTABLE_SIZE, WRITE_BUFFE
 
 const LIVE_SEQ_READ_CURSOR: &str = "live_seq_read";
 const LIVE_LEGACY_DRAINED: &str = "live_legacy_drained";
+// fjall's snapshot tracker safety gap: GC runs on every 50th closed snapshot.
+const SNAPSHOT_GC_INTERVAL: usize = 50;
 use crate::types::{BackfillJob, FirehoseEvent, IndexJob, WintermuteError};
 use fjall::{Config, Keyspace, PartitionCreateOptions, PartitionHandle};
 use heed::types::Bytes;
@@ -167,8 +169,14 @@ impl Storage {
         // resumes the forward scan instead of re-walking every tombstone.
         let seq_read_cursor = cursors
             .get(LIVE_SEQ_READ_CURSOR.as_bytes())?
-            .and_then(|v| <[u8; 8]>::try_from(v.as_ref()).ok())
-            .map(|b| b.to_vec());
+            .and_then(|v| <[u8; 8]>::try_from(v.as_ref()).ok());
+        // New keys always sort after the read cursor, even when every key
+        // behind it was removed or the partition was wiped, so the forward
+        // scan never has to look behind the cursor.
+        let live_seq_start = seq_read_cursor.map_or(live_seq_start, |b| {
+            live_seq_start.max(u64::from_be_bytes(b).saturating_add(1))
+        });
+        let seq_read_cursor = seq_read_cursor.map(|b| b.to_vec());
         let legacy_drained = cursors.get(LIVE_LEGACY_DRAINED.as_bytes())?.is_some();
 
         Ok(Self {
@@ -187,6 +195,12 @@ impl Storage {
             legacy_live_drained: AtomicBool::new(legacy_drained),
             live_notify: tokio::sync::Notify::new(),
         })
+    }
+
+    /// Flush and fsync the journal so an immediate process exit loses nothing.
+    pub fn persist(&self) -> Result<(), WintermuteError> {
+        self.db.persist(fjall::PersistMode::SyncAll)?;
+        Ok(())
     }
 
     pub fn write_firehose_event(
@@ -316,10 +330,10 @@ impl Storage {
     // Firehose live queue (from ingester); keys are monotonic so dequeue order
     // is arrival order and the read cursor never revisits tombstones.
     pub fn enqueue_firehose_live(&self, job: &IndexJob) -> Result<(), WintermuteError> {
-        let seq = self.live_seq_next.fetch_add(1, Ordering::Relaxed);
         let mut value = Vec::new();
         ciborium::into_writer(job, &mut value)
             .map_err(|e| WintermuteError::Serialization(format!("failed to serialize job: {e}")))?;
+        let seq = self.live_seq_next.fetch_add(1, Ordering::Relaxed);
         self.firehose_live_seq
             .insert(seq.to_be_bytes(), value.as_slice())?;
         crate::metrics::INGESTER_FIREHOSE_LIVE_LENGTH.inc();
@@ -443,24 +457,6 @@ impl Storage {
             self.cursors
                 .insert(LIVE_SEQ_READ_CURSOR.as_bytes(), key.as_slice())?;
             *guard = Some(key);
-        } else if results.is_empty() && poisoned.is_empty() {
-            // A wiped-and-recreated partition restarts seq keys from zero; a
-            // persisted cursor from before the wipe would then skip everything.
-            if let Some((first, _)) = self.firehose_live_seq.first_key_value()? {
-                let stale = self
-                    .firehose_live_seq_cursor
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.clone())
-                    .is_some_and(|c| first.as_ref() < c.as_slice());
-                if stale {
-                    tracing::warn!("live seq read cursor is ahead of the partition; resetting");
-                    if let Ok(mut guard) = self.firehose_live_seq_cursor.lock() {
-                        *guard = None;
-                    }
-                    self.cursors.remove(LIVE_SEQ_READ_CURSOR.as_bytes())?;
-                }
-            }
         }
 
         for (key, _) in &results {
@@ -1000,8 +996,89 @@ impl Storage {
         Ok(self.repo_backfill.len()?)
     }
 
+    /// Keys are gap-free and removed in order, so the unread count is the
+    /// distance from the read cursor to the next sequence number; the legacy
+    /// partition is only scanned until it has drained.
     pub fn firehose_live_len(&self) -> Result<usize, WintermuteError> {
-        Ok(self.firehose_live.len()? + self.firehose_live_seq.len()?)
+        let legacy = if self.legacy_live_drained.load(Ordering::Relaxed) {
+            0
+        } else {
+            self.firehose_live.len()?
+        };
+        Ok(legacy + self.live_seq_len())
+    }
+
+    fn live_seq_len(&self) -> usize {
+        let unread_from = self
+            .firehose_live_seq_cursor
+            .lock()
+            .map_or(None, |c| c.clone())
+            .and_then(|k| <[u8; 8]>::try_from(k.as_slice()).ok())
+            .map_or(0, |b| u64::from_be_bytes(b).saturating_add(1));
+        let next = self.live_seq_next.load(Ordering::Relaxed);
+        usize::try_from(next.saturating_sub(unread_from)).unwrap_or(usize::MAX)
+    }
+
+    /// Flush the live partitions to segments and move the sequence number
+    /// past the watermark safety gap so the next compaction sees every
+    /// write made so far as collectable.
+    #[cfg(test)]
+    pub fn flush_live_queue(&self) -> Result<(), WintermuteError> {
+        self.firehose_live.rotate_memtable_and_wait()?;
+        self.firehose_live_seq.rotate_memtable_and_wait()?;
+        for i in 0..SNAPSHOT_GC_INTERVAL {
+            self.cursors
+                .insert(b"live_queue_test_scratch", (i as u64).to_be_bytes())?;
+        }
+        self.advance_snapshot_watermark();
+        Ok(())
+    }
+
+    /// lsm-tree only discards a key's shadowed versions below the keyspace
+    /// snapshot watermark, and fjall moves that watermark only on every
+    /// `SNAPSHOT_GC_INTERVAL`th closed snapshot. Plain reads never open one,
+    /// so without this a major compaction would drop the dequeue tombstones
+    /// in the last level and resurrect every value beneath them.
+    fn advance_snapshot_watermark(&self) {
+        for _ in 0..2 * SNAPSHOT_GC_INTERVAL {
+            drop(self.cursors.snapshot());
+        }
+    }
+
+    pub fn live_queue_disk_bytes(&self) -> u64 {
+        self.firehose_live.disk_space() + self.firehose_live_seq.disk_space()
+    }
+
+    /// True when nothing is left to dequeue and the on-disk live partitions
+    /// hold at least `min_bytes`, which at that point is almost entirely
+    /// removal tombstones.
+    pub fn live_queue_needs_compaction(&self, min_bytes: u64) -> bool {
+        self.firehose_live_len().unwrap_or(usize::MAX) == 0
+            && self.live_queue_disk_bytes() >= min_bytes
+    }
+
+    /// Leveled compaction only discards tombstones in the last level, so a
+    /// drained queue otherwise keeps every removal on disk until the lower
+    /// levels overflow, and every full scan has to walk past all of them.
+    pub fn compact_live_queue(&self) -> Result<(), WintermuteError> {
+        self.advance_snapshot_watermark();
+        for partition in [&self.firehose_live, &self.firehose_live_seq] {
+            if partition.segment_count() == 0 {
+                continue;
+            }
+            let before_bytes = partition.disk_space();
+            let start = std::time::Instant::now();
+            partition.major_compact()?;
+            tracing::info!(
+                partition = %partition.name,
+                before_bytes,
+                after_bytes = partition.disk_space(),
+                elapsed_ms = start.elapsed().as_millis(),
+                "live queue partition compacted"
+            );
+        }
+        crate::metrics::STORAGE_LIVE_QUEUE_COMPACTIONS_TOTAL.inc();
+        Ok(())
     }
 
     pub fn firehose_backfill_len(&self) -> Result<usize, WintermuteError> {
@@ -1099,6 +1176,12 @@ mod tests {
     }
 
     #[test]
+    fn persist_flushes_without_error() {
+        let (storage, _dir) = setup_test_storage();
+        storage.persist().unwrap();
+    }
+
+    #[test]
     fn test_firehose_event_roundtrip() {
         let (storage, _dir) = setup_test_storage();
 
@@ -1111,6 +1194,7 @@ mod tests {
                 rev: "rev123".to_owned(),
                 ops: vec![],
                 blocks: vec![],
+                cid: None,
             }),
             identity: None,
             account: None,
@@ -1212,6 +1296,7 @@ mod tests {
             record: Some(serde_json::json!({"test": "data"})),
             indexed_at: "2025-01-01T00:00:00Z".to_owned(),
             rev: "rev123".to_owned(),
+            provenance: None,
         };
 
         storage.enqueue_firehose_live(&job).unwrap();
@@ -1235,6 +1320,7 @@ mod tests {
             record: Some(serde_json::json!({"test": "backfill"})),
             indexed_at: "2025-01-01T00:00:00Z".to_owned(),
             rev: "rev456".to_owned(),
+            provenance: None,
         };
 
         storage.enqueue_firehose_backfill(&job).unwrap();
@@ -1259,6 +1345,7 @@ mod tests {
             record: Some(serde_json::json!({"test": "normal1"})),
             indexed_at: "2025-01-01T00:00:00Z".to_owned(),
             rev: "rev1".to_owned(),
+            provenance: None,
         };
         let normal2 = IndexJob {
             uri: "at://did:plc:normal/app.bsky.feed.post/2".to_owned(),
@@ -1267,6 +1354,7 @@ mod tests {
             record: Some(serde_json::json!({"test": "normal2"})),
             indexed_at: "2025-01-01T00:00:00Z".to_owned(),
             rev: "rev2".to_owned(),
+            provenance: None,
         };
         storage.enqueue_firehose_backfill(&normal1).unwrap();
         storage.enqueue_firehose_backfill(&normal2).unwrap();
@@ -1279,6 +1367,7 @@ mod tests {
             record: Some(serde_json::json!({"test": "priority1"})),
             indexed_at: "2025-01-01T00:00:00Z".to_owned(),
             rev: "rev3".to_owned(),
+            provenance: None,
         };
         let priority2 = IndexJob {
             uri: "at://did:plc:priority/app.bsky.feed.post/2".to_owned(),
@@ -1287,6 +1376,7 @@ mod tests {
             record: Some(serde_json::json!({"test": "priority2"})),
             indexed_at: "2025-01-01T00:00:00Z".to_owned(),
             rev: "rev4".to_owned(),
+            provenance: None,
         };
         storage
             .enqueue_firehose_backfill_priority(&priority1)
@@ -1342,6 +1432,7 @@ mod tests {
                 record: Some(serde_json::json!({"index": i})),
                 indexed_at: "2025-01-01T00:00:00Z".to_owned(),
                 rev: format!("rev{i}"),
+                provenance: None,
             };
             storage.enqueue_firehose_backfill(&job).unwrap();
         }
@@ -1375,6 +1466,7 @@ mod tests {
                 record: Some(serde_json::json!({"index": i})),
                 indexed_at: "2025-01-01T00:00:00Z".to_owned(),
                 rev: format!("rev{i}"),
+                provenance: None,
             };
             storage.enqueue_firehose_backfill(&job).unwrap();
         }
@@ -1430,6 +1522,7 @@ mod tests {
                 record: Some(serde_json::json!({"type": "normal"})),
                 indexed_at: "2025-01-01T00:00:00Z".to_owned(),
                 rev: format!("rev{i}"),
+                provenance: None,
             };
             storage.enqueue_firehose_backfill(&job).unwrap();
         }
@@ -1443,6 +1536,7 @@ mod tests {
                 record: Some(serde_json::json!({"type": "priority"})),
                 indexed_at: "2025-01-01T00:00:00Z".to_owned(),
                 rev: format!("rev_pri{i}"),
+                provenance: None,
             };
             storage.enqueue_firehose_backfill_priority(&job).unwrap();
         }
@@ -1666,7 +1760,61 @@ mod tests {
             record: None,
             indexed_at: "2026-08-01T00:00:00.000Z".to_owned(),
             rev: "3a".to_owned(),
+            provenance: None,
         }
+    }
+
+    #[test]
+    fn live_len_tracks_unread_keys_across_reopen() {
+        let dir = TempDir::with_prefix("wintermute_test_").unwrap();
+        let db_path = dir.path().join("test_db");
+        let storage = Storage::new(Some(db_path.clone())).unwrap();
+        for i in 0..5 {
+            let uri = format!("at://did:plc:a/app.bsky.feed.post/r{i}");
+            storage.enqueue_firehose_live(&live_job(&uri)).unwrap();
+        }
+        assert_eq!(storage.firehose_live_len().unwrap(), 5);
+        assert_eq!(storage.dequeue_firehose_live_batch(2).unwrap().len(), 2);
+        assert_eq!(storage.firehose_live_len().unwrap(), 3);
+        storage.persist().unwrap();
+        drop(storage);
+
+        let storage = Storage::new(Some(db_path)).unwrap();
+        assert_eq!(storage.firehose_live_len().unwrap(), 3);
+        assert_eq!(storage.dequeue_firehose_live_batch(10).unwrap().len(), 3);
+        assert_eq!(storage.firehose_live_len().unwrap(), 0);
+        assert!(storage.dequeue_firehose_live_batch(10).unwrap().is_empty());
+        assert_eq!(storage.firehose_live_len().unwrap(), 0);
+    }
+
+    #[test]
+    fn compaction_drops_tombstones_only_once_drained() {
+        let (storage, _dir) = setup_test_storage();
+        for i in 0..50 {
+            let uri = format!("at://did:plc:a/app.bsky.feed.post/r{i}");
+            storage.enqueue_firehose_live(&live_job(&uri)).unwrap();
+        }
+        storage.flush_live_queue().unwrap();
+        assert!(storage.live_queue_disk_bytes() > 0);
+        assert!(!storage.live_queue_needs_compaction(1));
+
+        assert_eq!(storage.dequeue_firehose_live_batch(100).unwrap().len(), 50);
+        storage.flush_live_queue().unwrap();
+        assert!(storage.live_queue_needs_compaction(1));
+        assert!(!storage.live_queue_needs_compaction(u64::MAX));
+        assert_eq!(storage.firehose_live.segment_count(), 0);
+
+        storage.compact_live_queue().unwrap();
+        assert_eq!(storage.firehose_live_seq.segment_count(), 0);
+        assert_eq!(storage.live_queue_disk_bytes(), 0);
+        assert!(!storage.live_queue_needs_compaction(1));
+
+        storage
+            .enqueue_firehose_live(&live_job("at://did:plc:a/app.bsky.feed.post/after"))
+            .unwrap();
+        let next = storage.dequeue_firehose_live_batch(10).unwrap();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].1.uri, "at://did:plc:a/app.bsky.feed.post/after");
     }
 
     #[test]
@@ -1710,7 +1858,7 @@ mod tests {
         }
         assert_eq!(storage.dequeue_firehose_live_batch(10).unwrap().len(), 3);
         // Simulate the runbook partition wipe: force a cursor far ahead of any
-        // key the recreated partition will produce.
+        // key the recreated partition would otherwise produce.
         storage
             .cursors
             .insert(LIVE_SEQ_READ_CURSOR.as_bytes(), 1_000_000u64.to_be_bytes())
@@ -1721,12 +1869,43 @@ mod tests {
         storage
             .enqueue_firehose_live(&live_job("at://did:plc:a/app.bsky.feed.post/fresh"))
             .unwrap();
-        // Fresh key sorts below the stale cursor: first dequeue detects and
-        // resets, second dequeue returns the job.
-        let first = storage.dequeue_firehose_live_batch(10).unwrap();
-        let second = storage.dequeue_firehose_live_batch(10).unwrap();
-        let total = first.len() + second.len();
-        assert_eq!(total, 1, "job behind a stale cursor must not be skipped");
+        let batch = storage.dequeue_firehose_live_batch(10).unwrap();
+        assert_eq!(
+            batch.len(),
+            1,
+            "job behind a stale cursor must not be skipped"
+        );
+        assert_eq!(batch[0].0, 1_000_001u64.to_be_bytes());
+        assert!(storage.dequeue_firehose_live_batch(10).unwrap().is_empty());
+        drop(dir);
+    }
+
+    #[test]
+    fn drained_queue_resumes_after_reopen() {
+        let dir = TempDir::with_prefix("wintermute_test_").unwrap();
+        let db_path = dir.path().join("test_db");
+        let storage = Storage::new(Some(db_path.clone())).unwrap();
+        for i in 0..3 {
+            storage
+                .enqueue_firehose_live(&live_job(&format!(
+                    "at://did:plc:a/app.bsky.feed.post/d{i}"
+                )))
+                .unwrap();
+        }
+        assert_eq!(storage.dequeue_firehose_live_batch(10).unwrap().len(), 3);
+        assert!(storage.dequeue_firehose_live_batch(10).unwrap().is_empty());
+        drop(storage);
+
+        // Every key is a tombstone, so the partition reports no last key; the
+        // next seq must still continue past the persisted cursor.
+        let storage = Storage::new(Some(db_path)).unwrap();
+        storage
+            .enqueue_firehose_live(&live_job("at://did:plc:a/app.bsky.feed.post/d3"))
+            .unwrap();
+        let batch = storage.dequeue_firehose_live_batch(10).unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].0, 3u64.to_be_bytes());
+        assert_eq!(batch[0].1.uri, "at://did:plc:a/app.bsky.feed.post/d3");
         drop(dir);
     }
 
@@ -1734,11 +1913,8 @@ mod tests {
     fn live_queue_dequeues_in_arrival_order() {
         let (storage, _dir) = setup_test_storage();
         for i in 0..5 {
-            storage
-                .enqueue_firehose_live(&live_job(&format!(
-                    "at://did:plc:a/app.bsky.feed.post/r{i}"
-                )))
-                .unwrap();
+            let uri = format!("at://did:plc:a/app.bsky.feed.post/r{i}");
+            storage.enqueue_firehose_live(&live_job(&uri)).unwrap();
         }
         let batch = storage.dequeue_firehose_live_batch(10).unwrap();
         assert_eq!(batch.len(), 5);

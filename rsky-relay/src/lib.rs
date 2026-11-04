@@ -23,7 +23,6 @@
     clippy::print_stdout,
     clippy::renamed_function_params,
     clippy::str_to_string,
-    clippy::string_to_string,
     clippy::unused_result_ok,
     clippy::unwrap_used
 )]
@@ -42,7 +41,6 @@
         clippy::redundant_pub_crate,
         clippy::min_ident_chars,
         clippy::str_to_string,
-        clippy::string_to_string,
         clippy::tests_outside_test_module,
         clippy::let_underscore_must_use,
         clippy::print_stdout,

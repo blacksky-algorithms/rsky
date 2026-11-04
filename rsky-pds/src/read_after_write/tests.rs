@@ -6,32 +6,40 @@ use crate::apis::app::bsky::actor::get_profile::get_profile_munge;
 use crate::apis::app::bsky::actor::get_profiles::get_profiles_munge;
 use crate::apis::app::bsky::feed::get_actor_likes::get_author_munge as get_actor_likes_munge;
 use crate::apis::app::bsky::feed::get_author_feed::get_author_munge as get_author_feed_munge;
-use crate::apis::app::bsky::feed::get_post_thread::get_post_thread_munge;
+use crate::apis::app::bsky::feed::get_post_thread::{get_post_thread_munge, thread_post_view};
 use crate::apis::app::bsky::feed::get_timeline::get_timeline_munge;
 use crate::background::BackgroundQueue;
 use crate::config::ActorStoreConfig;
+use crate::read_after_write::feed_json;
 use crate::read_after_write::types::{LocalRecords, RecordDescript};
 use crate::read_after_write::viewer::LocalViewer;
+use atrium_api::client::AtpServiceClient;
+use atrium_xrpc_client::reqwest::ReqwestClientBuilder;
 use chrono::{DateTime, Utc};
 use lexicon_cid::Cid;
 use rsky_lexicon::app::bsky::actor::{
     GetProfilesOutput, Profile, ProfileViewBasic, ProfileViewDetailed,
 };
 use rsky_lexicon::app::bsky::embed::external::{External, ExternalObject};
-use rsky_lexicon::app::bsky::embed::images::{Image, Images};
+use rsky_lexicon::app::bsky::embed::gallery::{Gallery, GalleryItem, Image as GalleryImage};
+use rsky_lexicon::app::bsky::embed::images::{AspectRatio, Image, Images};
 use rsky_lexicon::app::bsky::embed::record::Record as RecordEmbed;
 use rsky_lexicon::app::bsky::embed::record_with_media::RecordWithMedia;
 use rsky_lexicon::app::bsky::embed::video::Video;
 use rsky_lexicon::app::bsky::embed::{EmbedViews, Embeds, MediaUnion};
 use rsky_lexicon::app::bsky::feed::{
-    AuthorFeed, FeedViewPost, GetPostThreadOutput, NotFoundPost, Post, PostView, ReplyRef,
-    ThreadViewPost, ThreadViewPostEnum,
+    FeedViewPost, Post, PostView, ReplyRef, ThreadViewPost, ThreadViewPostEnum,
 };
 use rsky_lexicon::com::atproto::label::Label;
 use rsky_lexicon::com::atproto::repo::{Blob, StrongRef};
 use rsky_syntax::aturi::AtUri;
+use serde_json::{json, Value};
+use std::future::Future;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 const TEST_DID: &str = "did:example:alice";
 const OTHER_DID: &str = "did:example:bob";
@@ -41,12 +49,20 @@ const TEST_CID: &str = "bafkreibjfgx2gprinfvicegelk5kosd6y2frmqpqzwqkg7usac74l3t
 const TEST_SECRET_HEX: &str = "1d2f8064213bd212453fa93943c084dbbf42104d02f1f02b23a638f9a48f925a";
 
 async fn test_viewer() -> (tempfile::TempDir, LocalViewer) {
+    test_viewer_with_appview(None).await
+}
+
+async fn test_viewer_with_appview(appview: Option<String>) -> (tempfile::TempDir, LocalViewer) {
     let dir = tempfile::tempdir().unwrap();
     let cfg = ActorStoreConfig {
         directory: dir.path().join("actors").to_string_lossy().to_string(),
         cache_size: 4,
     };
-    let store = ActorStore::new(&cfg, BackgroundQueue::default());
+    let lifecycle =
+        crate::lifecycle::LifecycleStore::open(dir.path().join("rsky/lifecycle.sqlite"))
+            .await
+            .unwrap();
+    let store = ActorStore::new(&cfg, BackgroundQueue::default(), lifecycle);
     let secp = secp256k1::Secp256k1::new();
     let secret = secp256k1::SecretKey::from_slice(&hex::decode(TEST_SECRET_HEX).unwrap()).unwrap();
     let keypair = secp256k1::Keypair::from_secret_key(&secp, &secret);
@@ -67,13 +83,19 @@ async fn test_viewer() -> (tempfile::TempDir, LocalViewer) {
     .await
     .unwrap();
     let account_manager = AccountManager::new(account_db);
+    let appview_agent = appview
+        .as_ref()
+        .map(|url| AtpServiceClient::new(ReqwestClientBuilder::new(url).build()));
+    let appview_did = appview
+        .as_ref()
+        .map(|_| "did:web:appview.invalid".to_owned());
     let viewer = LocalViewer::new(
         reader,
         account_manager,
         TEST_HOSTNAME.to_owned(),
-        None,
-        None,
-        None,
+        appview_agent,
+        appview,
+        appview_did,
         None,
     );
     (dir, viewer)
@@ -242,7 +264,9 @@ async fn profile_munge_without_local_profile_returns_original() {
             "2024-01-02T00:00:00.000Z",
         )],
     );
-    let munged = get_profile_munge(viewer, original.clone(), local, TEST_DID.to_owned()).unwrap();
+    let munged = get_profile_munge(viewer, original.clone(), local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged, original);
 }
 
@@ -254,7 +278,9 @@ async fn profile_munge_skips_profiles_of_other_accounts() {
         Some(profile_descript(profile_record("New", "new bio"))),
         vec![],
     );
-    let munged = get_profile_munge(viewer, original.clone(), local, TEST_DID.to_owned()).unwrap();
+    let munged = get_profile_munge(viewer, original.clone(), local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged, original);
 }
 
@@ -269,7 +295,9 @@ async fn profile_munge_overlays_record_fields_and_counts_local_posts() {
             post_descript("b", post_record("two"), "2024-01-03T00:00:00.000Z"),
         ],
     );
-    let munged = get_profile_munge(viewer, original, local, TEST_DID.to_owned()).unwrap();
+    let munged = get_profile_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged.display_name, Some("New Name".to_owned()));
     assert_eq!(munged.description, Some("new bio".to_owned()));
     let avatar = munged.avatar.expect("avatar url");
@@ -303,7 +331,9 @@ async fn profile_munge_clears_fields_missing_from_local_record() {
         created_at: Some(fixed_datetime()),
     };
     let local = local_records(Some(profile_descript(record)), vec![]);
-    let munged = get_profile_munge(viewer, original, local, TEST_DID.to_owned()).unwrap();
+    let munged = get_profile_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged.display_name, None);
     assert_eq!(munged.description, None);
     assert_eq!(munged.avatar, None);
@@ -327,12 +357,102 @@ async fn profiles_munge_updates_only_the_requester() {
             "2024-01-02T00:00:00.000Z",
         )],
     );
-    let munged = get_profiles_munge(viewer, original, local, TEST_DID.to_owned()).unwrap();
+    let munged = get_profiles_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged.profiles[0].display_name, Some("Old Name".to_owned()));
     assert_eq!(munged.profiles[0].posts_count, Some(10));
     assert_eq!(munged.profiles[1].display_name, Some("New Name".to_owned()));
     assert_eq!(munged.profiles[1].description, Some("new bio".to_owned()));
     assert_eq!(munged.profiles[1].posts_count, Some(11));
+}
+
+// Feed fixtures as the appview sends them
+// ---------------------------------------
+
+fn feed_item_json(did: &str, uri: &str, indexed_at: &str) -> Value {
+    serde_json::to_value(feed_item(did, uri, indexed_at)).unwrap()
+}
+
+fn author_feed_json(cursor: Option<&str>, feed: Vec<Value>) -> Value {
+    json!({ "cursor": cursor, "feed": feed })
+}
+
+/// A page item carrying everything the typed structs used to drop.
+fn rich_item(did: &str, uri: &str, indexed_at: &str) -> Value {
+    let mut item = feed_item_json(did, uri, indexed_at);
+    item["post"]["author"]["viewer"] = json!({ "mutedOnlyReposts": true, "following": "at://x" });
+    item["post"]["author"]["verification"] = json!({ "verifiedStatus": "valid" });
+    item["post"]["viewer"] = json!({
+        "repost": format!("at://{TEST_DID}/app.bsky.feed.repost/r"),
+        "like": format!("at://{TEST_DID}/app.bsky.feed.like/l"),
+        "threadMuted": true
+    });
+    item["post"]["quoteCount"] = json!(7);
+    item["post"]["bookmarkCount"] = json!(1);
+    item["post"]["communitySpace"] = json!("at://did:plc:c/space/community.blacksky.feed/main");
+    item["feedContext"] = json!("ctx");
+    item["unknownItemField"] = json!({ "nested": [1, 2, 3] });
+    item
+}
+
+fn repost_reason(by: &str) -> Value {
+    json!({
+        "$type": "app.bsky.feed.defs#reasonRepost",
+        "by": { "did": by, "handle": TEST_HANDLE, "viewer": { "mutedOnlyReposts": true } },
+        "uri": format!("at://{by}/app.bsky.feed.repost/3kreason"),
+        "cid": TEST_CID,
+        "indexedAt": "2024-01-01T00:00:00.000Z"
+    })
+}
+
+fn reposted_item(by: &str, author: &str, uri: &str, indexed_at: &str) -> Value {
+    let mut item = rich_item(author, uri, indexed_at);
+    item["reason"] = repost_reason(by);
+    item
+}
+
+fn pinned_item(did: &str, uri: &str, indexed_at: &str) -> Value {
+    let mut item = feed_item_json(did, uri, indexed_at);
+    item["reason"] = json!({ "$type": "app.bsky.feed.defs#reasonPin" });
+    item
+}
+
+fn post_uri(item: &Value) -> &str {
+    item.pointer("/post/uri").and_then(Value::as_str).unwrap()
+}
+
+fn thread_node(did: &str, uri: &str, indexed_at: &str) -> Value {
+    let mut node = serde_json::to_value(ThreadViewPostEnum::ThreadViewPost(ThreadViewPost {
+        post: post_view(did, uri, indexed_at),
+        parent: None,
+        replies: None,
+    }))
+    .unwrap();
+    node["post"]["viewer"] = json!({ "repost": "at://did:plc:v/app.bsky.feed.repost/x" });
+    node["post"]["quoteCount"] = json!(9);
+    node
+}
+
+fn reply_record(text: &str, root_uri: &str, parent_uri: &str) -> Post {
+    let mut record = post_record(text);
+    record.reply = Some(ReplyRef {
+        root: StrongRef {
+            uri: root_uri.to_owned(),
+            cid: TEST_CID.to_owned(),
+        },
+        parent: StrongRef {
+            uri: parent_uri.to_owned(),
+            cid: TEST_CID.to_owned(),
+        },
+    });
+    record
+}
+
+fn assert_wire_round_trip(value: &Value) {
+    let bytes = serde_json::to_vec(value).unwrap();
+    let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(&parsed, value);
 }
 
 // getAuthorFeed munge
@@ -341,14 +461,14 @@ async fn profiles_munge_updates_only_the_requester() {
 #[tokio::test(flavor = "multi_thread")]
 async fn author_feed_munge_leaves_foreign_feeds_untouched() {
     let (_dir, viewer) = test_viewer().await;
-    let original = AuthorFeed {
-        cursor: None,
-        feed: vec![feed_item(
+    let original = author_feed_json(
+        None,
+        vec![feed_item_json(
             OTHER_DID,
             &format!("at://{OTHER_DID}/app.bsky.feed.post/1"),
             "2024-01-01T00:00:00.000Z",
         )],
-    };
+    );
     let local = local_records(
         Some(profile_descript(profile_record("New Name", "new bio"))),
         vec![post_descript(
@@ -357,8 +477,20 @@ async fn author_feed_munge_leaves_foreign_feeds_untouched() {
             "2024-01-02T00:00:00.000Z",
         )],
     );
-    let munged =
-        get_author_feed_munge(viewer, original.clone(), local, TEST_DID.to_owned()).unwrap();
+    let munged = get_author_feed_munge(viewer, original.clone(), local, TEST_DID.to_owned())
+        .await
+        .unwrap();
+    assert_eq!(munged, original);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn author_feed_munge_passes_through_a_body_without_a_feed() {
+    let (_dir, viewer) = test_viewer().await;
+    let original = json!({ "unexpected": true });
+    let local = local_records(None, vec![]);
+    let munged = get_author_feed_munge(viewer, original.clone(), local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged, original);
 }
 
@@ -366,14 +498,8 @@ async fn author_feed_munge_leaves_foreign_feeds_untouched() {
 async fn author_feed_munge_updates_author_and_inserts_local_posts() {
     let (_dir, viewer) = test_viewer().await;
     let upstream_uri = format!("at://{TEST_DID}/app.bsky.feed.post/upstream");
-    let original = AuthorFeed {
-        cursor: Some("cursor".to_owned()),
-        feed: vec![feed_item(
-            TEST_DID,
-            &upstream_uri,
-            "2024-01-01T00:00:00.000Z",
-        )],
-    };
+    let upstream = rich_item(TEST_DID, &upstream_uri, "2024-01-01T00:00:00.000Z");
+    let original = author_feed_json(Some("cursor"), vec![upstream.clone()]);
     let local_uri = format!("at://{TEST_DID}/app.bsky.feed.post/local");
     let local = local_records(
         Some(profile_descript(profile_record("New Name", "new bio"))),
@@ -383,34 +509,59 @@ async fn author_feed_munge_updates_author_and_inserts_local_posts() {
             "2024-01-02T00:00:00.000Z",
         )],
     );
-    let munged = get_author_feed_munge(viewer, original, local, TEST_DID.to_owned()).unwrap();
-    assert_eq!(munged.cursor, Some("cursor".to_owned()));
-    assert_eq!(munged.feed.len(), 2);
+    let munged = get_author_feed_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
+    assert_eq!(munged["cursor"], json!("cursor"));
+    let feed = munged["feed"].as_array().unwrap();
+    assert_eq!(feed.len(), 2);
     // the newer local post is inserted ahead of the upstream one
-    assert_eq!(munged.feed[0].post.uri, local_uri);
-    assert_eq!(munged.feed[0].post.author.did, TEST_DID);
-    assert_eq!(munged.feed[0].post.reply_count, Some(0));
-    assert_eq!(munged.feed[0].post.repost_count, Some(0));
-    assert_eq!(munged.feed[0].post.like_count, Some(0));
-    // the upstream item had its author refreshed from the local profile
-    assert_eq!(munged.feed[1].post.uri, upstream_uri);
-    assert_eq!(
-        munged.feed[1].post.author.display_name,
-        Some("New Name".to_owned())
-    );
+    assert_eq!(post_uri(&feed[0]), local_uri);
+    assert_eq!(feed[0]["post"]["author"]["did"], json!(TEST_DID));
+    assert_eq!(feed[0]["post"]["replyCount"], json!(0));
+    assert_eq!(feed[0]["post"]["repostCount"], json!(0));
+    assert_eq!(feed[0]["post"]["likeCount"], json!(0));
+    // the upstream item had exactly two author keys refreshed from the local
+    // profile and kept everything else the appview sent
+    let mut expected = upstream;
+    expected["post"]["author"]["displayName"] = json!("New Name");
+    let avatar = feed[1]["post"]["author"]["avatar"].as_str().unwrap();
+    assert!(avatar.contains(TEST_HOSTNAME) && avatar.contains(TEST_CID));
+    expected["post"]["author"]["avatar"] = json!(avatar);
+    assert_eq!(feed[1], expected);
+    assert_wire_round_trip(&munged);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn author_feed_munge_removes_author_keys_the_pending_profile_cleared() {
+    let (_dir, viewer) = test_viewer().await;
+    let upstream_uri = format!("at://{TEST_DID}/app.bsky.feed.post/upstream");
+    let mut upstream = rich_item(TEST_DID, &upstream_uri, "2024-01-01T00:00:00.000Z");
+    upstream["post"]["author"]["avatar"] = json!("https://cdn.example/old.jpg");
+    let original = author_feed_json(None, vec![upstream]);
+    let mut cleared = profile_record("Only Name", "bio");
+    cleared.avatar = None;
+    let local = local_records(Some(profile_descript(cleared)), vec![]);
+    let munged = get_author_feed_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
+    let author = &munged["feed"][0]["post"]["author"];
+    assert_eq!(author["displayName"], json!("Only Name"));
+    assert!(author.get("avatar").is_none());
+    assert_eq!(author["viewer"]["mutedOnlyReposts"], json!(true));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn author_feed_munge_inserts_posts_without_local_profile() {
     let (_dir, viewer) = test_viewer().await;
-    let original = AuthorFeed {
-        cursor: None,
-        feed: vec![feed_item(
+    let original = author_feed_json(
+        None,
+        vec![feed_item_json(
             TEST_DID,
             &format!("at://{TEST_DID}/app.bsky.feed.post/upstream"),
             "2024-01-01T00:00:00.000Z",
         )],
-    };
+    );
     let local = local_records(
         None,
         vec![post_descript(
@@ -419,12 +570,139 @@ async fn author_feed_munge_inserts_posts_without_local_profile() {
             "2024-01-02T00:00:00.000Z",
         )],
     );
-    let munged = get_author_feed_munge(viewer, original, local, TEST_DID.to_owned()).unwrap();
-    assert_eq!(munged.feed.len(), 2);
+    let munged = get_author_feed_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
+    let feed = munged["feed"].as_array().unwrap();
+    assert_eq!(feed.len(), 2);
     assert_eq!(
-        munged.feed[0].post.uri,
+        post_uri(&feed[0]),
         format!("at://{TEST_DID}/app.bsky.feed.post/local")
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn author_feed_munge_keeps_a_pinned_item_first() {
+    let (_dir, viewer) = test_viewer().await;
+    let pin_uri = format!("at://{TEST_DID}/app.bsky.feed.post/pin");
+    let older_uri = format!("at://{TEST_DID}/app.bsky.feed.post/older");
+    let original = author_feed_json(
+        None,
+        vec![
+            pinned_item(TEST_DID, &pin_uri, "2023-06-01T00:00:00.000Z"),
+            feed_item_json(TEST_DID, &older_uri, "2024-01-01T00:00:00.000Z"),
+        ],
+    );
+    let local = local_records(
+        None,
+        vec![post_descript(
+            "local",
+            post_record("fresh"),
+            "2024-01-02T00:00:00.000Z",
+        )],
+    );
+    let munged = get_author_feed_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
+    let uris: Vec<&str> = munged["feed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(post_uri)
+        .collect();
+    assert_eq!(
+        uris,
+        vec![
+            pin_uri.as_str(),
+            &format!("at://{TEST_DID}/app.bsky.feed.post/local"),
+            older_uri.as_str()
+        ]
+    );
+    assert_eq!(
+        munged["feed"][0]["reason"]["$type"],
+        json!("app.bsky.feed.defs#reasonPin")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn author_feed_munge_preserves_reposts_and_viewer_state() {
+    let (_dir, viewer) = test_viewer().await;
+    let original = author_feed_json(
+        Some("cursor"),
+        vec![
+            reposted_item(
+                TEST_DID,
+                OTHER_DID,
+                &format!("at://{OTHER_DID}/app.bsky.feed.post/reposted"),
+                "2024-01-03T00:00:00.000Z",
+            ),
+            rich_item(
+                TEST_DID,
+                &format!("at://{TEST_DID}/app.bsky.feed.post/own"),
+                "2024-01-01T00:00:00.000Z",
+            ),
+        ],
+    );
+    // a pending repost bumps the local count without carrying a post
+    let local = LocalRecords {
+        count: 1,
+        profile: None,
+        posts: vec![],
+    };
+    let munged = get_author_feed_munge(viewer, original.clone(), local, TEST_DID.to_owned())
+        .await
+        .unwrap();
+    assert_eq!(munged, original);
+    assert_wire_round_trip(&munged);
+}
+
+#[test]
+fn insert_feed_item_appends_when_nothing_is_older() {
+    let newer = feed_item_json(
+        TEST_DID,
+        &format!("at://{TEST_DID}/app.bsky.feed.post/newer"),
+        "2024-01-05T00:00:00.000Z",
+    );
+    let older = feed_item_json(
+        TEST_DID,
+        &format!("at://{TEST_DID}/app.bsky.feed.post/older"),
+        "2024-01-01T00:00:00.000Z",
+    );
+    let mut feed = vec![];
+    feed_json::insert_feed_item(&mut feed, older.clone());
+    assert_eq!(feed, vec![older.clone()]);
+    feed_json::insert_feed_item(&mut feed, newer.clone());
+    assert_eq!(feed, vec![newer, older]);
+}
+
+#[test]
+fn is_users_feed_reads_the_item_actor() {
+    let own = feed_item_json(
+        TEST_DID,
+        &format!("at://{TEST_DID}/app.bsky.feed.post/a"),
+        "2024-01-01T00:00:00.000Z",
+    );
+    let other = feed_item_json(
+        OTHER_DID,
+        &format!("at://{OTHER_DID}/app.bsky.feed.post/b"),
+        "2024-01-01T00:00:00.000Z",
+    );
+    let reposted = reposted_item(
+        TEST_DID,
+        OTHER_DID,
+        &format!("at://{OTHER_DID}/app.bsky.feed.post/c"),
+        "2024-01-01T00:00:00.000Z",
+    );
+    let pinned = pinned_item(
+        TEST_DID,
+        &format!("at://{TEST_DID}/app.bsky.feed.post/d"),
+        "2024-01-01T00:00:00.000Z",
+    );
+    assert!(feed_json::is_users_feed(&[own], TEST_DID));
+    assert!(feed_json::is_users_feed(&[reposted], TEST_DID));
+    assert!(feed_json::is_users_feed(&[pinned], TEST_DID));
+    assert!(!feed_json::is_users_feed(&[other], TEST_DID));
+    assert!(!feed_json::is_users_feed(&[], TEST_DID));
 }
 
 // getActorLikes munge
@@ -433,14 +711,17 @@ async fn author_feed_munge_inserts_posts_without_local_profile() {
 #[tokio::test(flavor = "multi_thread")]
 async fn actor_likes_munge_updates_profile_but_never_inserts_posts() {
     let (_dir, viewer) = test_viewer().await;
-    let original = AuthorFeed {
-        cursor: None,
-        feed: vec![feed_item(
-            TEST_DID,
-            &format!("at://{TEST_DID}/app.bsky.feed.post/liked"),
-            "2024-01-01T00:00:00.000Z",
-        )],
-    };
+    let liked = rich_item(
+        TEST_DID,
+        &format!("at://{TEST_DID}/app.bsky.feed.post/liked"),
+        "2024-01-01T00:00:00.000Z",
+    );
+    let foreign = rich_item(
+        OTHER_DID,
+        &format!("at://{OTHER_DID}/app.bsky.feed.post/theirs"),
+        "2024-01-01T00:00:00.000Z",
+    );
+    let original = author_feed_json(None, vec![liked.clone(), foreign.clone()]);
     let local = local_records(
         Some(profile_descript(profile_record("New Name", "new bio"))),
         vec![post_descript(
@@ -449,12 +730,34 @@ async fn actor_likes_munge_updates_profile_but_never_inserts_posts() {
             "2024-01-02T00:00:00.000Z",
         )],
     );
-    let munged = get_actor_likes_munge(viewer, original, local, TEST_DID.to_owned()).unwrap();
-    assert_eq!(munged.feed.len(), 1);
-    assert_eq!(
-        munged.feed[0].post.author.display_name,
-        Some("New Name".to_owned())
+    let munged = get_actor_likes_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
+    let feed = munged["feed"].as_array().unwrap();
+    assert_eq!(feed.len(), 2);
+    assert_eq!(feed[0]["post"]["author"]["displayName"], json!("New Name"));
+    assert_eq!(feed[0]["post"]["quoteCount"], json!(7));
+    assert_eq!(feed[0]["post"]["viewer"], liked["post"]["viewer"]);
+    assert_eq!(feed[0]["unknownItemField"], liked["unknownItemField"]);
+    assert_eq!(feed[1], foreign);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn actor_likes_munge_without_local_profile_returns_original() {
+    let (_dir, viewer) = test_viewer().await;
+    let original = author_feed_json(
+        None,
+        vec![rich_item(
+            TEST_DID,
+            &format!("at://{TEST_DID}/app.bsky.feed.post/liked"),
+            "2024-01-01T00:00:00.000Z",
+        )],
     );
+    let local = local_records(None, vec![]);
+    let munged = get_actor_likes_munge(viewer, original.clone(), local, TEST_DID.to_owned())
+        .await
+        .unwrap();
+    assert_eq!(munged, original);
 }
 
 // getTimeline munge
@@ -463,14 +766,14 @@ async fn actor_likes_munge_updates_profile_but_never_inserts_posts() {
 #[tokio::test(flavor = "multi_thread")]
 async fn timeline_munge_inserts_local_posts_in_order() {
     let (_dir, viewer) = test_viewer().await;
-    let original = AuthorFeed {
-        cursor: Some("cursor".to_owned()),
-        feed: vec![feed_item(
+    let original = author_feed_json(
+        Some("cursor"),
+        vec![feed_item_json(
             OTHER_DID,
             &format!("at://{OTHER_DID}/app.bsky.feed.post/1"),
             "2024-01-01T00:00:00.000Z",
         )],
-    };
+    );
     let local = local_records(
         None,
         vec![
@@ -478,34 +781,37 @@ async fn timeline_munge_inserts_local_posts_in_order() {
             post_descript("b", post_record("newer"), "2024-01-03T00:00:00.000Z"),
         ],
     );
-    let munged = get_timeline_munge(viewer, original, local, TEST_DID.to_owned()).unwrap();
-    assert_eq!(munged.cursor, Some("cursor".to_owned()));
-    assert_eq!(munged.feed.len(), 3);
+    let munged = get_timeline_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
+    assert_eq!(munged["cursor"], json!("cursor"));
+    let uris: Vec<&str> = munged["feed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(post_uri)
+        .collect();
     assert_eq!(
-        munged.feed[0].post.uri,
-        format!("at://{TEST_DID}/app.bsky.feed.post/b")
-    );
-    assert_eq!(
-        munged.feed[1].post.uri,
-        format!("at://{TEST_DID}/app.bsky.feed.post/a")
-    );
-    assert_eq!(
-        munged.feed[2].post.uri,
-        format!("at://{OTHER_DID}/app.bsky.feed.post/1")
+        uris,
+        vec![
+            format!("at://{TEST_DID}/app.bsky.feed.post/b"),
+            format!("at://{TEST_DID}/app.bsky.feed.post/a"),
+            format!("at://{OTHER_DID}/app.bsky.feed.post/1"),
+        ]
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn timeline_munge_skips_posts_older_than_the_feed_window() {
     let (_dir, viewer) = test_viewer().await;
-    let original = AuthorFeed {
-        cursor: None,
-        feed: vec![feed_item(
+    let original = author_feed_json(
+        None,
+        vec![feed_item_json(
             OTHER_DID,
             &format!("at://{OTHER_DID}/app.bsky.feed.post/1"),
             "2024-01-05T00:00:00.000Z",
         )],
-    };
+    );
     let local = local_records(
         None,
         vec![post_descript(
@@ -514,7 +820,64 @@ async fn timeline_munge_skips_posts_older_than_the_feed_window() {
             "2024-01-02T00:00:00.000Z",
         )],
     );
-    let munged = get_timeline_munge(viewer, original.clone(), local, TEST_DID.to_owned()).unwrap();
+    let munged = get_timeline_munge(viewer, original.clone(), local, TEST_DID.to_owned())
+        .await
+        .unwrap();
+    assert_eq!(munged, original);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn timeline_munge_keeps_reposts_pins_and_viewer_state_while_inserting() {
+    let (_dir, viewer) = test_viewer().await;
+    let reposted = reposted_item(
+        OTHER_DID,
+        TEST_DID,
+        &format!("at://{TEST_DID}/app.bsky.feed.post/reposted"),
+        "2024-01-04T00:00:00.000Z",
+    );
+    let pinned = pinned_item(
+        OTHER_DID,
+        &format!("at://{OTHER_DID}/app.bsky.feed.post/pinned"),
+        "2024-01-01T00:00:00.000Z",
+    );
+    let original = author_feed_json(None, vec![reposted.clone(), pinned.clone()]);
+    let local = local_records(
+        None,
+        vec![post_descript(
+            "local",
+            post_record("fresh"),
+            "2024-01-02T00:00:00.000Z",
+        )],
+    );
+    let munged = get_timeline_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
+    let feed = munged["feed"].as_array().unwrap();
+    assert_eq!(feed.len(), 3);
+    assert_eq!(feed[0], reposted);
+    assert_eq!(
+        post_uri(&feed[1]),
+        format!("at://{TEST_DID}/app.bsky.feed.post/local")
+    );
+    assert_eq!(feed[2], pinned);
+    assert_wire_round_trip(&munged);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn timeline_munge_passes_through_a_body_without_a_feed() {
+    let (_dir, viewer) = test_viewer().await;
+    let original = json!({ "unexpected": true });
+    let local = local_records(
+        None,
+        vec![post_descript(
+            "a",
+            post_record("hi"),
+            "2024-01-02T00:00:00.000Z",
+        )],
+    );
+    let munged = get_timeline_munge(viewer, original.clone(), local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged, original);
 }
 
@@ -525,54 +888,99 @@ async fn timeline_munge_skips_posts_older_than_the_feed_window() {
 async fn post_thread_munge_grafts_local_replies_onto_the_thread() {
     let (_dir, viewer) = test_viewer().await;
     let root_uri = format!("at://{TEST_DID}/app.bsky.feed.post/root");
-    let original = GetPostThreadOutput {
-        thread: ThreadViewPostEnum::ThreadViewPost(ThreadViewPost {
-            post: post_view(TEST_DID, &root_uri, "2024-01-01T00:00:00.000Z"),
-            parent: None,
-            replies: None,
-        }),
-    };
-    let mut reply = post_record("local reply");
-    reply.reply = Some(ReplyRef {
-        root: StrongRef {
-            uri: root_uri.clone(),
-            cid: TEST_CID.to_owned(),
-        },
-        parent: StrongRef {
-            uri: root_uri.clone(),
-            cid: TEST_CID.to_owned(),
-        },
-    });
+    let root = thread_node(TEST_DID, &root_uri, "2024-01-01T00:00:00.000Z");
+    let original = json!({ "thread": root.clone() });
     let local = local_records(
         None,
-        vec![post_descript("reply", reply, "2024-01-02T00:00:00.000Z")],
+        vec![post_descript(
+            "reply",
+            reply_record("local reply", &root_uri, &root_uri),
+            "2024-01-02T00:00:00.000Z",
+        )],
     );
-    let munged = get_post_thread_munge(viewer, original, local, TEST_DID.to_owned()).unwrap();
-    let ThreadViewPostEnum::ThreadViewPost(thread) = munged.thread else {
-        panic!("expected thread view post");
-    };
-    assert_eq!(thread.post.uri, root_uri);
-    let replies = thread.replies.expect("grafted replies");
+    let munged = get_post_thread_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
+    let thread = &munged["thread"];
+    assert_eq!(thread["$type"], json!("app.bsky.feed.defs#threadViewPost"));
+    assert_eq!(thread["post"], root["post"]);
+    let replies = thread["replies"].as_array().unwrap();
     assert_eq!(replies.len(), 1);
-    let ThreadViewPostEnum::ThreadViewPost(ref grafted) = **replies.first().unwrap() else {
-        panic!("expected grafted thread view post");
-    };
     assert_eq!(
-        grafted.post.uri,
+        replies[0]["$type"],
+        json!("app.bsky.feed.defs#threadViewPost")
+    );
+    assert_eq!(
+        post_uri(&replies[0]),
         format!("at://{TEST_DID}/app.bsky.feed.post/reply")
     );
-    assert_eq!(grafted.post.author.did, TEST_DID);
+    assert_eq!(replies[0]["post"]["author"]["did"], json!(TEST_DID));
+    assert_wire_round_trip(&munged);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn post_thread_munge_prepends_replies_and_reaches_nested_parents() {
+    let (_dir, viewer) = test_viewer().await;
+    let root_uri = format!("at://{TEST_DID}/app.bsky.feed.post/root");
+    let child_uri = format!("at://{OTHER_DID}/app.bsky.feed.post/child");
+    let sibling_uri = format!("at://{OTHER_DID}/app.bsky.feed.post/sibling");
+    let mut root = thread_node(TEST_DID, &root_uri, "2024-01-01T00:00:00.000Z");
+    let child = thread_node(OTHER_DID, &child_uri, "2024-01-01T01:00:00.000Z");
+    let sibling = thread_node(OTHER_DID, &sibling_uri, "2024-01-01T02:00:00.000Z");
+    root["replies"] = json!([child, sibling]);
+    let original = json!({ "thread": root });
+    let local = local_records(
+        None,
+        vec![
+            post_descript(
+                "to-root",
+                reply_record("to root", &root_uri, &root_uri),
+                "2024-01-02T00:00:00.000Z",
+            ),
+            post_descript(
+                "to-child",
+                reply_record("to child", &root_uri, &child_uri),
+                "2024-01-02T00:00:00.000Z",
+            ),
+        ],
+    );
+    let munged = get_post_thread_munge(viewer, original, local, TEST_DID.to_owned())
+        .await
+        .unwrap();
+    let replies = munged["thread"]["replies"].as_array().unwrap();
+    let uris: Vec<&str> = replies.iter().map(post_uri).collect();
+    assert_eq!(
+        uris,
+        vec![
+            format!("at://{TEST_DID}/app.bsky.feed.post/to-root"),
+            child_uri.clone(),
+            sibling_uri.clone(),
+        ]
+    );
+    let nested = replies[1]["replies"].as_array().unwrap();
+    assert_eq!(nested.len(), 1);
+    assert_eq!(
+        post_uri(&nested[0]),
+        format!("at://{TEST_DID}/app.bsky.feed.post/to-child")
+    );
+    // the anchor and the existing children keep their viewer state and counters
+    assert_eq!(munged["thread"]["post"]["quoteCount"], json!(9));
+    assert_eq!(
+        replies[2]["post"]["viewer"]["repost"],
+        json!("at://did:plc:v/app.bsky.feed.repost/x")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn post_thread_munge_passes_through_not_found_threads() {
     let (_dir, viewer) = test_viewer().await;
-    let original = GetPostThreadOutput {
-        thread: ThreadViewPostEnum::NotFoundPost(NotFoundPost {
-            uri: format!("at://{TEST_DID}/app.bsky.feed.post/missing"),
-            not_found: true,
-        }),
-    };
+    let original = json!({
+        "thread": {
+            "$type": "app.bsky.feed.defs#notFoundPost",
+            "uri": format!("at://{TEST_DID}/app.bsky.feed.post/missing"),
+            "notFound": true
+        }
+    });
     let local = local_records(
         None,
         vec![post_descript(
@@ -581,9 +989,111 @@ async fn post_thread_munge_passes_through_not_found_threads() {
             "2024-01-02T00:00:00.000Z",
         )],
     );
-    let munged =
-        get_post_thread_munge(viewer, original.clone(), local, TEST_DID.to_owned()).unwrap();
+    let munged = get_post_thread_munge(viewer, original.clone(), local, TEST_DID.to_owned())
+        .await
+        .unwrap();
     assert_eq!(munged, original);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn post_thread_munge_passes_through_a_body_without_a_thread() {
+    let (_dir, viewer) = test_viewer().await;
+    let original = json!({ "unexpected": true });
+    let local = local_records(None, vec![]);
+    let munged = get_post_thread_munge(viewer, original.clone(), local, TEST_DID.to_owned())
+        .await
+        .unwrap();
+    assert_eq!(munged, original);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn thread_post_view_carries_the_thread_discriminator() {
+    let (_dir, viewer) = test_viewer().await;
+    let node = thread_post_view(
+        &viewer,
+        post_descript("a", post_record("hi"), "2024-01-02T00:00:00.000Z"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(node["$type"], json!("app.bsky.feed.defs#threadViewPost"));
+    assert_eq!(
+        post_uri(&node),
+        format!("at://{TEST_DID}/app.bsky.feed.post/a")
+    );
+}
+
+#[test]
+fn highest_parent_walks_the_json_parent_chain() {
+    let root_uri = format!("at://{OTHER_DID}/app.bsky.feed.post/root");
+    let mid_uri = format!("at://{OTHER_DID}/app.bsky.feed.post/mid");
+    let leaf_uri = format!("at://{TEST_DID}/app.bsky.feed.post/leaf");
+    let mut mid = thread_node(OTHER_DID, &mid_uri, "2024-01-01T00:00:00.000Z");
+    mid["post"]["record"] =
+        serde_json::to_value(reply_record("mid", &root_uri, &root_uri)).unwrap();
+    mid["unknownParentField"] = json!(true);
+    let mut leaf = thread_node(TEST_DID, &leaf_uri, "2024-01-02T00:00:00.000Z");
+    leaf["post"]["record"] =
+        serde_json::to_value(reply_record("leaf", &root_uri, &mid_uri)).unwrap();
+    assert_eq!(feed_json::highest_parent(&leaf), Some(mid_uri.clone()));
+    leaf["parent"] = mid;
+    assert_eq!(feed_json::highest_parent(&leaf), Some(root_uri));
+    leaf["parent"] =
+        json!({ "$type": "app.bsky.feed.defs#notFoundPost", "uri": mid_uri, "notFound": true });
+    assert_eq!(feed_json::highest_parent(&leaf), None);
+    let plain = thread_node(TEST_DID, &leaf_uri, "2024-01-02T00:00:00.000Z");
+    assert_eq!(feed_json::highest_parent(&plain), None);
+}
+
+#[test]
+fn graft_reply_creates_a_reply_list_when_the_appview_sent_null() {
+    let root_uri = format!("at://{TEST_DID}/app.bsky.feed.post/root");
+    let mut root = thread_node(TEST_DID, &root_uri, "2024-01-01T00:00:00.000Z");
+    root["replies"] = Value::Null;
+    let node = json!({ "$type": "app.bsky.feed.defs#threadViewPost", "post": { "uri": "x" } });
+    feed_json::graft_reply(&mut root, &root_uri, &node);
+    assert_eq!(root["replies"], json!([node]));
+    // a reply nobody in the thread is the parent of is left out
+    feed_json::graft_reply(&mut root, "at://nobody", &node);
+    assert_eq!(root["replies"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn find_posts_in_thread_matches_the_anchor_or_its_root() {
+    let root_uri = format!("at://{OTHER_DID}/app.bsky.feed.post/root");
+    let anchor_uri = format!("at://{OTHER_DID}/app.bsky.feed.post/anchor");
+    let mut anchor = thread_node(OTHER_DID, &anchor_uri, "2024-01-01T00:00:00.000Z");
+    anchor["post"]["record"] =
+        serde_json::to_value(reply_record("anchor", &root_uri, &root_uri)).unwrap();
+    let posts = vec![
+        post_descript(
+            "a",
+            reply_record("a", &anchor_uri, &anchor_uri),
+            "2024-01-02T00:00:00.000Z",
+        ),
+        post_descript(
+            "b",
+            reply_record("b", &root_uri, &anchor_uri),
+            "2024-01-02T00:00:00.000Z",
+        ),
+        post_descript(
+            "c",
+            reply_record("c", "at://elsewhere", "at://elsewhere"),
+            "2024-01-02T00:00:00.000Z",
+        ),
+        post_descript("d", post_record("not a reply"), "2024-01-02T00:00:00.000Z"),
+    ];
+    let found: Vec<(String, String)> = feed_json::find_posts_in_thread(&anchor, posts)
+        .into_iter()
+        .map(|(parent, p)| (parent, p.uri.get_rkey()))
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            (anchor_uri.clone(), "a".to_owned()),
+            (anchor_uri, "b".to_owned())
+        ]
+    );
 }
 
 // Embed formatting
@@ -600,6 +1110,30 @@ async fn video_embeds_format_to_no_view_instead_of_panicking() {
         aspect_ratio: None,
     }));
     assert_eq!(viewer.format_post_embed(post).await.unwrap(), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn gallery_embeds_format_to_no_view() {
+    let (_dir, viewer) = test_viewer().await;
+    let gallery = Gallery {
+        items: vec![GalleryItem::Image(GalleryImage {
+            image: test_blob(),
+            alt: "alt text".to_owned(),
+            aspect_ratio: AspectRatio {
+                width: 4,
+                height: 3,
+            },
+        })],
+    };
+    let mut post = post_record("gallery post");
+    post.embed = Some(Embeds::Gallery(gallery.clone()));
+    assert_eq!(viewer.format_post_embed(post).await.unwrap(), None);
+    assert_eq!(
+        viewer
+            .format_simple_embed(MediaUnion::Gallery(gallery))
+            .await,
+        None
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -661,4 +1195,246 @@ async fn external_embeds_format_thumb_to_blob_url() {
     };
     assert_eq!(view.external.uri, "https://example.com");
     assert!(view.external.thumb.unwrap().contains(TEST_CID));
+}
+
+/// The viewer signs with its own actor's key, so it may only issue tokens
+/// for that actor.
+#[tokio::test]
+async fn service_auth_headers_refuse_another_accounts_did() {
+    let (_dir, viewer) = test_viewer().await;
+    let error = viewer
+        .service_auth_headers(OTHER_DID, "app.bsky.feed.getTimeline")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        error,
+        format!("Cannot issue a service token for {OTHER_DID} from {TEST_DID}")
+    );
+
+    // the requester's own did gets past the guard
+    let error = viewer
+        .service_auth_headers(TEST_DID, "app.bsky.feed.getTimeline")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "Could not find bsky appview did");
+}
+
+#[tokio::test]
+async fn service_auth_headers_are_signed_with_the_actors_key() {
+    let (dir, viewer) = test_viewer().await;
+    let viewer = LocalViewer::new(
+        viewer.actor_store,
+        viewer.account_manager,
+        TEST_HOSTNAME.to_owned(),
+        None,
+        None,
+        Some("did:web:appview.test".to_owned()),
+        None,
+    );
+    let headers = viewer
+        .service_auth_headers(TEST_DID, "app.bsky.feed.getTimeline")
+        .await
+        .unwrap();
+    let jwt = headers
+        .get(reqwest::header::AUTHORIZATION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .strip_prefix("Bearer ")
+        .unwrap()
+        .to_owned();
+
+    let secp = secp256k1::Secp256k1::new();
+    let secret = secp256k1::SecretKey::from_slice(&hex::decode(TEST_SECRET_HEX).unwrap()).unwrap();
+    let did_key = rsky_crypto::utils::encode_did_key(
+        &secp256k1::Keypair::from_secret_key(&secp, &secret).public_key(),
+    );
+    let payload = crate::xrpc_server::auth::verify_jwt(
+        jwt,
+        Some("did:web:appview.test".to_owned()),
+        Some("app.bsky.feed.getTimeline"),
+        move |_iss, _refresh| {
+            let did_key = did_key.clone();
+            async move { Ok(did_key) }
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(payload.iss, TEST_DID);
+    drop(dir);
+}
+
+// Runtime starvation
+// ------------------
+//
+// Formatting a pending quote post asks the appview for the quoted post, so the
+// munge future only completes once the runtime drives that round trip. A munge
+// that blocked its worker thread on that future could never be woken on a
+// runtime whose only worker it was holding, which is how the server hung in
+// production once every worker was parked in one.
+
+fn quoted_uri() -> String {
+    format!("at://{OTHER_DID}/app.bsky.feed.post/quoted")
+}
+
+fn quoted_post_json() -> Value {
+    json!({
+        "$type": "app.bsky.feed.defs#postView",
+        "uri": quoted_uri(),
+        "cid": TEST_CID,
+        "author": { "did": OTHER_DID, "handle": "bob.test" },
+        "record": {
+            "$type": "app.bsky.feed.post",
+            "text": "quoted",
+            "createdAt": "2024-01-01T00:00:00.000Z"
+        },
+        "indexedAt": "2024-01-01T00:00:00.000Z"
+    })
+}
+
+fn quote_record(mut record: Post) -> Post {
+    record.embed = Some(Embeds::Record(RecordEmbed {
+        record: StrongRef {
+            uri: quoted_uri(),
+            cid: TEST_CID.to_owned(),
+        },
+    }));
+    record
+}
+
+/// Answers every request with the quoted post, as `app.bsky.feed.getPosts` would.
+fn start_mock_appview() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 4096];
+            while !raw.windows(4).any(|window| window == b"\r\n\r\n") {
+                let n = stream.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&buf[..n]);
+            }
+            let body = json!({ "posts": [quoted_post_json()] }).to_string();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// Runs `work` as a task on a runtime with a single worker thread, as a
+/// request handler runs, and fails if it has not finished within the deadline.
+fn complete_on_one_worker<T, F, Fut>(work: F) -> T
+where
+    T: Send + 'static,
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = T> + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let outcome = runtime.block_on(async { tokio::spawn(work()).await.unwrap() });
+        let _ = tx.send(outcome);
+    });
+    rx.recv_timeout(Duration::from_secs(20))
+        .expect("the munge parked the only runtime worker")
+}
+
+fn embedded_record_uri(post: &Value) -> &Value {
+    &post["embed"]["record"]["uri"]
+}
+
+#[test]
+fn timeline_munge_with_a_quote_post_does_not_park_the_runtime() {
+    let appview = start_mock_appview();
+    let munged = complete_on_one_worker(move || async move {
+        let (_dir, viewer) = test_viewer_with_appview(Some(appview)).await;
+        let original = author_feed_json(None, vec![]);
+        let local = local_records(
+            None,
+            vec![post_descript(
+                "quote",
+                quote_record(post_record("look at this")),
+                "2024-01-02T00:00:00.000Z",
+            )],
+        );
+        get_timeline_munge(viewer, original, local, TEST_DID.to_owned())
+            .await
+            .unwrap()
+    });
+    let feed = munged["feed"].as_array().unwrap();
+    assert_eq!(feed.len(), 1);
+    assert_eq!(embedded_record_uri(&feed[0]["post"]), &json!(quoted_uri()));
+}
+
+#[test]
+fn author_feed_munge_with_a_quote_post_does_not_park_the_runtime() {
+    let appview = start_mock_appview();
+    let munged = complete_on_one_worker(move || async move {
+        let (_dir, viewer) = test_viewer_with_appview(Some(appview)).await;
+        let original = author_feed_json(
+            None,
+            vec![feed_item_json(
+                TEST_DID,
+                &format!("at://{TEST_DID}/app.bsky.feed.post/published"),
+                "2024-01-01T00:00:00.000Z",
+            )],
+        );
+        let local = local_records(
+            None,
+            vec![post_descript(
+                "quote",
+                quote_record(post_record("look at this")),
+                "2024-01-02T00:00:00.000Z",
+            )],
+        );
+        get_author_feed_munge(viewer, original, local, TEST_DID.to_owned())
+            .await
+            .unwrap()
+    });
+    let feed = munged["feed"].as_array().unwrap();
+    assert_eq!(feed.len(), 2);
+    assert_eq!(embedded_record_uri(&feed[0]["post"]), &json!(quoted_uri()));
+}
+
+#[test]
+fn post_thread_munge_with_a_quote_reply_does_not_park_the_runtime() {
+    let appview = start_mock_appview();
+    let munged = complete_on_one_worker(move || async move {
+        let (_dir, viewer) = test_viewer_with_appview(Some(appview)).await;
+        let root_uri = format!("at://{TEST_DID}/app.bsky.feed.post/root");
+        let original =
+            json!({ "thread": thread_node(TEST_DID, &root_uri, "2024-01-01T00:00:00.000Z") });
+        let local = local_records(
+            None,
+            vec![post_descript(
+                "reply",
+                quote_record(reply_record("quoting reply", &root_uri, &root_uri)),
+                "2024-01-02T00:00:00.000Z",
+            )],
+        );
+        get_post_thread_munge(viewer, original, local, TEST_DID.to_owned())
+            .await
+            .unwrap()
+    });
+    let replies = munged["thread"]["replies"].as_array().unwrap();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(
+        embedded_record_uri(&replies[0]["post"]),
+        &json!(quoted_uri())
+    );
 }

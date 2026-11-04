@@ -85,7 +85,9 @@ pub async fn populate_backfill_queue(
     let cursor_key = format!("backfill_enum:{relay_host}");
 
     // Get cursor from cursor store (postgres survives Fjall corruption)
-    let stored_cursor = cursor_store.get(&cursor_key).await?;
+    // Only positive integers are real cursors: PDS hosts page with opaque
+    // strings that cannot be stored, and resuming from 0 is rejected upstream.
+    let stored_cursor = cursor_store.get(&cursor_key).await?.filter(|c| *c > 0);
 
     // Check if Fjall was lost: cursor exists but repo_backfill queue is empty
     // This means DIDs were enumerated but the queue data was lost
@@ -108,22 +110,7 @@ pub async fn populate_backfill_queue(
         None
     };
 
-    // Preserve the scheme (http:// or https://) from the original URL for testing
-    let (scheme, clean_hostname) = if relay_host.starts_with("http://") {
-        (
-            "http",
-            relay_host
-                .trim_start_matches("http://")
-                .trim_end_matches('/'),
-        )
-    } else {
-        (
-            "https",
-            relay_host
-                .trim_start_matches("https://")
-                .trim_end_matches('/'),
-        )
-    };
+    let (scheme, clean_hostname) = crate::ingester::relay_http_endpoint(&relay_host);
 
     let mut total_enumerated = 0u64;
     let mut last_log_count = 0u64;
@@ -176,9 +163,9 @@ pub async fn populate_backfill_queue(
 
         if let Some(next_cursor) = list_response.cursor {
             // Store cursor (survives Fjall corruption when using postgres)
-            cursor_store
-                .set(&cursor_key, next_cursor.parse::<i64>().unwrap_or(0))
-                .await?;
+            if let Ok(numeric) = next_cursor.parse::<i64>() {
+                cursor_store.set(&cursor_key, numeric).await?;
+            }
             cursor = Some(next_cursor.clone());
 
             // Log every 10K repos

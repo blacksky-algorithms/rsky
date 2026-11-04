@@ -1,0 +1,27 @@
+{% extends "layouts/account_shell.html" %}
+{% import "components/macros.html" as ui %}
+{% block content %}
+{% if let Some(message) = notice %}{% call ui::notice("status", "success", "", message) %}{% endif %}
+{% if deactivated %}
+{% call ui::notice("status", "warning", "", "Your account is deactivated. Reactivate it to manage its settings, or delete it.") %}
+{% endif %}
+{% if let Some(email) = unverified_email %}
+<div role="status" class="notice notice-info">
+  {% include "icons/shield-alert.svg.html" %}
+  <div class="notice-body">Your email address needs to be verified.</div>
+  <div class="notice-actions"><a class="btn btn-secondary btn-sm" href="{{ verify_href }}">Verify now</a></div>
+</div>
+{% endif %}
+<div class="item-group settings-list" role="list">
+  {% for row in rows %}
+  <a class="item{% if row.destructive %} destructive{% endif %}" href="{{ row.href }}" role="listitem">
+    <span class="item-media"><span class="avatar avatar-sm">{% include "components/setting_icon.html" %}</span></span>
+    <span class="item-content row">
+      <span class="item-title">{{ row.title }}</span>
+      {% if !row.value.is_empty() %}<span class="item-value truncate" title="{{ row.value }}">{{ row.value }}</span>{% endif %}
+    </span>
+    <span class="item-actions item-chevron">{% include "icons/chevron-right.svg.html" %}</span>
+  </a>
+  {% endfor %}
+</div>
+{% endblock %}

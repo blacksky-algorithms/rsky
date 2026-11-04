@@ -2,9 +2,18 @@ use crate::apis::com::atproto::server::get_random_token;
 use crate::db::sqlite::Db;
 use crate::models::models::EmailTokenPurpose;
 use crate::models::EmailToken;
-use anyhow::{bail, Result};
+use anyhow::Result;
 use rsky_common::time::{from_str_to_utc, less_than_ago_s, MINUTE};
 use rusqlite::{params, OptionalExtension, Row};
+
+/// Why an email token was refused, with the reference PDS's wording.
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum EmailTokenError {
+    #[error("Token is invalid")]
+    Invalid,
+    #[error("Token is expired")]
+    Expired,
+}
 
 pub(crate) fn email_token_from_row(row: &Row) -> Result<EmailToken, rusqlite::Error> {
     let purpose: String = row.get(0)?;
@@ -69,11 +78,11 @@ pub async fn assert_valid_token(
         let requested_at = from_str_to_utc(&res.requested_at)?;
         let expired = !less_than_ago_s(requested_at, expiration_len);
         if expired {
-            bail!("Token is expired")
+            return Err(EmailTokenError::Expired.into());
         }
         Ok(())
     } else {
-        bail!("Token is invalid")
+        Err(EmailTokenError::Invalid.into())
     }
 }
 
@@ -102,11 +111,11 @@ pub async fn assert_valid_token_and_find_did(
         let requested_at = from_str_to_utc(&res.requested_at)?;
         let expired = !less_than_ago_s(requested_at, expiration_len);
         if expired {
-            bail!("Token is expired")
+            return Err(EmailTokenError::Expired.into());
         }
         Ok(res.did)
     } else {
-        bail!("Token is invalid")
+        Err(EmailTokenError::Invalid.into())
     }
 }
 

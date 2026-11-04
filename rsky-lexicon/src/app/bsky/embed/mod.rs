@@ -1,10 +1,12 @@
 pub mod external;
+pub mod gallery;
 pub mod images;
 pub mod record;
 pub mod record_with_media;
 pub mod video;
 
 use crate::app::bsky::embed::external::{External, View as ExternalView};
+use crate::app::bsky::embed::gallery::{Gallery, View as GalleryView};
 use crate::app::bsky::embed::images::{Images, View as ImagesView};
 use crate::app::bsky::embed::record::{Record, View as RecordView};
 use crate::app::bsky::embed::record_with_media::{RecordWithMedia, View as RecordWithMediaView};
@@ -19,6 +21,8 @@ pub enum MediaUnion {
     Video(Video),
     #[serde(rename = "app.bsky.embed.external")]
     External(External),
+    #[serde(rename = "app.bsky.embed.gallery")]
+    Gallery(Gallery),
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -30,6 +34,8 @@ pub enum MediaViewUnion {
     VideoView(VideoView),
     #[serde(rename = "app.bsky.embed.external#view")]
     ExternalView(ExternalView),
+    #[serde(rename = "app.bsky.embed.gallery#view")]
+    GalleryView(GalleryView),
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -52,6 +58,9 @@ pub enum Embeds {
 
     #[serde(rename = "app.bsky.embed.recordWithMedia")]
     RecordWithMedia(RecordWithMedia),
+
+    #[serde(rename = "app.bsky.embed.gallery")]
+    Gallery(Gallery),
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -62,4 +71,5 @@ pub enum EmbedViews {
     VideoView(VideoView),
     RecordView(RecordView),
     RecordWithMediaView(RecordWithMediaView),
+    GalleryView(GalleryView),
 }

@@ -1,0 +1,22 @@
+{% extends "layouts/account_shell.html" %}
+{% import "components/macros.html" as ui %}
+{% block content %}
+<div class="account-summary column">
+  {% call ui::avatar("avatar-3xl", nav.account.picture) %}
+  {% if !nav.account.name.is_empty() %}<div class="account-name">{{ nav.account.name }}</div>{% endif %}
+  <div class="account-handle">{{ nav.account.handle }}</div>
+  <p class="text-sm muted center">Your Atmosphere account is hosted by <b>{{ shell.service_name }}</b>. <a class="underline" href="{{ about_href }}">What does this mean?</a></p>
+</div>
+<div class="item-group">
+  {% for item in nav.items %}{% if !item.current %}
+  <a class="item" href="{{ item.href }}">
+    <span class="item-media"><span class="avatar avatar-sm">{% include "components/nav_icon.html" %}</span></span>
+    <span class="item-content">
+      <span class="item-title">{{ item.title }}</span>
+      {% if !item.description.is_empty() %}<span class="item-description">{{ item.description }}</span>{% endif %}
+    </span>
+    <span class="item-actions">{% include "icons/chevron-right.svg.html" %}</span>
+  </a>
+  {% endif %}{% endfor %}
+</div>
+{% endblock %}

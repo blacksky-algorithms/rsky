@@ -3,14 +3,12 @@ use std::sync::Arc;
 
 use clap::Parser;
 use color_eyre::Result;
-use deadpool_postgres::{Config, ManagerConfig, RecyclingMethod, Runtime};
 use iroh_car::CarReader;
 use rsky_identity::IdResolver;
 use rsky_identity::types::IdentityResolverOpts;
 use rsky_repo::readable_repo::ReadableRepo;
 use rsky_repo::storage::memory_blockstore::MemoryBlockstore;
 use rsky_syntax::aturi::AtUri;
-use tokio_postgres::NoTls;
 
 use rsky_repo::parse::get_and_parse_record;
 use rsky_wintermute::backfiller::convert_record_to_ipld;
@@ -53,14 +51,12 @@ async fn main() -> Result<()> {
     println!("Will index {} DIDs directly to PostgreSQL", dids.len());
 
     // Setup database pool
-    let mut cfg = Config::new();
-    cfg.url = Some(args.database_url.clone());
-    cfg.manager = Some(ManagerConfig {
-        recycling_method: RecyclingMethod::Fast,
-    });
-
-    let pool = cfg.create_pool(Some(Runtime::Tokio1), NoTls)?;
-    let http_client = reqwest::Client::builder()
+    let pool = rsky_wintermute::config::create_pg_pool(
+        &args.database_url,
+        rsky_wintermute::config::pg_pool_config(16),
+    )?;
+    let http_client = rsky_wintermute::outbound::client()?
+        .builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
 
@@ -112,9 +108,11 @@ async fn process_did(
     println!("  PDS: {}", pds_endpoint);
 
     // Fetch CAR file
-    let repo_url = format!("{pds_endpoint}/xrpc/com.atproto.sync.getRepo?did={did}");
+    let repo_url = rsky_wintermute::outbound::client()?.checked(&format!(
+        "{pds_endpoint}/xrpc/com.atproto.sync.getRepo?did={did}"
+    ))?;
     println!("  Fetching CAR...");
-    let response = http_client.get(&repo_url).send().await?;
+    let response = http_client.get(repo_url).send().await?;
 
     if !response.status().is_success() {
         return Err(color_eyre::eyre::eyre!("HTTP error: {}", response.status()));
@@ -214,6 +212,10 @@ async fn process_did(
                 record: Some(record_json),
                 indexed_at: now.clone(),
                 rev: rev.clone(),
+                provenance: Some(rsky_wintermute::reconcile::Provenance {
+                    generation: rsky_wintermute::reconcile::current_generation(pool, did).await?,
+                    source: rsky_wintermute::reconcile::Source::Direct,
+                }),
             };
 
             // Index directly to PostgreSQL

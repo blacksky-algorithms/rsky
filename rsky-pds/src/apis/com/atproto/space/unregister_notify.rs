@@ -38,7 +38,7 @@ pub async fn space_unregister_notify(
     } = body.into_inner();
     let space_id = parse_space_uri(&space)?;
     if auth.space_uri != space_id.uri() {
-        return Err(ApiError::InvalidToken);
+        return Err(ApiError::InvalidToken("Token is invalid".to_string()));
     }
     // Registrations are keyed by endpoint, so a `service` is resolved the same
     // way `registerNotify` resolved it to find the row it wrote.

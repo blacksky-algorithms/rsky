@@ -219,6 +219,19 @@ impl Repo {
         to_write: RecordWriteEnum,
         keypair: &Keypair,
     ) -> Result<CommitData> {
+        self.format_commit_above(to_write, keypair, None).await
+    }
+
+    /// Formats a commit whose revision exceeds both the current revision
+    /// and `floor`, so a repository restored below a revision consumers
+    /// have already seen can move past it. `since` stays the current
+    /// revision.
+    pub async fn format_commit_above(
+        &mut self,
+        to_write: RecordWriteEnum,
+        keypair: &Keypair,
+        floor: Option<&str>,
+    ) -> Result<CommitData> {
         let writes = match to_write {
             RecordWriteEnum::List(to_write) => to_write,
             RecordWriteEnum::Single(to_write) => vec![to_write],
@@ -253,11 +266,10 @@ impl Repo {
 
         let mut relevant_blocks = BlockMap::new();
         for op in writes {
-            data.add_blocks_for_path(
-                util::format_data_key(op.collection(), op.rkey()),
-                &mut relevant_blocks,
-            )
-            .await?;
+            let proof = data
+                .get_covering_proof(&util::format_data_key(op.collection(), op.rkey()))
+                .await?;
+            relevant_blocks.add_map(proof)?;
         }
 
         let added_leaves = leaves.get_many(diff.new_leaf_cids.to_list())?;
@@ -267,7 +279,11 @@ impl Repo {
         new_blocks.add_map(added_leaves.blocks.clone())?;
         relevant_blocks.add_map(added_leaves.blocks)?;
 
-        let rev = Ticker::new().next(Some(TID(self.commit.rev.clone())));
+        let after = match floor {
+            Some(floor) if floor > self.commit.rev.as_str() => floor.to_owned(),
+            _ => self.commit.rev.clone(),
+        };
+        let rev = Ticker::new().next(Some(TID(after)));
 
         let commit = util::sign_commit(
             UnsignedCommit {
@@ -367,7 +383,7 @@ mod tests {
     use secp256k1::Secp256k1;
     use serde_json::json;
 
-    const TEST_COLLECTIONS: [&'static str; 2] = ["com.example.posts", "com.example.likes"];
+    const TEST_COLLECTIONS: [&str; 2] = ["com.example.posts", "com.example.likes"];
     const COLL_NAME: &str = "com.example.posts";
 
     pub struct FillRepoOutput {
@@ -566,6 +582,34 @@ mod tests {
         let keypair = Keypair::new(&secp, &mut thread_rng());
         let did_key = encode_did_key(&keypair.public_key());
         let _ = Repo::create(Arc::new(RwLock::new(storage)), did_key, &keypair, None).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn formats_commits_above_a_revision_floor() -> Result<()> {
+        let storage = MemoryBlockstore::default();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut thread_rng());
+        let did_key = encode_did_key(&keypair.public_key());
+        let mut repo = Repo::create(
+            Arc::new(RwLock::new(storage)),
+            did_key.clone(),
+            &keypair,
+            None,
+        )
+        .await?;
+        let current = repo.commit.rev.clone();
+        let floor = Ticker::new().next(Some(TID(current.clone()))).to_string();
+        let above = repo
+            .format_commit_above(RecordWriteEnum::List(vec![]), &keypair, Some(&floor))
+            .await?;
+        assert!(above.rev > floor);
+        assert_eq!(above.since, Some(current.clone()));
+        // a floor below the current revision changes nothing
+        let ordinary = repo
+            .format_commit_above(RecordWriteEnum::List(vec![]), &keypair, Some("2"))
+            .await?;
+        assert!(ordinary.rev > current);
         Ok(())
     }
 
@@ -885,6 +929,13 @@ mod tests {
         }
 
         for rkey in keys {
+            let data_key = util::format_data_key(collection.to_string(), rkey.clone());
+            let prev_data = repo.data.get_pointer().await?;
+            let deleted_cid = repo
+                .data
+                .get(&data_key)
+                .await?
+                .expect("record to delete is present");
             let commit = repo
                 .format_commit(
                     RecordWriteEnum::Single(RecordWriteOp::Delete(RecordDeleteOp {
@@ -895,6 +946,7 @@ mod tests {
                     &keypair,
                 )
                 .await?;
+            let relevant_blocks = commit.relevant_blocks.clone();
             let car = blocks_to_car_file(Some(&commit.cid), commit.relevant_blocks.clone()).await?;
             let did_key = encode_did_key(&keypair.public_key());
             let proof_res = verify_proofs(
@@ -910,6 +962,15 @@ mod tests {
             .await?;
             assert_eq!(proof_res.unverified.len(), 0);
             repo = repo.apply_commit(commit).await?;
+
+            // The covering proof must let a consumer invert the delete holding no other blocks.
+            let new_data = repo.data.get_pointer().await?;
+            let proof_store = Arc::new(RwLock::new(
+                MemoryBlockstore::new(Some(relevant_blocks)).await?,
+            ));
+            let mut inverted = MST::load(proof_store, new_data, None)?;
+            inverted = inverted.add(&data_key, deleted_cid, None).await?;
+            assert_eq!(inverted.get_pointer().await?, prev_data);
         }
         Ok(())
     }
@@ -1249,7 +1310,6 @@ mod tests {
                 None => {
                     contents_from_ops
                         .insert(write.collection.clone(), CollectionContents::default());
-                    ()
                 }
             }
             let parsed = get_and_parse_record(&car.blocks, write.cid)?;

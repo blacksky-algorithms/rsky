@@ -225,7 +225,7 @@ impl WriterSetStore for SqliteStore {
                  VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT (space_uri, did)
                  DO UPDATE SET rev = ?3, hash = ?4, updated_at = ?5",
-                rusqlite::params![space_uri, did, rev, hash, updated_at],
+                rusqlite::params![space_uri, did, rev, hash, sql_int(updated_at)],
             )
             .map_err(sql_err)?;
         Ok(())
@@ -284,7 +284,7 @@ impl RegistrationStore for SqliteStore {
                 rusqlite::params![
                     space_uri,
                     subscriber.endpoint,
-                    expires_at,
+                    sql_int(expires_at),
                     subscriber.service
                 ],
             )
@@ -301,7 +301,7 @@ impl RegistrationStore for SqliteStore {
             )
             .map_err(sql_err)?;
         let rows = stmt
-            .query_map(rusqlite::params![space_uri, now], |row| {
+            .query_map(rusqlite::params![space_uri, sql_int(now)], |row| {
                 Ok(Subscriber {
                     endpoint: row.get(0)?,
                     service: row.get(1)?,
@@ -313,19 +313,25 @@ impl RegistrationStore for SqliteStore {
     }
 }
 
+/// sqlite integers are signed; unsigned seconds and revisions never reach
+/// the sign bit, and a value that would is clamped rather than wrapped.
+fn sql_int(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
 #[async_trait]
 impl JtiStore for SqliteStore {
     async fn consume(&self, jti: &str, exp: u64) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "DELETE FROM used_jti WHERE exp + ?1 <= ?2",
-            rusqlite::params![JTI_PURGE_GRACE_SECS, exp],
+            rusqlite::params![sql_int(JTI_PURGE_GRACE_SECS), sql_int(exp)],
         )
         .map_err(sql_err)?;
         let inserted = conn
             .execute(
                 "INSERT OR IGNORE INTO used_jti (jti, exp) VALUES (?1, ?2)",
-                rusqlite::params![jti, exp],
+                rusqlite::params![jti, sql_int(exp)],
             )
             .map_err(sql_err)?;
         Ok(inserted == 1)

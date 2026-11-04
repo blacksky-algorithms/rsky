@@ -13,6 +13,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(shutdown_flag)]
     async fn test_populate_backfill_queue_single_page() {
         let (storage, _dir) = setup_test_storage();
 
@@ -64,6 +65,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(shutdown_flag)]
     async fn test_populate_backfill_queue_multiple_pages() {
         let (storage, _dir) = setup_test_storage();
 
@@ -122,6 +124,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(shutdown_flag)]
     async fn test_populate_backfill_queue_http_error() {
         let (storage, _dir) = setup_test_storage();
 
@@ -143,6 +146,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(shutdown_flag)]
     async fn test_populate_backfill_queue_empty_response() {
         let (storage, _dir) = setup_test_storage();
 
@@ -177,6 +181,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(shutdown_flag)]
     async fn test_populate_backfill_queue_cursor_persistence() {
         let (storage, _dir) = setup_test_storage();
 
@@ -233,6 +238,87 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(shutdown_flag)]
+    async fn opaque_cursor_pages_but_is_not_persisted() {
+        let (storage, _dir) = setup_test_storage();
+        let mut server = mockito::Server::new_async().await;
+        let opaque = "1749705889905::did:plc:test1";
+
+        let _page1 = server
+            .mock("GET", "/xrpc/com.atproto.sync.listRepos")
+            .match_query(mockito::Matcher::Exact("limit=1000".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "repos": [{"did": "did:plc:test1"}],
+                    "cursor": "1749705889905::did:plc:test1"
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let page2 = server
+            .mock("GET", "/xrpc/com.atproto.sync.listRepos")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("limit".into(), "1000".into()),
+                mockito::Matcher::UrlEncoded("cursor".into(), opaque.into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({"repos": [{"did": "did:plc:test2"}], "cursor": null})
+                    .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let server_url = server.url();
+        populate_backfill_queue(storage.clone(), server_url.clone(), String::new())
+            .await
+            .unwrap();
+        page2.assert_async().await;
+        drop(server);
+        assert_eq!(storage.repo_backfill_len().unwrap(), 2);
+        let cursor_key = format!("backfill_enum:{server_url}");
+        assert_eq!(storage.get_cursor(&cursor_key).unwrap(), None);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(shutdown_flag)]
+    async fn zero_cursor_restarts_enumeration() {
+        let (storage, _dir) = setup_test_storage();
+        let mut server = mockito::Server::new_async().await;
+        let server_url = server.url();
+        storage
+            .set_cursor(&format!("backfill_enum:{server_url}"), 0)
+            .unwrap();
+
+        let page = server
+            .mock("GET", "/xrpc/com.atproto.sync.listRepos")
+            .match_query(mockito::Matcher::Exact("limit=1000".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({"repos": [{"did": "did:plc:test1"}], "cursor": null})
+                    .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        populate_backfill_queue(storage.clone(), server_url, String::new())
+            .await
+            .unwrap();
+        page.assert_async().await;
+        drop(server);
+        assert_eq!(storage.repo_backfill_len().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(shutdown_flag)]
     async fn test_populate_backfill_queue_fjall_data_loss_reset() {
         let (storage, _dir) = setup_test_storage();
 

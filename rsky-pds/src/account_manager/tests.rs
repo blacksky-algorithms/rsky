@@ -428,7 +428,7 @@ async fn manages_sessions_and_refresh_tokens() {
 
     // create_session with and without an app password
     let (_, session_refresh) = am
-        .create_session("did:plc:frank".to_owned(), None)
+        .create_session("did:plc:frank".to_owned(), None, false)
         .await
         .unwrap();
     let session_payload = auth::decode_refresh_token(session_refresh).unwrap();
@@ -436,9 +436,16 @@ async fn manages_sessions_and_refresh_tokens() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(stored.app_password_name, None);
+    assert_eq!(stored.app_password, None);
     let (_, app_refresh) = am
-        .create_session("did:plc:frank".to_owned(), Some("test app".to_owned()))
+        .create_session(
+            "did:plc:frank".to_owned(),
+            Some(AppPassDescript {
+                name: "test app".to_owned(),
+                privileged: false,
+            }),
+            false,
+        )
         .await
         .unwrap();
     let app_payload = auth::decode_refresh_token(app_refresh).unwrap();
@@ -446,7 +453,14 @@ async fn manages_sessions_and_refresh_tokens() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(stored.app_password_name, Some("test app".to_owned()));
+    // the row names a password that does not exist, so no privilege is attached
+    assert_eq!(
+        stored.app_password,
+        Some(AppPassDescript {
+            name: "test app".to_owned(),
+            privileged: false,
+        })
+    );
 
     // revocation
     assert!(am
@@ -471,7 +485,7 @@ async fn auth_helper_edge_cases() {
     let payload = auth::RefreshToken {
         scope: crate::auth_verifier::AuthScope::Refresh,
         sub: "did:plc:x".to_owned(),
-        exp: jwt_simple::prelude::Duration::from_days(90),
+        exp: auth::now_secs() + 90 * 24 * 60 * 60,
         jti: "token-1".to_owned(),
     };
     auth::store_refresh_token(payload, None, &am.db)
@@ -512,13 +526,17 @@ async fn auth_helper_edge_cases() {
         .is_none());
 
     // service jwts look like three dot-separated segments
-    let service_jwt = auth::create_service_jwt(auth::ServiceJwtParams {
-        iss: "did:web:pds.test".to_owned(),
-        aud: "did:web:appview.test".to_owned(),
-        exp: None,
-        lxm: Some("com.atproto.repo.uploadBlob".to_owned()),
-        jti: None,
-    })
+    let keypair = secp256k1::Keypair::new(&secp256k1::Secp256k1::new(), &mut rand::thread_rng());
+    let service_jwt = auth::create_service_jwt(
+        auth::ServiceJwtParams {
+            iss: "did:web:pds.test".to_owned(),
+            aud: "did:web:appview.test".to_owned(),
+            exp: None,
+            lxm: Some("com.atproto.repo.uploadBlob".to_owned()),
+            jti: None,
+        },
+        &keypair,
+    )
     .await
     .unwrap();
     assert_eq!(service_jwt.split('.').count(), 3);
@@ -689,7 +707,10 @@ async fn manages_passwords() {
         am.verify_app_password("did:plc:grace", &created.password)
             .await
             .unwrap(),
-        Some("My App".to_owned())
+        Some(AppPassDescript {
+            name: "My App".to_owned(),
+            privileged: false,
+        })
     );
     assert_eq!(
         am.verify_app_password("did:plc:grace", "1111-2222-3333-4444")
@@ -699,9 +720,16 @@ async fn manages_passwords() {
     );
 
     // an app password session gets revoked along with the password
-    am.create_session("did:plc:grace".to_owned(), Some("My App".to_owned()))
-        .await
-        .unwrap();
+    am.create_session(
+        "did:plc:grace".to_owned(),
+        Some(AppPassDescript {
+            name: "My App".to_owned(),
+            privileged: false,
+        }),
+        false,
+    )
+    .await
+    .unwrap();
     am.revoke_app_password("did:plc:grace".to_owned(), "My App".to_owned())
         .await
         .unwrap();
@@ -740,11 +768,16 @@ async fn manages_passwords() {
 
 #[tokio::test]
 async fn password_hash_helpers() {
+    // `gen_salt_and_hash` now always produces a scrypt hash (matching the
+    // reference TS pds's `scrypt.ts`), but `verify` still accepts legacy
+    // Argon2 PHC-string hashes so pre-migration accounts aren't locked out.
+    // See account_manager::helpers::password's own unit tests for
+    // dedicated coverage of the scrypt encoding, cross-implementation
+    // interop, and the Argon2 fallback path.
     let hash = password::gen_salt_and_hash("secret".to_owned()).unwrap();
     assert!(password::verify(&"secret".to_owned(), &hash).unwrap());
     assert!(!password::verify(&"other".to_owned(), &hash).unwrap());
-    assert!(password::verify(&"secret".to_owned(), "not-a-phc-hash").is_err());
-    assert!(password::hash_with_salt(&"secret".to_owned(), "!invalid salt!").is_err());
+    assert!(password::verify(&"secret".to_owned(), "not-a-recognized-hash-format").is_err());
 }
 
 #[tokio::test]
@@ -892,7 +925,14 @@ async fn rotates_app_password_refresh_tokens() {
         .await
         .unwrap();
     let (_, refresh_jwt) = am
-        .create_session("did:plc:apppw".to_owned(), Some("rotator".to_owned()))
+        .create_session(
+            "did:plc:apppw".to_owned(),
+            Some(AppPassDescript {
+                name: "rotator".to_owned(),
+                privileged: false,
+            }),
+            false,
+        )
         .await
         .unwrap();
     let payload = auth::decode_refresh_token(refresh_jwt).unwrap();
@@ -906,7 +946,23 @@ async fn rotates_app_password_refresh_tokens() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(stored.app_password_name, Some("rotator".to_owned()));
+    assert_eq!(
+        stored.app_password,
+        Some(AppPassDescript {
+            name: "rotator".to_owned(),
+            privileged: false,
+        })
+    );
+    let rotated_access = crate::auth_verifier::verify_jwt(
+        &rotated.0,
+        auth::ACCESS_TOKEN_TYP,
+        &auth::SessionVerifyOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        rotated_access.scope,
+        crate::auth_verifier::AuthScope::AppPass
+    );
 }
 
 #[tokio::test]
@@ -951,6 +1007,78 @@ async fn email_token_row_mapping_rejects_unknown_purpose() {
     assert!(err.is_err());
 }
 
+/// Inserts a bare-minimum `token` (OAuth session) row for `did`, standing
+/// in for a real `PdsOAuthStore::create_token` call so revocation tests
+/// don't need to spin up a full `SharedOAuthProvider`.
+async fn seed_oauth_token(am: &AccountManager, did: &str, token_id: &str) {
+    let did = did.to_owned();
+    let token_id = token_id.to_owned();
+    am.db
+        .run(move |conn| {
+            conn.execute(
+                "INSERT INTO token (did, \"tokenId\", \"createdAt\", \"updatedAt\", \
+                 \"expiresAt\", \"clientId\", \"clientAuth\", parameters) \
+                 VALUES (?1, ?2, '2023-01-01T00:00:00.000Z', '2023-01-01T00:00:00.000Z', \
+                 '2023-01-01T00:00:00.000Z', 'https://example.com/client', '{}', '{}')",
+                params![did, token_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+async fn oauth_token_count(am: &AccountManager, did: &str) -> i64 {
+    let did = did.to_owned();
+    am.db
+        .run(move |conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM token WHERE did = ?1",
+                params![did],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn takedown_revokes_oauth_sessions() {
+    let (_dir, am) = test_manager().await;
+    create_test_account(&am, "did:plc:dana", "dana.test").await;
+    seed_oauth_token(&am, "did:plc:dana", "token-1").await;
+    seed_oauth_token(&am, "did:plc:dana", "token-2").await;
+    assert_eq!(oauth_token_count(&am, "did:plc:dana").await, 2);
+
+    let revoked = am
+        .takedown_account(
+            "did:plc:dana",
+            StatusAttr {
+                applied: true,
+                r#ref: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(revoked, 2);
+    assert_eq!(oauth_token_count(&am, "did:plc:dana").await, 0);
+}
+
+#[tokio::test]
+async fn delete_account_revokes_oauth_sessions() {
+    let (_dir, am) = test_manager().await;
+    create_test_account(&am, "did:plc:erin", "erin.test").await;
+    seed_oauth_token(&am, "did:plc:erin", "token-1").await;
+    assert_eq!(oauth_token_count(&am, "did:plc:erin").await, 1);
+
+    let revoked = am.delete_account("did:plc:erin").await.unwrap();
+
+    assert_eq!(revoked, 1);
+    assert_eq!(oauth_token_count(&am, "did:plc:erin").await, 0);
+}
+
 #[tokio::test]
 async fn invite_helper_direct_queries() {
     let (_dir, am) = test_manager().await;
@@ -959,4 +1087,102 @@ async fn invite_helper_direct_queries() {
         .await
         .unwrap()
         .is_empty());
+}
+
+#[tokio::test]
+async fn account_mutations_follow_the_allowlist() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = crate::account_manager::db::get_migrated_db(dir.path().join("account.sqlite"))
+        .await
+        .unwrap();
+    let allowlist = dir.path().join("write-allowlist.toml");
+    std::fs::write(
+        &allowlist,
+        "version = 1\ndefault = \"absent\"\n[entries]\n\"did:plc:admitted\" = \"active\"\n",
+    )
+    .unwrap();
+    let manager = AccountManager::new(db).with_admission(std::sync::Arc::new(
+        crate::admission::Admission::from_file(&allowlist).unwrap(),
+    ));
+    assert!(format!("{manager:?}").contains("AccountManager"));
+    let refused = manager
+        .update_handle("did:plc:other", "other.test")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused
+            .downcast_ref::<crate::admission::NotAdmitted>()
+            .unwrap()
+            .state,
+        "absent"
+    );
+    for result in [
+        manager.delete_account("did:plc:other").await.map(|_| ()),
+        manager.deactivate_account("did:plc:other", None).await,
+        manager.activate_account("did:plc:other").await,
+        manager
+            .set_account_invites_disabled("did:plc:other", true)
+            .await,
+        manager
+            .revoke_app_password("did:plc:other".to_owned(), "x".to_owned())
+            .await,
+        manager
+            .update_email(UpdateEmailOpts {
+                did: "did:plc:other".to_owned(),
+                email: "x@example.com".to_owned(),
+            })
+            .await,
+        manager
+            .update_account_password(UpdateAccountPasswordOpts {
+                did: "did:plc:other".to_owned(),
+                password: "p".to_owned(),
+            })
+            .await,
+        manager
+            .confirm_email(ConfirmEmailOpts {
+                did: &"did:plc:other".to_owned(),
+                token: &"t".to_owned(),
+            })
+            .await,
+        manager
+            .create_app_password("did:plc:other".to_owned(), "x".to_owned())
+            .await
+            .map(drop),
+        manager
+            .takedown_account(
+                "did:plc:other",
+                rsky_lexicon::com::atproto::admin::StatusAttr {
+                    applied: true,
+                    r#ref: None,
+                },
+            )
+            .await
+            .map(|_| ()),
+        manager
+            .update_repo_root(
+                "did:plc:other".to_owned(),
+                lexicon_cid::Cid::from_str(
+                    "bafkreibjfgx2gprinfvicegelk5kosd6y2frmqpqzwqkg7usac74l3t2v4",
+                )
+                .unwrap(),
+                "rev".to_owned(),
+            )
+            .await,
+    ] {
+        let err = result.unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::admission::NotAdmitted>()
+                .is_some(),
+            "{err}"
+        );
+    }
+    // an admitted actor passes the gate
+    if let Err(err) = manager
+        .update_handle("did:plc:admitted", "admitted.test")
+        .await
+    {
+        assert!(err
+            .downcast_ref::<crate::admission::NotAdmitted>()
+            .is_none());
+    }
 }

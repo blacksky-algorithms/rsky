@@ -14,6 +14,21 @@ use rsky_repo::util::{cbor_to_lex, lex_to_ipld, normalize_record_blob_refs};
 use rsky_syntax::aturi::AtUri;
 use serde_json::{json, Value as JsonValue};
 
+/// A record the caller sent cannot be written as asked: the reference answers
+/// these with `InvalidRequest`, never a server fault.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct InvalidRecord(pub String);
+
+/// The record's `$type`, however the JSON arrived in the lexicon value.
+fn record_type(record: &RepoRecord) -> Option<&str> {
+    match record.get("$type") {
+        Some(Lex::Ipld(Ipld::String(t))) => Some(t.as_str()),
+        Some(Lex::Ipld(Ipld::Json(JsonValue::String(t)))) => Some(t.as_str()),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct FoundBlobRef {
     pub r#ref: BlobRef,
@@ -171,12 +186,14 @@ pub fn find_blob_refs(val: Lex, path: Option<Vec<String>>, layer: Option<u8>) ->
 }
 
 pub fn assert_valid_record(record: &RepoRecord) -> anyhow::Result<()> {
-    match record.get("$type") {
-        Some(Lex::Ipld(Ipld::String(_))) => Ok(()),
-        _ => bail!("No $type provided"),
+    if record_type(record).is_none() {
+        return Err(InvalidRecord("No $type provided".to_string()).into());
     }
+    Ok(())
 }
 
+/// Gives a record without a `$type` its collection's, as the reference
+/// does, and refuses one whose `$type` names another collection.
 pub fn set_collection_name(
     collection: &String,
     mut record: RepoRecord,
@@ -185,12 +202,15 @@ pub fn set_collection_name(
     if !record.contains_key("$type") {
         record.insert(
             "$type".to_string(),
-            Lex::Ipld(Ipld::Json(JsonValue::String(collection.clone()))),
+            Lex::Ipld(Ipld::String(collection.clone())),
         );
     }
-    if let Some(Lex::Ipld(Ipld::Json(JsonValue::String(record_type)))) = record.get("$type") {
+    if let Some(record_type) = record_type(&record) {
         if validate && record_type != collection {
-            bail!("Invalid $type: expected {collection}, got {record_type}")
+            return Err(InvalidRecord(format!(
+                "Invalid $type: expected {collection}, got {record_type}"
+            ))
+            .into());
         }
     }
     Ok(record)
@@ -335,6 +355,61 @@ mod tests {
             },
         }))
         .expect("record deserializes")
+    }
+
+    fn untyped_post() -> RepoRecord {
+        serde_json::from_value(json!({
+            "text": "hello",
+            "createdAt": "2026-09-22T15:20:14.000Z",
+            "langs": ["en"]
+        }))
+        .unwrap()
+    }
+
+    /// A record posted without a `$type` takes its collection's and is then
+    /// valid: the inserted value has to be the variant the JSON parser would
+    /// have produced, or the validity check right after does not see it.
+    #[tokio::test]
+    async fn a_record_without_a_type_takes_its_collection() {
+        let prepared = prepare_create(PrepareCreateOpts {
+            did: "did:plc:test".to_string(),
+            collection: "app.bsky.feed.post".to_string(),
+            rkey: None,
+            swap_cid: None,
+            record: untyped_post(),
+            validate: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(record_type(&prepared.record), Some("app.bsky.feed.post"));
+        assert!(prepared.uri.contains("/app.bsky.feed.post/"));
+
+        let typed =
+            set_collection_name(&"app.bsky.feed.post".to_string(), untyped_post(), true).unwrap();
+        assert!(assert_valid_record(&typed).is_ok());
+        let error = assert_valid_record(&untyped_post()).unwrap_err();
+        assert!(error.downcast_ref::<InvalidRecord>().is_some());
+        assert_eq!(error.to_string(), "No $type provided");
+    }
+
+    #[test]
+    fn a_type_naming_another_collection_is_refused_as_a_client_error() {
+        let mut record = untyped_post();
+        record.insert(
+            "$type".to_string(),
+            Lex::Ipld(Ipld::Json(JsonValue::String("app.bsky.feed.like".into()))),
+        );
+        let error = set_collection_name(&"app.bsky.feed.post".to_string(), record.clone(), true)
+            .unwrap_err();
+        assert!(error.downcast_ref::<InvalidRecord>().is_some());
+        assert_eq!(
+            error.to_string(),
+            "Invalid $type: expected app.bsky.feed.post, got app.bsky.feed.like"
+        );
+        // both parsed shapes of a string count as the type
+        assert_eq!(record_type(&record), Some("app.bsky.feed.like"));
+        assert!(assert_valid_record(&record).is_ok());
+        assert!(set_collection_name(&"app.bsky.feed.post".to_string(), record, false).is_ok());
     }
 
     #[test]

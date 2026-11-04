@@ -1,0 +1,27 @@
+name: Publish crates
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rsky-common/**"
+      - "rsky-crypto/**"
+      - "rsky-syntax/**"
+      - "rsky-identity/**"
+      - "rsky-lexicon/**"
+      - "rsky-repo/**"
+      - "rsky-oauth/**"
+      - "rsky-space/**"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: .github/scripts/publish-crates.sh
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

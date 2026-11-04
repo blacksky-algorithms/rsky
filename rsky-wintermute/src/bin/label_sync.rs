@@ -63,7 +63,12 @@ async fn main() -> Result<()> {
     pg_config.manager = Some(ManagerConfig {
         recycling_method: RecyclingMethod::Fast,
     });
-    pg_config.pool = Some(rsky_wintermute::config::pg_pool_config(16));
+    // Two connections per concurrent task, so a task rarely waits on a free slot.
+    // Sizing this from `--concurrency` rather than a fixed number keeps the flag
+    // honest: at a higher concurrency a fixed pool leaves the extra tasks blocking
+    // on `DB_WAIT_TIMEOUT_SECS` and then failing.
+    let pool_size = args.concurrency * 2;
+    pg_config.pool = Some(rsky_wintermute::config::pg_pool_config(pool_size));
 
     let pool = Arc::new(
         pg_config

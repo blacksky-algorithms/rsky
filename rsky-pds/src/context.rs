@@ -1,4 +1,5 @@
 use crate::account_manager::helpers::auth::ServiceJwtParams;
+use crate::actor_store::ActorStore;
 use crate::xrpc_server::auth::create_service_auth_headers;
 use anyhow::Result;
 use reqwest::header::HeaderMap;
@@ -13,13 +14,22 @@ pub static PDS_REPO_SIGNING_KEYPAIR: LazyLock<Keypair> = LazyLock::new(|| {
     Keypair::from_secret_key(&secp, &secret_key)
 });
 
-pub async fn service_auth_headers(did: &str, aud: &str, lxm: &str) -> Result<HeaderMap> {
-    create_service_auth_headers(ServiceJwtParams {
-        iss: did.to_owned(),
-        aud: aud.to_owned(),
-        exp: None,
-        lxm: Some(lxm.to_owned()),
-        jti: None,
-    })
+pub async fn service_auth_headers(
+    actor_store: &ActorStore,
+    did: &str,
+    aud: &str,
+    lxm: &str,
+) -> Result<HeaderMap> {
+    let keypair = actor_store.keypair(did).await?;
+    create_service_auth_headers(
+        ServiceJwtParams {
+            iss: did.to_owned(),
+            aud: aud.to_owned(),
+            exp: None,
+            lxm: Some(lxm.to_owned()),
+            jti: None,
+        },
+        &keypair,
+    )
     .await
 }

@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>{% block title %}{{ shell.service_name }}{% endblock %}</title>
+{% if let Some(home) = shell.home_url %}<link rel="canonical" href="{{ home }}">{% endif %}
+<link rel="stylesheet" href="{{ shell.stylesheet_href }}">
+{% if !shell.branding_css.is_empty() %}<style>{{ shell.branding_css|safe }}</style>{% endif %}
+</head>
+<body>
+{% block body %}{% endblock %}
+</body>
+</html>

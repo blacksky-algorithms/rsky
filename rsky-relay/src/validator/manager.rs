@@ -105,7 +105,9 @@ impl<R: IdentityResolver> Manager<R> {
             let mut rows = stmt.query(())?;
             while let Some(row) = rows.next()? {
                 let host = row.get_unwrap("host");
-                let cursor: u64 = row.get_unwrap("cursor");
+                // sqlite stores integers as i64; cursors never go negative
+                let cursor: i64 = row.get_unwrap("cursor");
+                let cursor = u64::try_from(cursor).unwrap_or_default();
                 self.hosts.insert(host, (cursor.into(), DateTime::UNIX_EPOCH));
                 hosts += 1;
             }
@@ -170,7 +172,7 @@ impl<R: IdentityResolver> Manager<R> {
         )?;
         for (host, (cursor, time)) in &self.hosts {
             if *time != DateTime::UNIX_EPOCH {
-                stmt.execute((host, cursor.get(), time))?;
+                stmt.execute((host, i64::try_from(cursor.get()).unwrap_or(i64::MAX), time))?;
             }
         }
         drop(stmt);

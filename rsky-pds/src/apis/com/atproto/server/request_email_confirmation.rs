@@ -1,20 +1,23 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{AccountEmail, Scoped};
 use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::mailer;
 use crate::mailer::TokenParam;
 use crate::models::models::EmailTokenPurpose;
+use crate::rate_limits::{Caller, RateLimits};
 use anyhow::{bail, Result};
+use rocket::State;
 
-async fn inner_request_email_confirmation(
-    auth: AccessStandardIncludeChecks,
-    account_manager: AccountManager,
+/// Mails a confirmation token to the account's address.
+pub(crate) async fn request_email_confirmation_for(
+    did: &str,
+    account_manager: &AccountManager,
 ) -> Result<()> {
-    let did = auth.access.credentials.unwrap().did.unwrap();
     let account = account_manager
         .get_account(
-            &did,
+            did,
             Some(AvailabilityFlags {
                 include_deactivated: Some(true),
                 include_taken_down: Some(true),
@@ -24,7 +27,7 @@ async fn inner_request_email_confirmation(
     if let Some(account) = account {
         if let Some(email) = account.email {
             let token = account_manager
-                .create_email_token(&did, EmailTokenPurpose::ConfirmEmail)
+                .create_email_token(did, EmailTokenPurpose::ConfirmEmail)
                 .await?;
             mailer::send_confirm_email(email, TokenParam { token }).await?;
             Ok(())
@@ -39,10 +42,21 @@ async fn inner_request_email_confirmation(
 #[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.server.requestEmailConfirmation")]
 pub async fn request_email_confirmation(
-    auth: AccessStandardIncludeChecks,
+    auth: Scoped<AccountEmail, AccessStandardIncludeChecks>,
     account_manager: AccountManager,
+    limits: &State<RateLimits>,
+    caller: Caller,
 ) -> Result<(), ApiError> {
-    match inner_request_email_confirmation(auth, account_manager).await {
+    let did = auth.did().await?;
+    limits
+        .consume_all(
+            &crate::rate_limits::REQUEST_EMAIL_CONFIRMATION,
+            &did,
+            1,
+            caller.bypass,
+        )
+        .await?;
+    match request_email_confirmation_for(&did, &account_manager).await {
         Ok(_) => Ok(()),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");

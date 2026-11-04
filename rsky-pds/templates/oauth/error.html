@@ -1,0 +1,8 @@
+{% extends "layouts/auth_shell.html" %}
+{% import "components/macros.html" as ui %}
+{% block title %}{{ title }}{% endblock %}
+{% block card_title %}{{ title }}{% endblock %}
+{% block content %}
+{% call ui::error_notice(message) %}
+{% if !back_href.is_empty() %}<div class="action-column"><a class="btn btn-secondary" href="{{ back_href }}">Back</a></div>{% endif %}
+{% endblock %}

@@ -1,4 +1,5 @@
-mod bulk;
+pub(crate) mod bulk;
+mod calendar;
 mod tests;
 
 use crate::SHUTDOWN;
@@ -11,22 +12,22 @@ use crate::config::{
     FIREHOSE_LIVE_DRAIN_BATCH, FIREHOSE_LIVE_SHARDS, INDEXER_BATCH_SIZE, INDEXER_BATCH_WORKERS,
     LIVE_LIKE_SERIALIZE,
 };
+use crate::reconcile::{Admission, Gate, GateMode};
 use crate::storage::Storage;
 #[cfg(test)]
 use crate::types::LabelEvent;
 use crate::types::{IndexJob, WintermuteError, WriteAction};
 use dashmap::DashMap;
-use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
+use deadpool_postgres::Pool;
 use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 use rsky_identity::IdResolver;
 use rsky_identity::types::IdentityResolverOpts;
 use rsky_syntax::aturi::AtUri;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Semaphore;
-use tokio_postgres::NoTls;
 
 // Global semaphore to serialize like inserts across all workers.
 // The like table has a 133GB index that causes severe contention when
@@ -40,6 +41,13 @@ static LIKE_INSERT_SEMAPHORE: std::sync::LazyLock<Semaphore> =
 static ACTOR_CACHE: std::sync::LazyLock<DashMap<String, ()>> =
     std::sync::LazyLock::new(DashMap::new);
 const ACTOR_CACHE_MAX_SIZE: usize = 2_000_000;
+/// How long a loop waits before retrying work deferred by a fence.
+const FENCE_RETRY_DELAY: Duration = Duration::from_millis(100);
+const EMBED_IMAGES: &str = "app.bsky.embed.images";
+const EMBED_GALLERY: &str = "app.bsky.embed.gallery";
+const EMBED_GALLERY_IMAGE: &str = "app.bsky.embed.gallery#image";
+const EMBED_IMAGE_TABLE: &str = "post_embed_image";
+const EMBED_GALLERY_IMAGE_TABLE: &str = "post_embed_gallery_image";
 
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
@@ -76,6 +84,7 @@ pub struct IndexerManager {
     #[cfg_attr(not(test), allow(dead_code))]
     semaphore_backfill: Arc<Semaphore>,
     id_resolver: Arc<IdResolver>,
+    live_compaction_running: Arc<AtomicBool>,
 }
 
 /// Parsed job data for batch processing
@@ -137,20 +146,12 @@ impl IndexerManager {
             // Only backfill gets semaphore; firehose_live and label_live are unbounded
             semaphore_backfill: Arc::new(Semaphore::new(workers)),
             id_resolver: Arc::new(id_resolver),
+            live_compaction_running: Arc::new(AtomicBool::new(false)),
         })
     }
 
     fn create_pool(database_url: &str, size: usize) -> Result<Pool, WintermuteError> {
-        let mut pg_config = Config::new();
-        pg_config.url = Some(database_url.to_owned());
-        pg_config.manager = Some(ManagerConfig {
-            recycling_method: RecyclingMethod::Fast,
-        });
-        pg_config.pool = Some(crate::config::pg_pool_config(size));
-
-        pg_config
-            .create_pool(Some(Runtime::Tokio1), NoTls)
-            .map_err(|e| WintermuteError::Other(format!("pool creation failed: {e}")))
+        crate::config::create_pg_pool(database_url, crate::config::pg_pool_config(size))
     }
 
     pub fn run(self) -> Result<(), WintermuteError> {
@@ -196,9 +197,6 @@ impl IndexerManager {
     }
 
     async fn process_handle_resolution_loop(&self) {
-        type HandleFuture =
-            std::pin::Pin<Box<dyn std::future::Future<Output = Option<bool>> + Send>>;
-
         let max_concurrent = *HANDLE_RESOLUTION_CONCURRENCY;
         tracing::info!(
             "handle resolution processor started (concurrency={max_concurrent}, batch={})",
@@ -237,53 +235,29 @@ impl IndexerManager {
                 .to_string();
             let id_resolver = Arc::clone(&self.id_resolver);
             let pool = self.pool_labels.clone();
-
-            // Process handles in parallel using FuturesUnordered with boxed futures
-            let mut in_flight: FuturesUnordered<HandleFuture> = FuturesUnordered::new();
-            let mut pending_dids = dids_to_resolve.into_iter();
-            let mut resolved_count = 0usize;
-
-            let make_future = |pool: Pool,
-                               id_resolver: Arc<IdResolver>,
-                               did: String,
-                               timestamp: String|
-             -> HandleFuture {
-                Box::pin(async move {
-                    let client = pool.get().await.ok()?;
-                    Self::index_handle(&client, &id_resolver, &did, &timestamp, false)
+            let resolve = move |did: String| {
+                let pool = pool.clone();
+                let id_resolver = Arc::clone(&id_resolver);
+                let timestamp = timestamp.clone();
+                async move {
+                    let mut client = pool.get().await.ok()?;
+                    Self::index_handle(&mut client, &id_resolver, &did, &timestamp, false)
                         .await
                         .ok()
-                })
+                }
             };
 
-            // Seed initial batch of concurrent tasks
-            for did in pending_dids.by_ref().take(max_concurrent) {
-                in_flight.push(make_future(
-                    pool.clone(),
-                    Arc::clone(&id_resolver),
-                    did,
-                    timestamp.clone(),
-                ));
-            }
-
-            // Process results and spawn new tasks as slots free up
-            while let Some(result) = in_flight.next().await {
-                if result == Some(true) {
-                    resolved_count += 1;
-                }
-
-                // Spawn next task if there are more DIDs
-                if let Some(did) = pending_dids.next() {
-                    in_flight.push(make_future(
-                        pool.clone(),
-                        Arc::clone(&id_resolver),
-                        did,
-                        timestamp.clone(),
-                    ));
-                }
-            }
-
+            let (resolved_count, stopped) = Self::drive_handle_resolution_batch(
+                dids_to_resolve,
+                max_concurrent,
+                resolve,
+                || SHUTDOWN.load(Ordering::Relaxed),
+            )
+            .await;
             total_resolved += resolved_count as u64;
+            if stopped {
+                continue;
+            }
 
             // Log progress every 10 batches or when handles are resolved
             if batch_count % 10 == 1 || resolved_count > 0 {
@@ -295,6 +269,45 @@ impl IndexerManager {
             // Small delay between batches to avoid overwhelming the system
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    }
+
+    /// Resolve `dids` with at most `max_concurrent` in flight. Returns how many
+    /// resolved and whether `stop` cut the batch short; a stopped batch drops
+    /// its in-flight resolutions instead of waiting for them.
+    async fn drive_handle_resolution_batch<F, Fut>(
+        dids: Vec<String>,
+        max_concurrent: usize,
+        resolve: F,
+        stop: impl Fn() -> bool + Send,
+    ) -> (usize, bool)
+    where
+        F: Fn(String) -> Fut + Send,
+        Fut: std::future::Future<Output = Option<bool>> + Send,
+    {
+        let mut in_flight: FuturesUnordered<Fut> = FuturesUnordered::new();
+        let mut pending = dids.into_iter();
+        let mut resolved = 0usize;
+
+        for did in pending.by_ref().take(max_concurrent) {
+            in_flight.push(resolve(did));
+        }
+
+        while let Some(result) = in_flight.next().await {
+            if result == Some(true) {
+                resolved += 1;
+            }
+            if stop() {
+                tracing::info!(
+                    "handle resolution batch interrupted, dropping {} in-flight resolutions",
+                    in_flight.len()
+                );
+                return (resolved, true);
+            }
+            if let Some(did) = pending.next() {
+                in_flight.push(resolve(did));
+            }
+        }
+        (resolved, false)
     }
 
     async fn get_actors_needing_handle_resolution(&self) -> Result<Vec<String>, WintermuteError> {
@@ -394,6 +407,7 @@ impl IndexerManager {
             };
 
             if batch.is_empty() {
+                self.maybe_compact_live_queue(*crate::config::LIVE_QUEUE_COMPACT_BYTES);
                 self.storage
                     .wait_for_live_enqueue(Duration::from_millis(50))
                     .await;
@@ -411,6 +425,7 @@ impl IndexerManager {
                 .flatten()
                 .map(|(k, j)| (k.as_slice(), j))
                 .collect();
+            let mut deferred = 0usize;
             for (key, result) in results {
                 processed_count += 1;
                 if let Err(e) = result {
@@ -421,13 +436,25 @@ impl IndexerManager {
                     // can never succeed and are dropped.
                     if msg.contains("invalid uri") {
                         tracing::error!("dropping unprocessable firehose_live job: {msg}");
+                    } else if let WintermuteError::StaleGeneration(did) = &e {
+                        self.refetch_stale(did);
                     } else if let Some(job) = jobs_by_key.get(key.as_slice()) {
-                        tracing::warn!("requeueing failed firehose_live job {}: {msg}", job.uri);
+                        if matches!(e, WintermuteError::Fenced(_)) {
+                            deferred += 1;
+                        } else {
+                            tracing::warn!(
+                                "requeueing failed firehose_live job {}: {msg}",
+                                job.uri
+                            );
+                        }
                         if let Err(e2) = self.storage.enqueue_firehose_live(job) {
                             tracing::error!("failed to requeue firehose_live job: {e2}");
                         }
                     }
                 }
+            }
+            if deferred > 0 {
+                tokio::time::sleep(FENCE_RETRY_DELAY).await;
             }
 
             if last_log.elapsed() > Duration::from_secs(5) {
@@ -638,9 +665,27 @@ impl IndexerManager {
 
             // Handle results - remove jobs from queue
             let remove_start = Instant::now();
+            let mut deferred = 0usize;
             for (key, result) in results {
-                if let Err(e) = &result {
-                    tracing::error!("worker {}: firehose_backfill job failed: {e}", worker_id);
+                match &result {
+                    Err(WintermuteError::Fenced(_)) => {
+                        deferred += 1;
+                        if let Some((_, job)) = jobs.iter().find(|(k, _)| *k == key) {
+                            if let Err(e) = storage.enqueue_firehose_backfill(job) {
+                                tracing::error!(
+                                    "worker {}: failed to requeue fenced job: {e}",
+                                    worker_id
+                                );
+                            }
+                        }
+                    }
+                    Err(WintermuteError::StaleGeneration(did)) => {
+                        Self::refetch_stale_with(&storage, did);
+                    }
+                    Err(e) => {
+                        tracing::error!("worker {}: firehose_backfill job failed: {e}", worker_id);
+                    }
+                    Ok(()) => {}
                 }
                 if let Err(e) = storage.remove_firehose_backfill(&key) {
                     if e.is_storage_corrupted() {
@@ -658,6 +703,9 @@ impl IndexerManager {
                 }
             }
             let remove_ms = remove_start.elapsed().as_millis();
+            if deferred > 0 {
+                tokio::time::sleep(FENCE_RETRY_DELAY).await;
+            }
 
             tracing::info!(
                 "worker {}: dequeue={}ms, process={}ms, remove={}ms, batch={}",
@@ -783,6 +831,26 @@ impl IndexerManager {
         }
     }
 
+    /// Once the queue has drained, compact away the dequeue tombstones on a
+    /// blocking thread; at most one compaction runs at a time.
+    fn maybe_compact_live_queue(&self, min_bytes: u64) {
+        crate::metrics::STORAGE_LIVE_QUEUE_DISK_BYTES
+            .set(i64::try_from(self.storage.live_queue_disk_bytes()).unwrap_or(i64::MAX));
+        if !self.storage.live_queue_needs_compaction(min_bytes)
+            || self.live_compaction_running.swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        let storage = Arc::clone(&self.storage);
+        let running = Arc::clone(&self.live_compaction_running);
+        drop(tokio::task::spawn_blocking(move || {
+            if let Err(e) = storage.compact_live_queue() {
+                tracing::error!("live queue compaction failed: {e}");
+            }
+            running.store(false, Ordering::Release);
+        }));
+    }
+
     #[cfg(test)]
     fn update_queue_metrics(&self) {
         Self::update_queue_metrics_for(&self.storage);
@@ -905,6 +973,9 @@ impl IndexerManager {
                         tracing::error!("failed to remove index job from {:?}: {e}", source);
                     }
                 }
+                Ok((_, _, Err(WintermuteError::StaleGeneration(did)))) => {
+                    self.refetch_stale(&did);
+                }
                 Ok((_, _, Err(e))) => {
                     crate::metrics::INDEXER_RECORDS_FAILED_TOTAL.inc();
                     tracing::error!("index job failed: {e}");
@@ -913,6 +984,23 @@ impl IndexerManager {
                     tracing::error!("task panicked: {e}");
                 }
             }
+        }
+    }
+
+    /// Asks for the actor's repository again under its current generation
+    /// after a job from an older one was refused.
+    fn refetch_stale(&self, did: &str) {
+        Self::refetch_stale_with(&self.storage, did);
+    }
+
+    fn refetch_stale_with(storage: &Storage, did: &str) {
+        tracing::warn!("refetching {did}: job from a superseded generation");
+        if let Err(e) = storage.enqueue_backfill_priority(&crate::types::BackfillJob {
+            did: did.to_owned(),
+            retry_count: 0,
+            priority: true,
+        }) {
+            tracing::error!("failed to enqueue refetch for {did}: {e}");
         }
     }
 
@@ -938,7 +1026,7 @@ impl IndexerManager {
     /// Resolve and verify a handle for a DID, updating the actor table.
     /// Returns true if handle was successfully resolved and stored.
     pub async fn index_handle(
-        client: &deadpool_postgres::Client,
+        client: &mut deadpool_postgres::Client,
         id_resolver: &Arc<IdResolver>,
         did: &str,
         timestamp: &str,
@@ -1043,27 +1131,13 @@ impl IndexerManager {
             None
         };
 
-        // Handle contention: if another actor has this handle, remove it
-        if let Some(ref h) = verified_handle {
-            client
-                .execute(
-                    "UPDATE actor SET handle = NULL WHERE handle = $1 AND did != $2",
-                    &[&h, &did],
-                )
-                .await?;
-        }
-
-        // Update actor with handle
-        client
-            .execute(
-                "INSERT INTO actor (did, handle, \"indexedAt\")
-                 VALUES ($1, $2, $3)
-                 ON CONFLICT (did) DO UPDATE SET
-                   handle = EXCLUDED.handle,
-                   \"indexedAt\" = EXCLUDED.\"indexedAt\"",
-                &[&did, &verified_handle, &timestamp],
-            )
-            .await?;
+        crate::actor_handle::upsert_actor_handle(
+            client,
+            did,
+            verified_handle.as_deref(),
+            timestamp,
+        )
+        .await?;
 
         Ok(verified_handle.is_some())
     }
@@ -1152,6 +1226,18 @@ impl IndexerManager {
         job: &IndexJob,
         skip_boilerplate: bool,
     ) -> Result<(), WintermuteError> {
+        Self::process_job_with(pool, job, skip_boilerplate, GateMode::Normal).await
+    }
+
+    /// Applies one job under the actor's write gate: fenced actors defer,
+    /// work at or below the boundary or from an older generation is refused,
+    /// and progress is recorded after an applied job.
+    pub async fn process_job_with(
+        pool: &Pool,
+        job: &IndexJob,
+        skip_boilerplate: bool,
+        mode: GateMode,
+    ) -> Result<(), WintermuteError> {
         use crate::metrics;
 
         tracing::debug!(
@@ -1163,16 +1249,27 @@ impl IndexerManager {
 
         metrics::INDEXER_RECORDS_PROCESSED_TOTAL.inc();
 
-        let uri = AtUri::new(job.uri.clone(), None)
-            .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
-
-        let did = uri.get_hostname();
-        let collection = uri.get_collection();
-        let rkey = uri.get_rkey();
+        let (did, collection, rkey) = if matches!(job.action, WriteAction::Commit) {
+            (
+                job.uri.trim_start_matches("at://").to_owned(),
+                String::new(),
+                String::new(),
+            )
+        } else {
+            let uri = AtUri::new(job.uri.clone(), None)
+                .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
+            (
+                uri.get_hostname().clone(),
+                uri.get_collection(),
+                uri.get_rkey(),
+            )
+        };
 
         tracing::debug!("parsed uri: did={did}, collection={collection}, rkey={rkey}");
 
-        if !crate::config::record_collection_allowed(&collection) {
+        if !matches!(job.action, WriteAction::Commit)
+            && !crate::config::record_collection_allowed(&collection)
+        {
             metrics::INDEXER_RECORDS_FILTERED_TOTAL.inc();
             tracing::debug!("skipping non-allowlisted collection: {collection}");
             return Ok(());
@@ -1181,13 +1278,59 @@ impl IndexerManager {
         let client = pool.get().await?;
         tracing::debug!("got database client");
 
+        let gate = Gate::open(&client, &[did.as_str()], mode).await?;
+        let admission = gate.admit(&did, &job.rev, job.provenance.as_ref());
+        metrics::INDEXER_ADMISSION_TOTAL
+            .with_label_values(&[admission.label()])
+            .inc();
+        let outcome = match admission {
+            Admission::Apply => {
+                let applied = if matches!(job.action, WriteAction::Commit) {
+                    crate::reconcile::record_commit_progress(&client, &did, &job.rev, &job.cid)
+                        .await
+                } else {
+                    Self::apply_job(&client, job, skip_boilerplate, &did, &collection, &rkey).await
+                };
+                match applied {
+                    Ok(()) => {
+                        crate::reconcile::record_progress(
+                            &client,
+                            &[(did.clone(), job.rev.clone())],
+                        )
+                        .await
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            Admission::Deferred => Err(WintermuteError::Fenced(did.clone())),
+            Admission::BelowBoundary => Ok(()),
+            Admission::StaleGeneration => Err(WintermuteError::StaleGeneration(did.clone())),
+        };
+        gate.close(&client).await?;
+        outcome
+    }
+
+    async fn apply_job(
+        client: &deadpool_postgres::Client,
+        job: &IndexJob,
+        skip_boilerplate: bool,
+        did: &str,
+        collection: &str,
+        rkey: &str,
+    ) -> Result<(), WintermuteError> {
+        use crate::metrics;
+        let did = did.to_owned();
+        let collection = collection.to_owned();
+        let rkey = rkey.to_owned();
+
         match job.action {
+            WriteAction::Commit => {}
             WriteAction::Create | WriteAction::Update => {
                 tracing::debug!("processing create/update action");
 
                 // Ensure actor row exists for this DID (cached to avoid redundant DB calls)
                 if !ACTOR_CACHE.contains_key(did.as_str()) {
-                    Self::ensure_actor_exists(&client, did.as_str(), &job.indexed_at).await?;
+                    Self::ensure_actor_exists(client, did.as_str(), &job.indexed_at).await?;
                     if ACTOR_CACHE.len() < ACTOR_CACHE_MAX_SIZE {
                         ACTOR_CACHE.insert(did.clone(), ());
                     }
@@ -1204,7 +1347,7 @@ impl IndexerManager {
                         true
                     } else {
                         Self::insert_generic_record(
-                            &client,
+                            client,
                             &job.uri,
                             &job.cid,
                             did.as_str(),
@@ -1229,7 +1372,7 @@ impl IndexerManager {
                     "app.bsky.feed.post" => {
                         metrics::INDEXER_POST_EVENTS_TOTAL.inc();
                         Self::index_post(
-                            &client,
+                            client,
                             did.as_str(),
                             rkey.as_str(),
                             record_json,
@@ -1241,7 +1384,7 @@ impl IndexerManager {
                     "app.bsky.feed.like" => {
                         metrics::INDEXER_LIKE_EVENTS_TOTAL.inc();
                         Self::index_like(
-                            &client,
+                            client,
                             did.as_str(),
                             rkey.as_str(),
                             record_json,
@@ -1253,7 +1396,7 @@ impl IndexerManager {
                     "app.bsky.graph.follow" => {
                         metrics::INDEXER_FOLLOW_EVENTS_TOTAL.inc();
                         Self::index_follow(
-                            &client,
+                            client,
                             did.as_str(),
                             rkey.as_str(),
                             record_json,
@@ -1265,7 +1408,7 @@ impl IndexerManager {
                     "app.bsky.feed.repost" => {
                         metrics::INDEXER_REPOST_EVENTS_TOTAL.inc();
                         Self::index_repost(
-                            &client,
+                            client,
                             did.as_str(),
                             rkey.as_str(),
                             record_json,
@@ -1277,7 +1420,7 @@ impl IndexerManager {
                     "app.bsky.graph.block" => {
                         metrics::INDEXER_BLOCK_EVENTS_TOTAL.inc();
                         Self::index_block(
-                            &client,
+                            client,
                             did.as_str(),
                             rkey.as_str(),
                             record_json,
@@ -1289,7 +1432,7 @@ impl IndexerManager {
                     "app.bsky.actor.profile" => {
                         metrics::INDEXER_PROFILE_EVENTS_TOTAL.inc();
                         Self::index_profile(
-                            &client,
+                            client,
                             did.as_str(),
                             rkey.as_str(),
                             record_json,
@@ -1300,7 +1443,7 @@ impl IndexerManager {
                     }
                     "app.bsky.feed.generator" => {
                         Self::index_feed_generator(
-                            &client,
+                            client,
                             did.as_str(),
                             rkey.as_str(),
                             record_json,
@@ -1311,7 +1454,7 @@ impl IndexerManager {
                     }
                     "app.bsky.graph.list" => {
                         Self::index_list(
-                            &client,
+                            client,
                             did.as_str(),
                             rkey.as_str(),
                             record_json,
@@ -1322,7 +1465,7 @@ impl IndexerManager {
                     }
                     "app.bsky.graph.listitem" => {
                         Self::index_list_item(
-                            &client,
+                            client,
                             did.as_str(),
                             rkey.as_str(),
                             record_json,
@@ -1333,7 +1476,7 @@ impl IndexerManager {
                     }
                     "app.bsky.graph.listblock" => {
                         Self::index_list_block(
-                            &client,
+                            client,
                             did.as_str(),
                             rkey.as_str(),
                             record_json,
@@ -1344,7 +1487,7 @@ impl IndexerManager {
                     }
                     "app.bsky.graph.starterpack" => {
                         Self::index_starter_pack(
-                            &client,
+                            client,
                             did.as_str(),
                             rkey.as_str(),
                             record_json,
@@ -1355,7 +1498,7 @@ impl IndexerManager {
                     }
                     "app.bsky.labeler.service" => {
                         Self::index_labeler(
-                            &client,
+                            client,
                             did.as_str(),
                             rkey.as_str(),
                             record_json,
@@ -1366,7 +1509,7 @@ impl IndexerManager {
                     }
                     "app.bsky.feed.threadgate" => {
                         Self::index_threadgate(
-                            &client,
+                            client,
                             did.as_str(),
                             rkey.as_str(),
                             record_json,
@@ -1377,7 +1520,7 @@ impl IndexerManager {
                     }
                     "app.bsky.feed.postgate" => {
                         Self::index_postgate(
-                            &client,
+                            client,
                             did.as_str(),
                             rkey.as_str(),
                             record_json,
@@ -1388,7 +1531,7 @@ impl IndexerManager {
                     }
                     "chat.bsky.actor.declaration" => {
                         Self::index_chat_declaration(
-                            &client,
+                            client,
                             did.as_str(),
                             rkey.as_str(),
                             record_json,
@@ -1399,7 +1542,7 @@ impl IndexerManager {
                     }
                     "app.bsky.notification.declaration" => {
                         Self::index_notif_declaration(
-                            &client,
+                            client,
                             did.as_str(),
                             rkey.as_str(),
                             record_json,
@@ -1410,7 +1553,7 @@ impl IndexerManager {
                     }
                     "app.bsky.actor.status" => {
                         Self::index_status(
-                            &client,
+                            client,
                             did.as_str(),
                             rkey.as_str(),
                             record_json,
@@ -1421,7 +1564,7 @@ impl IndexerManager {
                     }
                     "app.bsky.graph.verification" => {
                         Self::index_verification(
-                            &client,
+                            client,
                             did.as_str(),
                             rkey.as_str(),
                             record_json,
@@ -1432,9 +1575,31 @@ impl IndexerManager {
                     }
                     "community.blacksky.feed.post" => {
                         Self::index_community_post_stub(
-                            &client,
+                            client,
                             did.as_str(),
                             rkey.as_str(),
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
+                    calendar::EVENT_COLLECTION => {
+                        calendar::index_event(
+                            client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
+                            &job.cid,
+                            &job.indexed_at,
+                        )
+                        .await?;
+                    }
+                    calendar::RSVP_COLLECTION => {
+                        calendar::index_rsvp(
+                            client,
+                            did.as_str(),
+                            rkey.as_str(),
+                            record_json,
                             &job.cid,
                             &job.indexed_at,
                         )
@@ -1448,10 +1613,10 @@ impl IndexerManager {
                 // delete is idempotent when the row is already absent.
                 let applied =
                     if skip_boilerplate && crate::config::boilerplate_collection(&collection) {
-                        drop(Self::delete_generic_record(&client, &job.uri, &job.rev).await);
+                        drop(Self::delete_generic_record(client, &job.uri, &job.rev).await);
                         true
                     } else {
-                        Self::delete_generic_record(&client, &job.uri, &job.rev).await?
+                        Self::delete_generic_record(client, &job.uri, &job.rev).await?
                     };
 
                 if !applied {
@@ -1460,62 +1625,67 @@ impl IndexerManager {
 
                 match collection.as_str() {
                     "app.bsky.feed.post" => {
-                        Self::delete_post(&client, did.as_str(), rkey.as_str()).await?;
+                        Self::delete_post(client, did.as_str(), rkey.as_str()).await?;
                     }
                     "app.bsky.feed.like" => {
-                        Self::delete_like(&client, did.as_str(), rkey.as_str()).await?;
+                        Self::delete_like(client, did.as_str(), rkey.as_str()).await?;
                     }
                     "app.bsky.graph.follow" => {
-                        Self::delete_follow(&client, did.as_str(), rkey.as_str()).await?;
+                        Self::delete_follow(client, did.as_str(), rkey.as_str()).await?;
                     }
                     "app.bsky.feed.repost" => {
-                        Self::delete_repost(&client, did.as_str(), rkey.as_str()).await?;
+                        Self::delete_repost(client, did.as_str(), rkey.as_str()).await?;
                     }
                     "app.bsky.graph.block" => {
-                        Self::delete_block(&client, did.as_str(), rkey.as_str()).await?;
+                        Self::delete_block(client, did.as_str(), rkey.as_str()).await?;
                     }
                     "app.bsky.actor.profile" => {
-                        Self::delete_profile(&client, did.as_str(), rkey.as_str()).await?;
+                        Self::delete_profile(client, did.as_str(), rkey.as_str()).await?;
                     }
                     "app.bsky.feed.generator" => {
-                        Self::delete_feed_generator(&client, did.as_str(), rkey.as_str()).await?;
+                        Self::delete_feed_generator(client, did.as_str(), rkey.as_str()).await?;
                     }
                     "app.bsky.graph.list" => {
-                        Self::delete_list(&client, did.as_str(), rkey.as_str()).await?;
+                        Self::delete_list(client, did.as_str(), rkey.as_str()).await?;
                     }
                     "app.bsky.graph.listitem" => {
-                        Self::delete_list_item(&client, did.as_str(), rkey.as_str()).await?;
+                        Self::delete_list_item(client, did.as_str(), rkey.as_str()).await?;
                     }
                     "app.bsky.graph.listblock" => {
-                        Self::delete_list_block(&client, did.as_str(), rkey.as_str()).await?;
+                        Self::delete_list_block(client, did.as_str(), rkey.as_str()).await?;
                     }
                     "app.bsky.graph.starterpack" => {
-                        Self::delete_starter_pack(&client, did.as_str(), rkey.as_str()).await?;
+                        Self::delete_starter_pack(client, did.as_str(), rkey.as_str()).await?;
                     }
                     "app.bsky.labeler.service" => {
-                        Self::delete_labeler(&client, did.as_str(), rkey.as_str()).await?;
+                        Self::delete_labeler(client, did.as_str(), rkey.as_str()).await?;
                     }
                     "app.bsky.feed.threadgate" => {
-                        Self::delete_threadgate(&client, did.as_str(), rkey.as_str()).await?;
+                        Self::delete_threadgate(client, did.as_str(), rkey.as_str()).await?;
                     }
                     "app.bsky.feed.postgate" => {
-                        Self::delete_postgate(&client, did.as_str(), rkey.as_str()).await?;
+                        Self::delete_postgate(client, did.as_str(), rkey.as_str()).await?;
                     }
                     "chat.bsky.actor.declaration" => {
-                        Self::delete_chat_declaration(&client, did.as_str(), rkey.as_str()).await?;
+                        Self::delete_chat_declaration(client, did.as_str(), rkey.as_str()).await?;
                     }
                     "app.bsky.notification.declaration" => {
-                        Self::delete_notif_declaration(&client, did.as_str(), rkey.as_str())
-                            .await?;
+                        Self::delete_notif_declaration(client, did.as_str(), rkey.as_str()).await?;
                     }
                     "app.bsky.actor.status" => {
-                        Self::delete_status(&client, did.as_str(), rkey.as_str()).await?;
+                        Self::delete_status(client, did.as_str(), rkey.as_str()).await?;
                     }
                     "app.bsky.graph.verification" => {
-                        Self::delete_verification(&client, did.as_str(), rkey.as_str()).await?;
+                        Self::delete_verification(client, did.as_str(), rkey.as_str()).await?;
                     }
                     "community.blacksky.feed.post" => {
-                        Self::delete_community_post(&client, did.as_str(), rkey.as_str()).await?;
+                        Self::delete_community_post(client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    calendar::EVENT_COLLECTION => {
+                        calendar::delete_event(client, did.as_str(), rkey.as_str()).await?;
+                    }
+                    calendar::RSVP_COLLECTION => {
+                        calendar::delete_rsvp(client, did.as_str(), rkey.as_str()).await?;
                     }
                     _ => {}
                 }
@@ -1533,6 +1703,155 @@ impl IndexerManager {
         jobs: &[(Vec<u8>, IndexJob)],
         bulk_load: bool,
         skip_boilerplate: bool,
+    ) -> (Vec<(Vec<u8>, Result<(), WintermuteError>)>, bool) {
+        Self::process_jobs_batch_with(pool, jobs, bulk_load, skip_boilerplate, GateMode::Normal)
+            .await
+    }
+
+    /// The actor of a job's URI, for the write gate.
+    fn job_did(job: &IndexJob) -> &str {
+        let rest = job.uri.trim_start_matches("at://");
+        rest.split('/').next().unwrap_or(rest)
+    }
+
+    /// Runs a batch under the write gate of every actor in it: fenced or
+    /// stale work is answered without touching the appview, and progress
+    /// is recorded for every actor whose jobs were applied.
+    pub async fn process_jobs_batch_with(
+        pool: &Pool,
+        jobs: &[(Vec<u8>, IndexJob)],
+        bulk_load: bool,
+        skip_boilerplate: bool,
+        mode: GateMode,
+    ) -> (Vec<(Vec<u8>, Result<(), WintermuteError>)>, bool) {
+        if jobs.is_empty() {
+            return (Vec::new(), false);
+        }
+
+        let all_dids: Vec<&str> = jobs.iter().map(|(_, job)| Self::job_did(job)).collect();
+        let gate_client = match pool.get().await {
+            Ok(client) => client,
+            Err(e) => {
+                let err_msg = format!("pool error: {e}");
+                let results = jobs
+                    .iter()
+                    .map(|(key, _)| (key.clone(), Err(WintermuteError::Other(err_msg.clone()))))
+                    .collect();
+                return (results, true);
+            }
+        };
+        let gate_mode = mode.clone();
+        let gate = match Gate::open(&gate_client, &all_dids, mode).await {
+            Ok(gate) => gate,
+            Err(e) => {
+                let err_msg = format!("write gate failed: {e}");
+                let results = jobs
+                    .iter()
+                    .map(|(key, _)| (key.clone(), Err(WintermuteError::Other(err_msg.clone()))))
+                    .collect();
+                return (results, true);
+            }
+        };
+        let mut results: Vec<(Vec<u8>, Result<(), WintermuteError>)> =
+            Vec::with_capacity(jobs.len());
+        let mut admitted: Vec<(Vec<u8>, IndexJob)> = Vec::with_capacity(jobs.len());
+        let mut commits: Vec<(&Vec<u8>, &IndexJob)> = Vec::new();
+        for (key, job) in jobs {
+            let did = Self::job_did(job);
+            let admission = gate.admit(did, &job.rev, job.provenance.as_ref());
+            crate::metrics::INDEXER_ADMISSION_TOTAL
+                .with_label_values(&[admission.label()])
+                .inc();
+            match admission {
+                Admission::Apply if matches!(job.action, WriteAction::Commit) => {
+                    commits.push((key, job));
+                }
+                Admission::Apply => admitted.push((key.clone(), job.clone())),
+                Admission::Deferred => {
+                    results.push((key.clone(), Err(WintermuteError::Fenced(did.to_owned()))));
+                }
+                Admission::BelowBoundary => results.push((key.clone(), Ok(()))),
+                Admission::StaleGeneration => results.push((
+                    key.clone(),
+                    Err(WintermuteError::StaleGeneration(did.to_owned())),
+                )),
+            }
+        }
+        let (applied, batch_failed) =
+            Self::apply_jobs_batch(pool, &admitted, bulk_load, skip_boilerplate, &gate_mode).await;
+        let mut progress: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        for (key, result) in &applied {
+            if result.is_ok() {
+                if let Some((_, job)) = admitted.iter().find(|(k, _)| k == key) {
+                    let did = Self::job_did(job);
+                    let entry = progress.entry(did).or_insert(job.rev.as_str());
+                    if job.rev.as_str() > *entry {
+                        *entry = job.rev.as_str();
+                    }
+                }
+            }
+        }
+        let progress: Vec<(String, String)> = progress
+            .iter()
+            .map(|(did, rev)| ((*did).to_owned(), (*rev).to_owned()))
+            .collect();
+        // a commit is acknowledged only once every write of its event
+        // landed and the acknowledgement itself is durable; anything short
+        // of that hands the commit job back to the queue
+        let failed_dids: std::collections::HashSet<&str> = applied
+            .iter()
+            .filter(|(_, result)| result.is_err())
+            .filter_map(|(key, _)| admitted.iter().find(|(k, _)| k == key))
+            .map(|(_, job)| Self::job_did(job))
+            .collect();
+        results.extend(applied);
+        let mut batch_failed = batch_failed;
+        if let Err(e) = crate::reconcile::record_progress(&gate_client, &progress).await {
+            tracing::error!("progress record failed: {e}");
+            batch_failed = true;
+        }
+        for (key, job) in commits {
+            let did = Self::job_did(job);
+            if failed_dids.contains(did) {
+                results.push((
+                    key.clone(),
+                    Err(WintermuteError::Other(format!(
+                        "writes of the event failed before the commit {} could be acknowledged",
+                        job.cid
+                    ))),
+                ));
+                continue;
+            }
+            match crate::reconcile::record_commit_progress(&gate_client, did, &job.rev, &job.cid)
+                .await
+            {
+                Ok(()) => results.push((key.clone(), Ok(()))),
+                Err(e) => {
+                    tracing::error!("commit progress record failed for {did}: {e}");
+                    batch_failed = true;
+                    results.push((
+                        key.clone(),
+                        Err(WintermuteError::Other(format!(
+                            "commit acknowledgement for {} was not recorded: {e}",
+                            job.cid
+                        ))),
+                    ));
+                }
+            }
+        }
+        if let Err(e) = gate.close(&gate_client).await {
+            tracing::error!("write gate release failed: {e}");
+            batch_failed = true;
+        }
+        (results, batch_failed)
+    }
+
+    async fn apply_jobs_batch(
+        pool: &Pool,
+        jobs: &[(Vec<u8>, IndexJob)],
+        bulk_load: bool,
+        skip_boilerplate: bool,
+        mode: &GateMode,
     ) -> (Vec<(Vec<u8>, Result<(), WintermuteError>)>, bool) {
         if jobs.is_empty() {
             return (Vec::new(), false);
@@ -1555,6 +1874,7 @@ impl IndexerManager {
                 WriteAction::Delete => {
                     delete_uris.insert(job.uri.as_str());
                 }
+                WriteAction::Commit => {}
             }
         }
         let conflicted: std::collections::HashSet<&str> =
@@ -1572,6 +1892,7 @@ impl IndexerManager {
             match job_tuple.1.action {
                 WriteAction::Create | WriteAction::Update => creates.push(job_tuple),
                 WriteAction::Delete => deletes.push(job_tuple),
+                WriteAction::Commit => results.push((job_tuple.0.clone(), Ok(()))),
             }
         }
 
@@ -1600,7 +1921,13 @@ impl IndexerManager {
                         for (key, job) in group {
                             out.push((
                                 key.clone(),
-                                Box::pin(Self::process_job(pool, job, skip_boilerplate)).await,
+                                Box::pin(Self::process_job_with(
+                                    pool,
+                                    job,
+                                    skip_boilerplate,
+                                    mode.clone(),
+                                ))
+                                .await,
                             ));
                         }
                         out
@@ -1913,7 +2240,8 @@ impl IndexerManager {
             }
         }
 
-        tracing::info!(
+        // Per-batch, same as the timing line above: DEBUG, not INFO.
+        tracing::debug!(
             "batch deletes: total={}ms, n={}, applied={}",
             start.elapsed().as_millis(),
             parsed.len(),
@@ -1947,6 +2275,8 @@ impl IndexerManager {
             "app.bsky.actor.status" => Self::delete_status(client, did, rkey).await,
             "app.bsky.graph.verification" => Self::delete_verification(client, did, rkey).await,
             "community.blacksky.feed.post" => Self::delete_community_post(client, did, rkey).await,
+            calendar::EVENT_COLLECTION => calendar::delete_event(client, did, rkey).await,
+            calendar::RSVP_COLLECTION => calendar::delete_rsvp(client, did, rkey).await,
             _ => Ok(()),
         }
     }
@@ -2265,24 +2595,31 @@ impl IndexerManager {
         let total_ms = batch_start.elapsed().as_millis();
         let applied_count = applied_jobs.len();
 
-        // Log timing breakdown
-        let col_breakdown: String = collection_timings
-            .iter()
-            .map(|(c, ms, n)| format!("{}={}ms({})", c.rsplit('.').next().unwrap_or(c), ms, n))
-            .collect::<Vec<_>>()
-            .join(", ");
+        // Log timing breakdown. One line per batch, so it is DEBUG rather than INFO: a
+        // sharded drain with no sleep floor emits these at the batch rate, which crowds
+        // out every other line and shortens how far back the journal reaches.
+        // `col_breakdown` allocates per collection, so build it inside the level check
+        // rather than before it — otherwise the formatting cost is paid on every batch
+        // whether or not anything records the event.
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let col_breakdown: String = collection_timings
+                .iter()
+                .map(|(c, ms, n)| format!("{}={}ms({})", c.rsplit('.').next().unwrap_or(c), ms, n))
+                .collect::<Vec<_>>()
+                .join(", ");
 
-        tracing::info!(
-            "batch timing: total={}ms, parse={}ms, actors={}ms, records={}ms, collections={}ms [{}] | jobs={}, applied={}",
-            total_ms,
-            parse_ms,
-            actors_ms,
-            records_ms,
-            collections_ms,
-            col_breakdown,
-            jobs.len(),
-            applied_count
-        );
+            tracing::debug!(
+                "batch timing: total={}ms, parse={}ms, actors={}ms, records={}ms, collections={}ms [{}] | jobs={}, applied={}",
+                total_ms,
+                parse_ms,
+                actors_ms,
+                records_ms,
+                collections_ms,
+                col_breakdown,
+                jobs.len(),
+                applied_count
+            );
+        }
 
         (results, batch_failed)
     }
@@ -2425,6 +2762,12 @@ impl IndexerManager {
             }
             "community.blacksky.feed.post" => {
                 Self::index_community_post_stub(client, did, rkey, cid, indexed_at).await
+            }
+            calendar::EVENT_COLLECTION => {
+                calendar::index_event(client, did, rkey, record, cid, indexed_at).await
+            }
+            calendar::RSVP_COLLECTION => {
+                calendar::index_rsvp(client, did, rkey, record, cid, indexed_at).await
             }
             _ => Ok(()),
         }
@@ -2990,6 +3333,7 @@ impl IndexerManager {
         let mut feed_item_data: Vec<(String, String, String, String, String, String)> =
             Vec::with_capacity(jobs.len());
         let mut embed_image_data: Vec<(String, String, String, String)> = Vec::new();
+        let mut embed_gallery_data: Vec<(String, String, String, String)> = Vec::new();
         let mut embed_video_data: Vec<(String, String, Option<String>)> = Vec::new();
         let mut quote_data: Vec<(String, String, String, String, String, String)> = Vec::new();
         let mut notif_rows: Vec<bulk::NotificationRow> = Vec::new();
@@ -3109,6 +3453,7 @@ impl IndexerManager {
                         embed,
                         &uri,
                         &mut embed_image_data,
+                        &mut embed_gallery_data,
                         &mut embed_video_data,
                     );
                     let quotes_before = quote_data.len();
@@ -3153,7 +3498,14 @@ impl IndexerManager {
         // embed/quote inserts.
         let (embed_result, notif_result) = futures::join!(
             async {
-                bulk::copy_insert_post_embed_images(client, &embed_image_data).await?;
+                bulk::copy_insert_post_embed_images(client, EMBED_IMAGE_TABLE, &embed_image_data)
+                    .await?;
+                bulk::copy_insert_post_embed_images(
+                    client,
+                    EMBED_GALLERY_IMAGE_TABLE,
+                    &embed_gallery_data,
+                )
+                .await?;
                 bulk::copy_insert_post_embed_videos(client, &embed_video_data).await?;
                 bulk::copy_insert_quotes(client, &quote_data, compute_agg).await
             },
@@ -3205,36 +3557,56 @@ impl IndexerManager {
         }
     }
 
-    /// Extract embed data (images and videos) from a post's embed field
+    /// Extract embed data (images, gallery images and videos) from a post's embed field
     fn extract_embed_data(
         embed: &serde_json::Value,
         post_uri: &str,
         embed_image_data: &mut Vec<(String, String, String, String)>,
+        embed_gallery_data: &mut Vec<(String, String, String, String)>,
         embed_video_data: &mut Vec<(String, String, Option<String>)>,
     ) {
         let embed_type = embed.get("$type").and_then(|t| t.as_str()).unwrap_or("");
-
-        // Handle app.bsky.embed.images
-        if embed_type == "app.bsky.embed.images" {
-            Self::extract_images(embed, post_uri, embed_image_data);
+        let media = if embed_type == "app.bsky.embed.recordWithMedia" {
+            embed.get("media")
+        } else {
+            Some(embed)
+        };
+        let Some(media) = media else { return };
+        match media.get("$type").and_then(|t| t.as_str()).unwrap_or("") {
+            EMBED_IMAGES => Self::extract_images(media, post_uri, embed_image_data),
+            EMBED_GALLERY => Self::extract_images(media, post_uri, embed_gallery_data),
+            "app.bsky.embed.video" => Self::extract_video(media, post_uri, embed_video_data),
+            _ => {}
         }
+    }
 
-        // Handle app.bsky.embed.video
-        if embed_type == "app.bsky.embed.video" {
-            Self::extract_video(embed, post_uri, embed_video_data);
-        }
-
-        // Handle app.bsky.embed.recordWithMedia (has nested media)
-        if embed_type == "app.bsky.embed.recordWithMedia" {
-            if let Some(media) = embed.get("media") {
-                let media_type = media.get("$type").and_then(|t| t.as_str()).unwrap_or("");
-                if media_type == "app.bsky.embed.images" {
-                    Self::extract_images(media, post_uri, embed_image_data);
-                } else if media_type == "app.bsky.embed.video" {
-                    Self::extract_video(media, post_uri, embed_video_data);
-                }
-            }
-        }
+    /// `(position, image cid, alt)` for each image of an images or gallery
+    /// embed. Gallery items are a union, so only its image items are kept,
+    /// at their position among all items.
+    fn embed_images(embed: &serde_json::Value) -> Vec<(String, &str, &str)> {
+        let is_gallery = embed.get("$type").and_then(|t| t.as_str()) == Some(EMBED_GALLERY);
+        let items = embed
+            .get(if is_gallery { "items" } else { "images" })
+            .and_then(|i| i.as_array());
+        items
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .filter(|(_, item)| {
+                !is_gallery
+                    || item.get("$type").and_then(|t| t.as_str()) == Some(EMBED_GALLERY_IMAGE)
+            })
+            .filter_map(|(position, item)| {
+                // The image CID can be in image.ref.$link (CBOR decoded) or image.ref (string)
+                let image_cid = item.get("image").and_then(|img| {
+                    img.get("ref")
+                        .and_then(|r| r.get("$link").and_then(|l| l.as_str()))
+                        .or_else(|| img.get("ref").and_then(|r| r.as_str()))
+                })?;
+                let alt = item.get("alt").and_then(|a| a.as_str()).unwrap_or("");
+                Some((position.to_string(), image_cid, alt))
+            })
+            .collect()
     }
 
     fn extract_images(
@@ -3242,26 +3614,13 @@ impl IndexerManager {
         post_uri: &str,
         embed_image_data: &mut Vec<(String, String, String, String)>,
     ) {
-        if let Some(images) = embed.get("images").and_then(|i| i.as_array()) {
-            for (position, image) in images.iter().enumerate() {
-                // Get the image CID - can be in image.ref.$link (CBOR decoded) or image.ref (string)
-                let image_cid = image.get("image").and_then(|img| {
-                    img.get("ref")
-                        .and_then(|r| r.get("$link").and_then(|l| l.as_str()))
-                        .or_else(|| img.get("ref").and_then(|r| r.as_str()))
-                });
-
-                let alt = image.get("alt").and_then(|a| a.as_str()).unwrap_or("");
-
-                if let Some(image_cid) = image_cid {
-                    embed_image_data.push((
-                        post_uri.to_owned(),
-                        position.to_string(),
-                        image_cid.to_owned(),
-                        alt.to_owned(),
-                    ));
-                }
-            }
+        for (position, image_cid, alt) in Self::embed_images(embed) {
+            embed_image_data.push((
+                post_uri.to_owned(),
+                position,
+                image_cid.to_owned(),
+                alt.to_owned(),
+            ));
         }
     }
 
@@ -4013,8 +4372,8 @@ impl IndexerManager {
     ) -> Result<(), WintermuteError> {
         let embed_type = embed.get("$type").and_then(|t| t.as_str()).unwrap_or("");
 
-        // Handle app.bsky.embed.images
-        if embed_type == "app.bsky.embed.images" {
+        // Handle app.bsky.embed.images and app.bsky.embed.gallery
+        if embed_type == EMBED_IMAGES || embed_type == EMBED_GALLERY {
             Self::handle_embed_images(client, embed, post_uri).await?;
         }
 
@@ -4046,7 +4405,7 @@ impl IndexerManager {
             // Handle the media part (images or video)
             if let Some(media) = embed.get("media") {
                 let media_type = media.get("$type").and_then(|t| t.as_str()).unwrap_or("");
-                if media_type == "app.bsky.embed.images" {
+                if media_type == EMBED_IMAGES || media_type == EMBED_GALLERY {
                     Self::handle_embed_images(client, media, post_uri).await?;
                 } else if media_type == "app.bsky.embed.video" {
                     Self::handle_embed_video(client, media, post_uri).await?;
@@ -4062,29 +4421,20 @@ impl IndexerManager {
         embed: &serde_json::Value,
         post_uri: &str,
     ) -> Result<(), WintermuteError> {
-        if let Some(images) = embed.get("images").and_then(|i| i.as_array()) {
-            for (position, image) in images.iter().enumerate() {
-                // Get the image CID - can be in image.ref.$link (CBOR decoded) or image.ref (string)
-                let image_cid = image.get("image").and_then(|img| {
-                    img.get("ref")
-                        .and_then(|r| r.get("$link").and_then(|l| l.as_str()))
-                        .or_else(|| img.get("ref").and_then(|r| r.as_str()))
-                });
-
-                let alt = image.get("alt").and_then(|a| a.as_str()).unwrap_or("");
-
-                if let Some(image_cid) = image_cid {
-                    let position_str = position.to_string();
-                    client
-                        .execute(
-                            "INSERT INTO post_embed_image (\"postUri\", position, \"imageCid\", alt)
-                             VALUES ($1, $2, $3, $4)
-                             ON CONFLICT DO NOTHING",
-                            &[&post_uri, &position_str, &image_cid, &alt],
-                        )
-                        .await?;
-                }
-            }
+        let table = if embed.get("$type").and_then(|t| t.as_str()) == Some(EMBED_GALLERY) {
+            EMBED_GALLERY_IMAGE_TABLE
+        } else {
+            EMBED_IMAGE_TABLE
+        };
+        let insert = format!(
+            "INSERT INTO {table} (\"postUri\", position, \"imageCid\", alt)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT DO NOTHING"
+        );
+        for (position, image_cid, alt) in Self::embed_images(embed) {
+            client
+                .execute(&insert, &[&post_uri, &position, &image_cid, &alt])
+                .await?;
         }
         Ok(())
     }

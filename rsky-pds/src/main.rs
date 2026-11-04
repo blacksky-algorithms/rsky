@@ -1,12 +1,38 @@
 use rsky_pds::build_rocket;
+use rsky_pds::cli;
 
 #[rocket::main]
 async fn main() {
-    let _ = &*rsky_pds::context::PDS_REPO_SIGNING_KEYPAIR;
-    let _ = &*rsky_pds::auth_verifier::PDS_JWT_KEYPAIR;
+    let _ = &*rsky_pds::account_manager::helpers::auth::PDS_JWT_SIGNER;
     let _ = &*rsky_pds::apis::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 
-    let subscriber = tracing_subscriber::FmtSubscriber::new();
-    tracing::subscriber::set_global_default(subscriber).unwrap();
-    let _ = build_rocket(None).await.launch().await;
+    let command = cli::parse_args(std::env::args().skip(1));
+    let target = match command {
+        Ok(None) => rsky_pds::logging::LogTarget::Stdout,
+        _ => rsky_pds::logging::LogTarget::Stderr,
+    };
+    rsky_pds::logging::init_to(rsky_pds::logging::LogFormat::from_env(), target);
+    match command {
+        Ok(None) => {
+            let _ = build_rocket(None).await.launch().await;
+            rsky_pds::telemetry::shutdown();
+        }
+        Ok(Some(command)) => {
+            dotenvy::dotenv().ok();
+            match cli::run(command).await {
+                Ok((result, code)) => {
+                    println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                    std::process::exit(code);
+                }
+                Err(err) => {
+                    tracing::error!(?err, "maintenance command failed");
+                    std::process::exit(2);
+                }
+            }
+        }
+        Err(err) => {
+            tracing::error!(%err, "invalid arguments");
+            std::process::exit(2);
+        }
+    }
 }

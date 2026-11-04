@@ -1,0 +1,26 @@
+{% extends "layouts/base.html" %}
+{% import "components/macros.html" as ui %}
+{% block body %}
+<div class="auth-background">
+  <div class="auth-card-wrap">
+    <main class="card">
+      <div class="brand-row">
+        {% if let Some(logo) = shell.logo_url %}<img src="{{ logo }}" alt="" class="brand-logo">{% endif %}
+        <span>{{ shell.service_name }}</span>
+      </div>
+      <div class="card-header center">
+        <h1 class="card-title lg">{% block card_title %}{% endblock %}</h1>
+        {% block card_subtitle %}{% endblock %}
+      </div>
+      <div class="card-content">
+        {% block content %}{% endblock %}
+      </div>
+      {% if !shell.links.is_empty() %}
+      <div class="card-footer">
+        {% call ui::brand_links(shell.links) %}
+      </div>
+      {% endif %}
+    </main>
+  </div>
+</div>
+{% endblock %}

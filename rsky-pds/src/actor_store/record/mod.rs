@@ -122,6 +122,80 @@ pub struct RecordReader {
 }
 
 // Handles getting lexicon records from the per-actor db
+/// Indexes one record version on a connection inside a transaction.
+pub fn index_record_in(
+    conn: &rusqlite::Connection,
+    uri: &AtUri,
+    cid: &Cid,
+    record: Option<&RepoRecord>,
+    action: WriteOpAction,
+    repo_rev: &str,
+    indexed_at: &str,
+) -> Result<()> {
+    tracing::debug!("indexing record {uri}");
+    let collection = uri.get_collection();
+    let rkey = uri.get_rkey();
+    let hostname = uri.get_hostname();
+    if !hostname.starts_with("did:") {
+        bail!("Expected indexed URI to contain DID")
+    } else if collection.is_empty() {
+        bail!("Expected indexed URI to contain a collection")
+    } else if rkey.is_empty() {
+        bail!("Expected indexed URI to contain a record key")
+    }
+    conn.execute(
+        "INSERT INTO record (uri, cid, collection, rkey, \"repoRev\", \"indexedAt\") \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+         ON CONFLICT (uri) DO UPDATE SET \
+         cid = excluded.cid, \
+         \"repoRev\" = excluded.\"repoRev\", \
+         \"indexedAt\" = excluded.\"indexedAt\"",
+        rusqlite::params![
+            uri.to_string(),
+            cid.to_string(),
+            collection,
+            rkey,
+            repo_rev,
+            indexed_at
+        ],
+    )?;
+    if let Some(record) = record {
+        let backlinks = get_backlinks(uri, record)?;
+        // an update recreates the record's backlinks from scratch, so a
+        // follow that now points elsewhere loses its old link
+        if let WriteOpAction::Update = action {
+            conn.execute("DELETE FROM backlink WHERE uri = ?1", [uri.to_string()])?;
+        }
+        add_backlinks_in(conn, &backlinks)?;
+    }
+    Ok(())
+}
+
+/// Removes a record and its backlinks on a connection inside a transaction.
+pub fn delete_record_in(conn: &rusqlite::Connection, uri: &AtUri) -> Result<()> {
+    tracing::debug!("deleting indexed record {uri}");
+    conn.execute("DELETE FROM record WHERE uri = ?1", [uri.to_string()])?;
+    conn.execute("DELETE FROM backlink WHERE uri = ?1", [uri.to_string()])?;
+    Ok(())
+}
+
+fn add_backlinks_in(conn: &rusqlite::Connection, backlinks: &[Backlink]) -> Result<()> {
+    if backlinks.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = conn.prepare_cached(
+        "INSERT INTO backlink (uri, path, \"linkTo\") VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING",
+    )?;
+    for backlink in backlinks {
+        stmt.execute(rusqlite::params![
+            backlink.uri,
+            backlink.path,
+            backlink.link_to
+        ])?;
+    }
+    Ok(())
+}
+
 impl RecordReader {
     pub fn new(did: String, db: ActorDb) -> Self {
         RecordReader { did, db }
@@ -469,99 +543,27 @@ impl RecordReader {
         repo_rev: String,
         timestamp: Option<String>,
     ) -> Result<()> {
-        tracing::debug!("indexing record {uri}");
-
-        let collection = uri.get_collection();
-        let rkey = uri.get_rkey();
-        let hostname = uri.get_hostname().to_string();
-        let action = action.unwrap_or(WriteOpAction::Create);
         let indexed_at = timestamp.unwrap_or_else(rsky_common::now);
-
-        if !hostname.starts_with("did:") {
-            bail!("Expected indexed URI to contain DID")
-        } else if collection.is_empty() {
-            bail!("Expected indexed URI to contain a collection")
-        } else if rkey.is_empty() {
-            bail!("Expected indexed URI to contain a record key")
-        }
-
-        // Track current version of record
-        let uri_string = uri.to_string();
-        let cid_string = cid.to_string();
+        let action = action.unwrap_or(WriteOpAction::Create);
         self.db
             .run(move |conn| {
-                conn.execute(
-                    "INSERT INTO record (uri, cid, collection, rkey, \"repoRev\", \"indexedAt\") \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
-                     ON CONFLICT (uri) DO UPDATE SET \
-                     cid = excluded.cid, \
-                     \"repoRev\" = excluded.\"repoRev\", \
-                     \"indexedAt\" = excluded.\"indexedAt\"",
-                    rusqlite::params![
-                        uri_string, cid_string, collection, rkey, repo_rev, indexed_at
-                    ],
-                )?;
-                Ok(())
+                index_record_in(
+                    conn,
+                    &uri,
+                    &cid,
+                    record.as_ref(),
+                    action.clone(),
+                    &repo_rev,
+                    &indexed_at,
+                )
             })
-            .await?;
-
-        if let Some(record) = record {
-            // Maintain backlinks
-            let backlinks = get_backlinks(&uri, &record)?;
-            if let WriteOpAction::Update = action {
-                // On update just recreate backlinks from scratch for the record, so we can clear out
-                // the old ones. E.g. for weird cases like updating a follow to be for a different did.
-                self.remove_backlinks_by_uri(&uri).await?;
-            }
-            self.add_backlinks(backlinks).await?;
-        }
-        tracing::debug!("indexed record {uri}");
-        Ok(())
+            .await
     }
 
     #[tracing::instrument(skip_all)]
     pub async fn delete_record(&self, uri: &AtUri) -> Result<()> {
-        tracing::debug!("deleting indexed record {uri}");
-        let uri = uri.to_string();
-        self.db
-            .run(move |conn| {
-                conn.execute("DELETE FROM record WHERE uri = ?1", [uri.clone()])?;
-                conn.execute("DELETE FROM backlink WHERE uri = ?1", [uri.clone()])?;
-                Ok(())
-            })
-            .await
-    }
-
-    pub async fn remove_backlinks_by_uri(&self, uri: &AtUri) -> Result<()> {
-        let uri = uri.to_string();
-        self.db
-            .run(move |conn| {
-                conn.execute("DELETE FROM backlink WHERE uri = ?1", [uri.clone()])?;
-                Ok(())
-            })
-            .await
-    }
-
-    pub async fn add_backlinks(&self, backlinks: Vec<Backlink>) -> Result<()> {
-        if backlinks.is_empty() {
-            return Ok(());
-        }
-        self.db
-            .run(move |conn| {
-                let mut stmt = conn.prepare(
-                    "INSERT INTO backlink (uri, path, \"linkTo\") \
-                     VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING",
-                )?;
-                for backlink in &backlinks {
-                    stmt.execute(rusqlite::params![
-                        backlink.uri,
-                        backlink.path,
-                        backlink.link_to
-                    ])?;
-                }
-                Ok(())
-            })
-            .await
+        let uri = uri.clone();
+        self.db.run(move |conn| delete_record_in(conn, &uri)).await
     }
 
     pub async fn update_record_takedown_status(
@@ -780,6 +782,23 @@ mod tests {
             )
             .await;
         assert!(res.is_err());
+        let no_collection = AtUri::make("did:example:alice".to_owned(), None, None).unwrap();
+        let err = reader
+            .index_record(no_collection, cid, None, None, "rev-1".to_owned(), None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("collection"));
+        let no_rkey = AtUri::make(
+            "did:example:alice".to_owned(),
+            Some("app.bsky.feed.post".to_owned()),
+            None,
+        )
+        .unwrap();
+        let err = reader
+            .index_record(no_rkey, cid, None, None, "rev-1".to_owned(), None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("record key"));
     }
 
     #[tokio::test]

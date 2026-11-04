@@ -57,7 +57,7 @@ pub async fn space_notify_write(
     .await
     .map_err(|error| {
         tracing::debug!(%error, "notifyWrite auth rejected");
-        ApiError::InvalidToken
+        ApiError::InvalidToken("Token is invalid".to_string())
     })?;
     // Two legs carry this method. Leg 1 is a repo host telling the space host
     // that one of its members advanced, signed by that member. Leg 2 is the
@@ -69,7 +69,7 @@ pub async fn space_notify_write(
         return Ok(());
     }
     if claims.iss != repo {
-        return Err(ApiError::InvalidToken);
+        return Err(ApiError::InvalidToken("Token is invalid".to_string()));
     }
     let (_, space_store, keypair) =
         local_space_def(actor_store, blobstore_factory, &space_id).await?;
@@ -82,7 +82,7 @@ pub async fn space_notify_write(
         .await
         .map_err(space_error)?;
     if !fresh {
-        return Err(ApiError::InvalidToken);
+        return Err(ApiError::InvalidToken("Token is invalid".to_string()));
     }
     space_store
         .upsert_writer(&space_id.uri(), &repo, &rev, None)

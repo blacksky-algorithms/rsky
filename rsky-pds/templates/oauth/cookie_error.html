@@ -1,0 +1,14 @@
+{% extends "layouts/auth_shell.html" %}
+{% import "components/macros.html" as ui %}
+{% block title %}Cookie Error{% endblock %}
+{% block card_title %}Cookie Error{% endblock %}
+{% block content %}
+<div role="alert" class="notice notice-info">
+  {% include "icons/info.svg.html" %}
+  <div class="notice-body">{{ cookie_message }}</div>
+</div>
+<form method="get" action="{{ continue_action }}">
+  {% for pair in continue_params %}<input type="hidden" name="{{ pair.0 }}" value="{{ pair.1 }}">{% endfor %}
+  <button type="submit" class="btn btn-default btn-block">Continue</button>
+</form>
+{% endblock %}

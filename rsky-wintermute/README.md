@@ -87,7 +87,7 @@ RUST_LOG=info \
 
 | Variable | Description                                                                                                     |
 |----------|-----------------------------------------------------------------------------------------------------------------|
-| `RELAY_HOSTS` | Comma-separated relay hosts (e.g., `bsky.network` or `relay1.us-east.bsky.network,relay1.us-west.bsky.network`) |
+| `RELAY_HOSTS` | Comma-separated relay hosts (e.g., `bsky.network` or `relay1.us-east.bsky.network,relay1.us-west.bsky.network`); a host written with `ws://` is reached without TLS |
 | `DATABASE_URL` | PostgreSQL connection string                                                                                    |
 
 ### Optional Environment Variables
@@ -96,6 +96,7 @@ RUST_LOG=info \
 |----------|---------|-------------|
 | `LABELER_HOSTS` | (empty) | Comma-separated labeler hosts for label subscription |
 | `METRICS_PORT` | `9090` | Port for Prometheus metrics endpoint |
+| `PLC_URL` | `https://plc.directory` | PLC directory used to resolve DID documents |
 | `RUST_LOG` | (none) | Log level (`error`, `warn`, `info`, `debug`, `trace`) |
 | `INDEXER_WORKERS` | `16` | Concurrent index workers per queue |
 | `INDEXER_BATCH_SIZE` | `1000` | Records per batch (test only) |
@@ -105,6 +106,9 @@ RUST_LOG=info \
 | `BACKFILLER_TIMEOUT_SECS` | `120` | Timeout for fetching repo CAR from PDS |
 | `INLINE_CONCURRENCY` | `100` | Concurrent inline indexing tasks for firehose events |
 | `DB_POOL_SIZE` | `20` | Connections per pool (4 pools: firehose, labels, indexer, backfiller) |
+| `FETCH_ALLOW_PRIVATE` | (unset) | Let repository and status fetches reach private or plain-http hosts (local development only); otherwise only public https hosts are reachable |
+| `RECONCILE_PDS_URL` | (none) | The PDS `reindex_did` reads frontiers and exports from, as a fixed address |
+| `RECONCILE_PDS_ADMIN_PASSWORD` | (none) | Admin password for the frontier read on that PDS |
 
 ## Utilities
 
@@ -125,6 +129,24 @@ Manually queue DIDs for backfill from various sources:
 # Show queue status
 ./target/release/queue_backfill status
 ```
+
+### reindex_did
+
+Reconciles one actor's downstream state against its repository under a
+fence, or verifies that a recovery commit was acknowledged:
+
+```bash
+DATABASE_URL=... RECONCILE_PDS_URL=https://pds.example RECONCILE_PDS_ADMIN_PASSWORD=... \
+  reindex_did --did did:plc:... --reconcile [--dry-run] [--reset-to-repo] [--break-glass]
+reindex_did --did did:plc:... --verify-recovery <commit cid>
+```
+
+The report is JSON. Exit code 1 means the run was refused and nothing
+changed: the PDS reported an incomplete history (`--break-glass` proceeds
+but records an obligation that never converges), the export did not match
+the frontier's current commit after three attempts, or the downstream
+state holds records newer than the repository (`--reset-to-repo` deletes
+or overwrites them). See Reconciliation under Operations.
 
 ## Queues
 
@@ -165,6 +187,8 @@ Wintermute indexes all standard bsky record types:
 - `chat.bsky.actor.declaration` - Chat declarations
 - `app.bsky.notification.declaration` - Notification declarations
 - `app.bsky.actor.status` - Actor status
+- `community.lexicon.calendar.event` - Calendar events (needs `community.lexicon.calendar.` in `RECORD_COLLECTION_ALLOWLIST` when the allowlist is set)
+- `community.lexicon.calendar.rsvp` - Calendar RSVPs; one row per actor and event, the latest write wins
 
 All records are also stored in the generic `record` table with full JSON.
 
@@ -213,6 +237,33 @@ On SIGTERM or SIGINT, wintermute:
 3. Saves cursor positions
 4. Exits cleanly
 
+### Reconciliation
+
+Every writer takes a shared per-actor advisory lock (`hashtext(did)`) and
+reads the actor's fence, boundary, and generation from the `wintermute`
+schema before it writes; `reindex_did` takes the exclusive lock, so a
+writer cannot check "no fence", pause, and commit after the fence is
+installed. Work for a fenced actor is deferred and retried; work at or
+below the persisted boundary is dropped, deletes included; work stamped
+with an older generation (or none, once the actor has one) is dropped and
+the actor's repository is fetched again under the current generation.
+Every job carries the generation captured before its data was obtained
+(relay sequence for firehose jobs; host and fetch time for backfill jobs).
+
+`wintermute.did_progress` records each actor's highest applied revision
+and the last commit applied, including commits that changed no record. A
+reconciliation fetches the export and a fresh, complete frontier from the
+PDS, persists the boundary (the greatest of the previous boundary, the
+frontier, the export's revision, and the PDS's exposed maximum) with a new
+generation before any change, then deletes phantoms, overwrites differing
+records, and inserts missing ones. When the boundary exceeds the export's
+revision the run ends in the recovery branch: the application fence is
+released so the PDS's recovery commit can be applied, and
+`--verify-recovery` checks that `did_progress.last_commit_cid` names it
+before the PDS mutation fence is released. Otherwise the fence is
+released at once. The `indexer_admission_total{outcome}` metric counts
+gate outcomes.
+
 ### Recovery
 
 Fjall queues are durable and survive crashes. On restart, wintermute:
@@ -240,6 +291,53 @@ Requires a PostgreSQL database with the bsky dataplane schema. Tables include:
 - `notification`, `label`
 - `record`, `sub_state`
 - `verification`
+- `calendar_event`, `calendar_rsvp`
+
+## Running the database-backed tests
+
+`indexer::tests` and `ingester::tests` write to a real PostgreSQL that carries the
+appview dataplane schema. They read `DATABASE_URL` and default to
+`postgresql://postgres:postgres@localhost:5432/bsky_test`. A snapshot of that schema
+lives in [`tests/schema/appview.sql`](tests/schema/appview.sql); CI applies it to a
+stock `postgres:17` container before `cargo test`, and you can do the same locally:
+
+```bash
+docker run -d --name wintermute-pg -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=bsky_test -p 5432:5432 postgres:17
+until docker exec wintermute-pg pg_isready -U postgres -d bsky_test; do sleep 1; done
+docker exec -i wintermute-pg psql -U postgres -d bsky_test -v ON_ERROR_STOP=1 \
+  < rsky-wintermute/tests/schema/appview.sql
+
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/bsky_test \
+  cargo test -p rsky-wintermute
+```
+
+The snapshot creates every object in `public` (the `bsky.` qualifiers from the dump
+are stripped) so the tests' default URL works without a `search_path` option.
+Production runs the same tables in schema `bsky` with `search_path=bsky` set on the
+connection string; wintermute's queries are unqualified, so both layouts behave the
+same. A few tests (`test_live_label_stream`, the hubble `getRepo` fetch) hit the
+network and are `#[ignore]`d.
+
+### Regenerating the schema snapshot
+
+The file is a cleaned `pg_dump` of a database migrated with the
+[blacksky-algorithms/atproto](https://github.com/blacksky-algorithms/atproto) fork's
+`packages/bsky` kysely migrations (currently `_20260816T120000000Z`). When those
+migrations change, redump from any database at the new migration head:
+
+```bash
+pg_dump --schema-only --no-owner --no-privileges --no-comments -n bsky appview_db \
+  > appview-bsky.sql
+```
+
+Then, to produce `tests/schema/appview.sql`: drop the `\restrict`/`\unrestrict`
+lines, the `SET ...`/`SELECT pg_catalog.set_config(...)` preamble and
+`CREATE SCHEMA bsky;`; strip the `bsky.` schema qualifier from every identifier
+(including the `nextval('bsky....')` defaults); prepend
+`CREATE EXTENSION IF NOT EXISTS pg_trgm;` for the trigram indexes; keep the
+provenance header up to date; and do not include any rows (in particular the
+`kysely_migration` rows). Verify with the docker commands above before committing.
 
 ## License
 

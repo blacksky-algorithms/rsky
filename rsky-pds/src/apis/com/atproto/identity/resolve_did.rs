@@ -12,7 +12,7 @@ pub async fn resolve_did(
     id_resolver: &State<SharedIdResolver>,
 ) -> Result<Json<ResolveDidOutput>, ApiError> {
     let doc = {
-        let lock = id_resolver.id_resolver.write().await;
+        let lock = id_resolver.id_resolver.read().await;
         lock.did.resolve(did.clone(), None).await
     };
     match doc {

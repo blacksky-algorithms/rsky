@@ -1,0 +1,19 @@
+{% extends "layouts/auth_shell.html" %}
+{% import "components/macros.html" as ui %}
+{% block title %}Authenticate{% endblock %}
+{% block card_title %}Welcome{% endblock %}
+{% block card_subtitle %}<p class="card-description">Please authenticate to continue</p>{% endblock %}
+{% block content %}
+<div class="action-column">
+  <a class="btn btn-default" href="{{ signup_href }}">Create a new account</a>
+  <a class="btn btn-secondary" href="{{ sign_in_href }}">Sign in</a>
+  {% if let Some(action) = cancel_action %}
+  <div class="separator"></div>
+  <form method="post" action="{{ action }}">
+    {% call ui::csrf_fields(csrf) %}
+    {% call ui::request_fields(client_id, request_uri) %}
+    <button type="submit" class="btn btn-secondary btn-block">Cancel</button>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}

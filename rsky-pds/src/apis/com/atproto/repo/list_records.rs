@@ -2,7 +2,7 @@ use crate::account_manager::AccountManager;
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
-use anyhow::{bail, Result};
+use anyhow::Result;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_lexicon::com::atproto::repo::{ListRecordsOutput, Record};
@@ -26,9 +26,11 @@ async fn inner_list_records(
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
-) -> Result<ListRecordsOutput> {
+) -> Result<ListRecordsOutput, ApiError> {
     if limit > 100 {
-        bail!("Error: limit can not be greater than 100")
+        return Err(ApiError::InvalidRequest(format!(
+            "Invalid com.atproto.repo.listRecords params: integer too big (maximum 100, got {limit})"
+        )));
     }
     let did = account_manager.get_did_for_actor(&repo, None).await?;
     if let Some(did) = did {
@@ -36,14 +38,11 @@ async fn inner_list_records(
             .read(did.clone(), blobstore_factory.blobstore(did.clone()))
             .await?;
 
-        // Fetch one extra row to determine whether this page can be resumed.
-        // Returning a cursor after a short final page makes compliant clients
-        // issue a pointless empty request, and was observed in Bulleted.
-        let mut rows = actor_store
+        let rows = actor_store
             .record
             .list_records_for_collection(
                 collection,
-                i64::from(limit) + 1,
+                i64::from(limit),
                 reverse,
                 cursor,
                 rkeyStart,
@@ -51,8 +50,6 @@ async fn inner_list_records(
                 None,
             )
             .await?;
-        let has_more = rows.len() > usize::from(limit);
-        rows.truncate(usize::from(limit));
         let records: Vec<Record> = rows
             .into_iter()
             .map(|record| {
@@ -67,18 +64,21 @@ async fn inner_list_records(
             })
             .collect::<Result<Vec<Record>>>()?;
 
-        let cursor = if has_more {
-            let last_record = records
-                .last()
-                .expect("a page with another record has a last record");
-            let last_at_uri: AtUri = last_record.uri.clone().try_into()?;
-            Some(last_at_uri.get_rkey())
-        } else {
-            None
+        // The reference answers every non-empty page with the last rkey as
+        // the cursor, final pages included; clients built against it expect
+        // the same shape from either implementation.
+        let cursor = match records.last() {
+            Some(last_record) => {
+                let last_at_uri: AtUri = last_record.uri.clone().try_into()?;
+                Some(last_at_uri.get_rkey())
+            }
+            None => None,
         };
         Ok(ListRecordsOutput { records, cursor })
     } else {
-        bail!("Could not find repo: {repo}")
+        Err(ApiError::InvalidRequest(format!(
+            "Could not find repo: {repo}"
+        )))
     }
 }
 
@@ -122,8 +122,8 @@ pub async fn list_records(
     {
         Ok(res) => Ok(Json(res)),
         Err(error) => {
-            tracing::error!("@LOG: ERROR: {error}");
-            Err(ApiError::RuntimeError)
+            tracing::error!("@LOG: ERROR: {error:?}");
+            Err(error)
         }
     }
 }

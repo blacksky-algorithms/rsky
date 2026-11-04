@@ -137,8 +137,10 @@ async fn test_create_session() {
         .body(session_input.to_string())
         .dispatch()
         .await;
-    let response_status = response.status();
-    assert_eq!(response_status, Status::BadRequest);
+    assert_eq!(response.status(), Status::Unauthorized);
+    let body: serde_json::Value = response.into_json().await.unwrap();
+    assert_eq!(body["error"], "AuthenticationRequired");
+    assert_eq!(body["message"], "Invalid identifier or password");
 }
 
 #[tokio::test]
@@ -193,9 +195,12 @@ async fn test_liveness_options_and_catcher() {
         Some("*")
     );
 
-    // unhandled paths fall through to the default catcher
+    // unhandled paths fall through to the default catcher, which answers
+    // the status it was given
     let response = client.get("/does-not-exist").dispatch().await;
-    assert_eq!(response.status(), Status::InternalServerError);
+    assert_eq!(response.status(), Status::NotFound);
+    let body: serde_json::Value = response.into_json().await.unwrap();
+    assert_eq!(body["error"], "NotFound");
 }
 
 async fn get_access_token(client: &rocket::local::asynchronous::Client) -> String {
@@ -215,11 +220,151 @@ async fn get_access_token(client: &rocket::local::asynchronous::Client) -> Strin
     body["accessJwt"].as_str().unwrap().to_string()
 }
 
-/// `listRecords` must return the record value itself and omit the cursor on a
-/// short final page. Consumers treat a nested `{uri, cid, value}` as a failed
-/// write, and a final-page cursor invites a needless empty request.
+/// `listRecords` must return the record value itself and, like the reference,
+/// a cursor on every non-empty page including the final one. Consumers treat
+/// a nested `{uri, cid, value}` as a failed write, and clients paginate
+/// until a page comes back empty.
+/// A record posted without a `$type` is written under its collection's, as
+/// the reference does; one naming another collection is a client error.
 #[tokio::test]
-async fn test_list_records_has_direct_values_and_no_final_cursor() {
+async fn create_record_defaults_the_type_to_the_collection() {
+    let (_dir, client) = common::get_client().await;
+    let token = get_access_token(&client).await;
+    let did = "did:plc:khvyd3oiw46vif5gm7hijslk";
+    client
+        .rocket()
+        .state::<rsky_pds::account_manager::AccountManager>()
+        .unwrap()
+        .activate_account(did)
+        .await
+        .unwrap();
+    let create = |body: serde_json::Value| {
+        client
+            .post("/xrpc/com.atproto.repo.createRecord")
+            .header(ContentType::JSON)
+            .header(Header::new("Authorization", format!("Bearer {token}")))
+            .body(body.to_string())
+            .dispatch()
+    };
+
+    let response = create(json!({
+        "repo": did,
+        "collection": "app.bsky.feed.post",
+        "rkey": "untyped",
+        "record": {"text": "hello postman", "createdAt": "2026-09-22T15:20:14.000Z", "langs": ["en"]}
+    }))
+    .await;
+    assert_eq!(response.status(), Status::Ok);
+    let response = client
+        .get(format!(
+            "/xrpc/com.atproto.repo.getRecord?repo={did}&collection=app.bsky.feed.post&rkey=untyped"
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let record: serde_json::Value = response.into_json().await.unwrap();
+    assert_eq!(record["value"]["$type"], "app.bsky.feed.post");
+    assert_eq!(record["value"]["text"], "hello postman");
+
+    let response = create(json!({
+        "repo": did,
+        "collection": "app.bsky.feed.post",
+        "rkey": "mistyped",
+        "record": {"$type": "app.bsky.feed.like", "text": "x", "createdAt": "2026-09-22T15:20:14.000Z"}
+    }))
+    .await;
+    assert_eq!(response.status(), Status::BadRequest);
+    let body: serde_json::Value = response.into_json().await.unwrap();
+    assert_eq!(body["error"], "InvalidRequest");
+    assert_eq!(
+        body["message"],
+        "Invalid $type: expected app.bsky.feed.post, got app.bsky.feed.like"
+    );
+}
+
+/// `bytes` and raw links in a record body are stored natively (a CBOR byte
+/// string and a tag-42 link, so the CID matches what the client computed)
+/// and served back in their data model JSON forms, `{"$bytes": base64}` and
+/// `{"$link": cid}`, never as integer arrays.
+#[tokio::test]
+async fn bytes_and_links_round_trip_in_their_json_forms() {
+    use rsky_repo::storage::Ipld;
+    use std::collections::BTreeMap;
+
+    let (_dir, client) = common::get_client().await;
+    let token = get_access_token(&client).await;
+    let did = "did:plc:khvyd3oiw46vif5gm7hijslk";
+    client
+        .rocket()
+        .state::<rsky_pds::account_manager::AccountManager>()
+        .unwrap()
+        .activate_account(did)
+        .await
+        .unwrap();
+    let link = "bafkreiey6e2xp4ncufvsyfmubucbsz5xujbc7lguospuziohtgfdik3pr4";
+    let key: Vec<u8> = (0..32).collect();
+    let key_b64 = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+    let response = client
+        .post("/xrpc/com.atproto.repo.createRecord")
+        .header(ContentType::JSON)
+        .header(Header::new("Authorization", format!("Bearer {token}")))
+        .body(
+            json!({
+                "repo": did,
+                "collection": "com.example.declaration",
+                "rkey": "self",
+                "record": {
+                    "$type": "com.example.declaration",
+                    "currentKey": {"$bytes": format!("{key_b64}=")},
+                    "prev": {"$link": link},
+                }
+            })
+            .to_string(),
+        )
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let created: serde_json::Value = response.into_json().await.unwrap();
+
+    // the block is the same DAG-CBOR any other implementation would write
+    let expected = Ipld::Map(BTreeMap::from([
+        (
+            "$type".to_owned(),
+            Ipld::String("com.example.declaration".to_owned()),
+        ),
+        ("currentKey".to_owned(), Ipld::Bytes(key)),
+        ("prev".to_owned(), Ipld::Link(link.parse().unwrap())),
+    ]));
+    let expected_cid = rsky_common::ipld::cid_for_cbor(&expected).unwrap();
+    assert_eq!(created["cid"], expected_cid.to_string());
+
+    let response = client
+        .get(format!(
+            "/xrpc/com.atproto.repo.getRecord?repo={did}&collection=com.example.declaration&rkey=self"
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let record: serde_json::Value = response.into_json().await.unwrap();
+    assert_eq!(record["value"]["currentKey"], json!({"$bytes": key_b64}));
+    assert_eq!(record["value"]["prev"], json!({"$link": link}));
+
+    let response = client
+        .get(format!(
+            "/xrpc/com.atproto.repo.listRecords?repo={did}&collection=com.example.declaration"
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let listed: serde_json::Value = response.into_json().await.unwrap();
+    assert_eq!(
+        listed["records"][0]["value"]["currentKey"],
+        json!({"$bytes": key_b64})
+    );
+}
+
+#[tokio::test]
+async fn test_list_records_has_direct_values_and_reference_cursors() {
     let (_dir, client) = common::get_client().await;
     let token = get_access_token(&client).await;
     let did = "did:plc:khvyd3oiw46vif5gm7hijslk";
@@ -274,7 +419,21 @@ async fn test_list_records_has_direct_values_and_no_final_cursor() {
     assert_eq!(response.status(), Status::Ok);
     let final_page: serde_json::Value = response.into_json().await.unwrap();
     assert_eq!(final_page["records"].as_array().unwrap().len(), 1);
-    assert!(final_page.get("cursor").is_none(), "{final_page}");
+    let final_cursor = final_page["cursor"]
+        .as_str()
+        .expect("final page has a cursor");
+    assert_eq!(final_cursor, "one");
+
+    let response = client
+        .get(format!(
+            "/xrpc/com.atproto.repo.listRecords?repo={did}&collection=com.example.record&limit=1&cursor={final_cursor}"
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let empty: serde_json::Value = response.into_json().await.unwrap();
+    assert_eq!(empty["records"].as_array().unwrap().len(), 0);
+    assert!(empty.get("cursor").is_none(), "{empty}");
 }
 
 #[tokio::test]
@@ -462,6 +621,31 @@ async fn test_unregister_push() {
         .dispatch()
         .await;
     assert_eq!(response.status(), Status::BadRequest);
+}
+
+/// A query this server does not implement is handed to the proxy with the
+/// caller's credentials, where the outbound network policy applies: the
+/// mock appview is plain http on loopback, which it refuses.
+#[tokio::test]
+async fn unknown_queries_reach_the_proxy_and_its_network_policy() {
+    let (_dir, client) = common::get_client().await;
+    let token = get_access_token(&client).await;
+    let response = client
+        .get("/xrpc/app.bsky.notification.listNotifications?limit=5")
+        .header(Header::new("Authorization", format!("Bearer {token}")))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::BadRequest);
+    let body: serde_json::Value =
+        serde_json::from_str(&response.into_string().await.unwrap()).unwrap();
+    assert_eq!(body["error"], "InvalidRequest");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Invalid service url"),
+        "{body}"
+    );
 }
 
 #[tokio::test]

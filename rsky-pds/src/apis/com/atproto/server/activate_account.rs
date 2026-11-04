@@ -4,6 +4,7 @@ use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::server::assert_valid_did_documents_for_service;
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{OAuthForbidden, Scoped};
 use crate::auth_verifier::AccessFull;
 use crate::SharedSequencer;
 use rocket::State;
@@ -11,15 +12,32 @@ use rsky_syntax::handle::INVALID_HANDLE;
 
 #[tracing::instrument(skip_all)]
 async fn inner_activate_account(
-    auth: AccessFull,
+    auth: Scoped<OAuthForbidden, AccessFull>,
     sequencer: &State<SharedSequencer>,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
-    let requester = auth.access.credentials.unwrap().did.unwrap();
-    assert_valid_did_documents_for_service(requester.clone()).await?;
+    let requester = auth.did().await?;
+    activate_account_for(
+        requester,
+        sequencer,
+        blobstore_factory,
+        actor_store,
+        &account_manager,
+    )
+    .await
+}
 
+/// Activates `requester` and announces it on the firehose, for the XRPC
+/// method and the browser pages alike.
+pub async fn activate_account_for(
+    requester: String,
+    sequencer: &SharedSequencer,
+    blobstore_factory: &BlobstoreFactory,
+    actor_store: &ActorStore,
+    account_manager: &AccountManager,
+) -> Result<(), ApiError> {
     let account = account_manager
         .get_account(
             &requester,
@@ -31,6 +49,7 @@ async fn inner_activate_account(
         .await?;
 
     if let Some(account) = account {
+        assert_valid_did_documents_for_service(actor_store, requester.clone()).await?;
         account_manager.activate_account(&requester).await?;
 
         let actor_store = actor_store
@@ -52,15 +71,17 @@ async fn inner_activate_account(
         lock.sequence_sync_evt(requester, sync_data).await?;
         Ok(())
     } else {
-        tracing::error!("User not found");
-        Err(ApiError::RuntimeError)
+        Err(ApiError::BadRequest(
+            "AccountNotFound".to_string(),
+            "user not found".to_string(),
+        ))
     }
 }
 
 #[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.server.activateAccount")]
 pub async fn activate_account(
-    auth: AccessFull,
+    auth: Scoped<OAuthForbidden, AccessFull>,
     sequencer: &State<SharedSequencer>,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,

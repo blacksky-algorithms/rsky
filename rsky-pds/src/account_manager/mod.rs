@@ -5,7 +5,7 @@ use crate::account_manager::helpers::auth::{
     AuthHelperError, CreateTokensOpts, RefreshGracePeriodOpts,
 };
 use crate::account_manager::helpers::invite::CodeDetail;
-use crate::account_manager::helpers::password::UpdateUserPasswordOpts;
+use crate::account_manager::helpers::password::{AppPassDescript, UpdateUserPasswordOpts};
 use crate::account_manager::helpers::repo;
 use crate::auth_verifier::AuthScope;
 use crate::db::sqlite::Db;
@@ -71,14 +71,39 @@ pub struct DisableInviteCodesOpts {
     pub accounts: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AccountManager {
     pub db: Db,
+    admission: std::sync::Arc<crate::admission::Admission>,
+}
+
+impl std::fmt::Debug for AccountManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccountManager").finish_non_exhaustive()
+    }
 }
 
 impl AccountManager {
     pub fn new(db: Db) -> Self {
-        Self { db }
+        Self {
+            db,
+            admission: std::sync::Arc::new(crate::admission::Admission::unrestricted()),
+        }
+    }
+
+    pub fn with_admission(
+        mut self,
+        admission: std::sync::Arc<crate::admission::Admission>,
+    ) -> Self {
+        self.admission = admission;
+        self
+    }
+
+    /// Account-state mutations are admitted per actor like repository
+    /// writes; session and token operations are not gated, since a session
+    /// is served wherever the account's reads are.
+    fn admit(&self, did: &str) -> Result<()> {
+        Ok(self.admission.admit_mutation(did)?)
     }
 
     pub async fn get_account(
@@ -126,6 +151,7 @@ impl AccountManager {
     }
 
     pub async fn create_account(&self, opts: CreateAccountOpts) -> Result<(String, String)> {
+        self.admit(&opts.did)?;
         let CreateAccountOpts {
             did,
             handle,
@@ -146,7 +172,8 @@ impl AccountManager {
             service_did: env::var("PDS_SERVICE_DID").unwrap(),
             scope: Some(AuthScope::Access),
             jti: None,
-            expires_in: None,
+            expires_in_secs: None,
+            issued_at: None,
         })?;
         let refresh_payload = auth::decode_refresh_token(refresh_jwt.clone())?;
         let now = rsky_common::now();
@@ -171,32 +198,86 @@ impl AccountManager {
         account::get_account_admin_status(did, &self.db).await
     }
 
+    /// The root the account database records for `did`, as `(cid, rev)`.
+    pub async fn get_repo_root(&self, did: &str) -> Result<Option<(String, String)>> {
+        repo::get_root(did, &self.db).await
+    }
+
     pub async fn update_repo_root(&self, did: String, cid: Cid, rev: String) -> Result<()> {
+        self.admit(&did)?;
         repo::update_root(did, cid, rev, &self.db).await
     }
 
-    pub async fn delete_account(&self, did: &str) -> Result<()> {
+    /// The root update the publisher owes after a commit; allowed while the
+    /// actor drains, like every other piece of its outstanding work.
+    pub async fn update_repo_root_as_worker(
+        &self,
+        did: String,
+        cid: Cid,
+        rev: String,
+    ) -> Result<()> {
+        self.admission.admit_worker(&did)?;
+        repo::update_root(did, cid, rev, &self.db).await
+    }
+
+    /// Deletes the account and revokes its OAuth sessions, returning how
+    /// many OAuth sessions (`token` rows) were revoked.
+    pub async fn delete_account(&self, did: &str) -> Result<u64> {
+        self.admit(did)?;
         account::delete_account(did, &self.db).await
     }
 
-    pub async fn takedown_account(&self, did: &str, takedown: StatusAttr) -> Result<()> {
-        (_, _) = try_join!(
+    /// Applies or reverses a takedown and revokes every refresh token and
+    /// OAuth session either way, so reversing a takedown still forces a
+    /// fresh login. Returns how many OAuth sessions were revoked.
+    pub async fn takedown_account(&self, did: &str, takedown: StatusAttr) -> Result<u64> {
+        self.admit(did)?;
+        let (_, _, oauth_revoked) = try_join!(
             account::update_account_takedown_status(did, takedown, &self.db),
-            auth::revoke_refresh_tokens_by_did(did, &self.db)
+            auth::revoke_refresh_tokens_by_did(did, &self.db),
+            auth::revoke_oauth_tokens_by_did(did, &self.db)
         )?;
-        Ok(())
+        Ok(oauth_revoked)
     }
 
     // @NOTE should always be paired with a sequenceHandle().
     pub async fn update_handle(&self, did: &str, handle: &str) -> Result<()> {
+        self.admit(did)?;
         account::update_handle(did, handle, &self.db).await
     }
 
     pub async fn deactivate_account(&self, did: &str, delete_after: Option<String>) -> Result<()> {
+        self.admit(did)?;
         account::deactivate_account(did, delete_after, &self.db).await
     }
 
+    /// Deactivates the account and, in the same transaction, revokes every
+    /// way back in that does not go through a sign-in: OAuth sessions, the
+    /// clients they had authorized, and app passwords.
+    pub async fn deactivate_account_and_credentials(
+        &self,
+        did: &str,
+        delete_after: Option<String>,
+    ) -> Result<()> {
+        self.admit(did)?;
+        let did = did.to_string();
+        let deactivated_at = rsky_common::now();
+        self.db
+            .tx(move |tx| {
+                tx.execute("DELETE FROM token WHERE did = ?1", [&did])?;
+                tx.execute("DELETE FROM authorized_client WHERE did = ?1", [&did])?;
+                tx.execute("DELETE FROM app_password WHERE did = ?1", [&did])?;
+                tx.execute(
+                    "UPDATE actor SET \"deactivatedAt\" = ?1, \"deleteAfter\" = ?2 WHERE did = ?3",
+                    rusqlite::params![deactivated_at, delete_after, did],
+                )?;
+                Ok(())
+            })
+            .await
+    }
+
     pub async fn activate_account(&self, did: &str) -> Result<()> {
+        self.admit(did)?;
         account::activate_account(did, &self.db).await
     }
 
@@ -222,90 +303,89 @@ impl AccountManager {
     pub async fn create_session(
         &self,
         did: String,
-        app_password_name: Option<String>,
+        app_password: Option<AppPassDescript>,
+        is_soft_deleted: bool,
     ) -> Result<(String, String)> {
-        let scope = if app_password_name.is_none() {
-            AuthScope::Access
-        } else {
-            AuthScope::AppPass
-        };
+        let scope = auth::format_scope(app_password.as_ref(), is_soft_deleted);
         let (access_jwt, refresh_jwt) = auth::create_tokens(CreateTokensOpts {
             did,
             service_did: env::var("PDS_SERVICE_DID").unwrap(),
             scope: Some(scope),
             jti: None,
-            expires_in: None,
+            expires_in_secs: None,
+            issued_at: None,
         })?;
         let refresh_payload = auth::decode_refresh_token(refresh_jwt.clone())?;
-        auth::store_refresh_token(refresh_payload, app_password_name, &self.db).await?;
+        auth::store_refresh_token(
+            refresh_payload,
+            app_password.map(|app_password| app_password.name),
+            &self.db,
+        )
+        .await?;
         Ok((access_jwt, refresh_jwt))
     }
 
     pub async fn rotate_refresh_token(&self, id: &String) -> Result<Option<(String, String)>> {
-        let token = auth::get_refresh_token(id, &self.db).await?;
-        if let Some(token) = token {
-            let system_time = SystemTime::now();
-            let dt: DateTime<UtcOffset> = system_time.into();
-            let now = format!("{}", dt.format(RFC3339_VARIANT));
+        let Some(token) = auth::get_refresh_token(id, &self.db).await? else {
+            return Ok(None);
+        };
+        let system_time = SystemTime::now();
+        let dt: DateTime<UtcOffset> = system_time.into();
+        let now = format!("{}", dt.format(RFC3339_VARIANT));
 
-            // take the chance to tidy all of a user's expired tokens
-            // does not need to be transactional since this is just best-effort
-            auth::delete_expired_refresh_tokens(&token.did, now, &self.db).await?;
+        // take the chance to tidy all of a user's expired tokens
+        // does not need to be transactional since this is just best-effort
+        auth::delete_expired_refresh_tokens(&token.did, now, &self.db).await?;
 
-            // Shorten the refresh token lifespan down from its
-            // original expiration time to its revocation grace period.
-            let prev_expires_at = from_str_to_micros(&token.expires_at)?;
+        // Shorten the refresh token lifespan down from its
+        // original expiration time to its revocation grace period.
+        let prev_expires_at = from_str_to_micros(&token.expires_at)?;
 
-            const REFRESH_GRACE_MS: i64 = 2 * HOUR as i64;
-            let grace_expires_at = dt.timestamp_micros() + REFRESH_GRACE_MS * 1000;
+        const REFRESH_GRACE_MS: i64 = 2 * HOUR as i64;
+        let grace_expires_at = dt.timestamp_micros() + REFRESH_GRACE_MS * 1000;
 
-            let expires_at = if grace_expires_at < prev_expires_at {
-                grace_expires_at
-            } else {
-                prev_expires_at
-            };
-
-            if expires_at <= dt.timestamp_micros() {
-                return Ok(None);
-            }
-
-            // Determine the next refresh token id: upon refresh token
-            // reuse you always receive a refresh token with the same id.
-            let next_id = token.next_id.unwrap_or_else(auth::get_refresh_token_id);
-
-            let (access_jwt, refresh_jwt) = auth::create_tokens(CreateTokensOpts {
-                did: token.did,
-                service_did: env::var("PDS_SERVICE_DID").unwrap(),
-                scope: Some(if token.app_password_name.is_none() {
-                    AuthScope::Access
-                } else {
-                    AuthScope::AppPass
-                }),
-                jti: Some(next_id.clone()),
-                expires_in: None,
-            })?;
-            let refresh_payload = auth::decode_refresh_token(refresh_jwt.clone())?;
-            match try_join!(
-                auth::add_refresh_grace_period(
-                    RefreshGracePeriodOpts {
-                        id: id.clone(),
-                        expires_at: format_micros(expires_at)?,
-                        next_id
-                    },
-                    &self.db
-                ),
-                auth::store_refresh_token(refresh_payload, token.app_password_name, &self.db)
-            ) {
-                Ok(_) => Ok(Some((access_jwt, refresh_jwt))),
-                Err(e) => match e.downcast_ref() {
-                    Some(AuthHelperError::ConcurrentRefresh) => {
-                        Box::pin(self.rotate_refresh_token(id)).await
-                    }
-                    _ => Err(e),
-                },
-            }
+        let expires_at = if grace_expires_at < prev_expires_at {
+            grace_expires_at
         } else {
-            Ok(None)
+            prev_expires_at
+        };
+
+        if expires_at <= dt.timestamp_micros() {
+            return Ok(None);
+        }
+
+        // Determine the next refresh token id: upon refresh token
+        // reuse you always receive a refresh token with the same id.
+        let next_id = token.next_id.unwrap_or_else(auth::get_refresh_token_id);
+
+        let (access_jwt, refresh_jwt) = auth::create_tokens(CreateTokensOpts {
+            did: token.did,
+            service_did: env::var("PDS_SERVICE_DID").unwrap(),
+            scope: Some(auth::format_scope(token.app_password.as_ref(), false)),
+            jti: Some(next_id.clone()),
+            expires_in_secs: None,
+            issued_at: None,
+        })?;
+        let refresh_payload = auth::decode_refresh_token(refresh_jwt.clone())?;
+        let rotated = auth::rotate_refresh_token_rows(
+            RefreshGracePeriodOpts {
+                id: id.clone(),
+                expires_at: format_micros(expires_at)?,
+                next_id,
+            },
+            refresh_payload,
+            token.app_password.map(|app_password| app_password.name),
+            &self.db,
+        )
+        .await;
+        match rotated {
+            Ok(()) => Ok(Some((access_jwt, refresh_jwt))),
+            Err(e) => match e.downcast_ref() {
+                Some(AuthHelperError::ConcurrentRefresh) => {
+                    Box::pin(self.rotate_refresh_token(id)).await
+                }
+                _ => Err(e),
+            },
         }
     }
 
@@ -347,6 +427,7 @@ impl AccountManager {
     }
 
     pub async fn set_account_invites_disabled(&self, did: &str, disabled: bool) -> Result<()> {
+        self.admit(did)?;
         invite::set_account_invites_disabled(did, disabled, &self.db).await
     }
 
@@ -362,10 +443,11 @@ impl AccountManager {
         did: String,
         name: String,
     ) -> Result<CreateAppPasswordOutput> {
+        self.admit(&did)?;
         password::create_app_password(did, name, &self.db).await
     }
 
-    pub async fn list_app_passwords(&self, did: &str) -> Result<Vec<(String, String)>> {
+    pub async fn list_app_passwords(&self, did: &str) -> Result<Vec<(String, String, bool)>> {
         password::list_app_passwords(did, &self.db).await
     }
 
@@ -377,7 +459,7 @@ impl AccountManager {
         &self,
         did: &str,
         password_str: &str,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<AppPassDescript>> {
         password::verify_app_password(did, password_str, &self.db).await
     }
 
@@ -397,6 +479,7 @@ impl AccountManager {
     }
 
     pub async fn update_account_password(&self, opts: UpdateAccountPasswordOpts) -> Result<()> {
+        self.admit(&opts.did)?;
         let UpdateAccountPasswordOpts { did, .. } = opts;
         let password_encrypted = password::gen_salt_and_hash(opts.password)?;
         try_join!(
@@ -414,6 +497,7 @@ impl AccountManager {
     }
 
     pub async fn revoke_app_password(&self, did: String, name: String) -> Result<()> {
+        self.admit(&did)?;
         try_join!(
             password::delete_app_password(&did, &name, &self.db),
             auth::revoke_app_password_refresh_token(&did, &name, &self.db)
@@ -424,6 +508,7 @@ impl AccountManager {
     // Email Tokens
     // ----------
     pub async fn confirm_email(&self, opts: ConfirmEmailOpts<'_>) -> Result<()> {
+        self.admit(opts.did)?;
         let ConfirmEmailOpts { did, token } = opts;
         email_token::assert_valid_token(
             did,
@@ -442,6 +527,7 @@ impl AccountManager {
     }
 
     pub async fn update_email(&self, opts: UpdateEmailOpts) -> Result<()> {
+        self.admit(&opts.did)?;
         let UpdateEmailOpts { did, email } = opts;
         try_join!(
             account::update_email(&did, &email, &self.db),

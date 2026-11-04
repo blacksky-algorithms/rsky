@@ -273,6 +273,7 @@ pub enum ApplyWritesInputRefWrite {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ListMissingBlobsRefRecordBlob {
     pub cid: String,
+    #[serde(rename = "recordUri")]
     pub record_uri: String,
 }
 

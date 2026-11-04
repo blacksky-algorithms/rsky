@@ -18,11 +18,28 @@ pub const DEFAULT_ROTATION_INTERVAL: u64 = DPOP_NONCE_MAX_AGE / 3;
 pub const DPOP_IAT_MAX_AGE: u64 = 10;
 pub const DPOP_CLOCK_TOLERANCE: u64 = DPOP_NONCE_MAX_AGE;
 
-/// Single-use `jti` tracking for DPoP proofs.
+/// The replay namespace of a DPoP proof: proofs presented to the token
+/// endpoint are tracked per client, proofs on resource requests together,
+/// the same partitioning as the reference PDS so a shared store agrees.
+pub fn dpop_replay_namespace(client_id: Option<&str>) -> String {
+    match client_id {
+        Some(client_id) => format!("DPoP@{client_id}"),
+        None => "DPoP".to_string(),
+    }
+}
+
+/// Single-use `jti` tracking for DPoP proofs, shareable between processes.
+#[async_trait::async_trait]
 pub trait ReplayStore: Send + Sync {
-    /// Records `jti` until `exp`. Returns true when `jti` was not seen
-    /// before (proof accepted); false on replay.
-    fn consume(&self, jti: &str, exp: u64, now: u64) -> bool;
+    /// Records `nonce` under `namespace` for `time_frame_ms`. Returns true
+    /// when it was not seen within that window (proof accepted); false on
+    /// replay.
+    async fn unique(
+        &self,
+        namespace: &str,
+        nonce: &str,
+        time_frame_ms: u64,
+    ) -> Result<bool, OAuthError>;
 }
 
 #[derive(Debug, Default)]
@@ -30,17 +47,31 @@ pub struct InMemoryReplayStore {
     seen: Mutex<HashMap<String, u64>>,
 }
 
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before unix epoch")
+        .as_millis() as u64
+}
+
+#[async_trait::async_trait]
 impl ReplayStore for InMemoryReplayStore {
-    fn consume(&self, jti: &str, exp: u64, now: u64) -> bool {
+    async fn unique(
+        &self,
+        namespace: &str,
+        nonce: &str,
+        time_frame_ms: u64,
+    ) -> Result<bool, OAuthError> {
+        let now = now_millis();
         let mut seen = self.seen.lock().expect("replay store lock poisoned");
         seen.retain(|_, expiry| *expiry > now);
-        match seen.entry(jti.to_string()) {
+        Ok(match seen.entry(format!("{namespace}:{nonce}")) {
             Entry::Occupied(_) => false,
             Entry::Vacant(entry) => {
-                entry.insert(exp);
+                entry.insert(now + time_frame_ms);
                 true
             }
-        }
+        })
     }
 }
 
@@ -137,9 +168,12 @@ impl DpopManager {
 
     /// Validates the request's DPoP proof per RFC 9449 section 4.3.
     /// Returns `Ok(None)` when the request carries no `DPoP` header.
-    pub fn check_proof(
+    /// `client_id` is the authenticated client at the token endpoint and
+    /// `None` on resource requests; it selects the replay namespace.
+    pub async fn check_proof(
         &self,
-        request: &DpopRequest,
+        request: &DpopRequest<'_>,
+        client_id: Option<&str>,
         now: u64,
     ) -> Result<Option<DpopProof>, OAuthError> {
         if request.method.is_empty() {
@@ -264,8 +298,12 @@ impl DpopManager {
                 }
             }
         }
-        let replay_expiry = iat + DPOP_IAT_MAX_AGE + DPOP_CLOCK_TOLERANCE;
-        if !self.replay_store.consume(jti, replay_expiry, now) {
+        let namespace = dpop_replay_namespace(client_id);
+        if !self
+            .replay_store
+            .unique(&namespace, jti, DPOP_NONCE_MAX_AGE * 1000)
+            .await?
+        {
             return Err(OAuthError::InvalidDpopProof(
                 "DPoP proof \"jti\" replayed".to_string(),
             ));
@@ -373,20 +411,22 @@ mod tests {
         }
     }
 
-    fn check_err(claims: &JwtClaims) -> OAuthError {
+    async fn check_err(claims: &JwtClaims) -> OAuthError {
         let token = standard_proof(claims);
         manager()
-            .check_proof(&request(&[token.as_str()], None), NOW)
+            .check_proof(&request(&[token.as_str()], None), None, NOW)
+            .await
             .unwrap_err()
     }
 
-    #[test]
-    fn happy_path_both_curves() {
+    #[tokio::test]
+    async fn happy_path_both_curves() {
         for curve in [EcCurve::P256, EcCurve::K256] {
             let key = private_key(curve);
             let token = proof(&key, Some(DPOP_TYP), true, &base_claims());
             let result = manager()
-                .check_proof(&request(&[token.as_str()], None), NOW)
+                .check_proof(&request(&[token.as_str()], None), None, NOW)
+                .await
                 .unwrap()
                 .unwrap();
             assert_eq!(result.jti, "jti-1");
@@ -397,79 +437,87 @@ mod tests {
         }
     }
 
-    #[test]
-    fn missing_and_malformed_dpop_headers() {
+    #[tokio::test]
+    async fn missing_and_malformed_dpop_headers() {
         let dpop_manager = manager();
         assert_eq!(
-            dpop_manager.check_proof(&request(&[], None), NOW).unwrap(),
+            dpop_manager
+                .check_proof(&request(&[], None), None, NOW)
+                .await
+                .unwrap(),
             None
         );
         assert_eq!(
             dpop_manager
-                .check_proof(&request(&[""], None), NOW)
+                .check_proof(&request(&[""], None), None, NOW)
+                .await
                 .unwrap_err(),
             OAuthError::InvalidDpopProof("DPoP header cannot be empty".to_string())
         );
         assert_eq!(
             dpop_manager
-                .check_proof(&request(&["a", "b"], None), NOW)
+                .check_proof(&request(&["a", "b"], None), None, NOW)
+                .await
                 .unwrap_err(),
             OAuthError::InvalidDpopProof("DPoP header must contain a single proof".to_string())
         );
         let err = dpop_manager
-            .check_proof(&request(&["not-a-jwt"], None), NOW)
+            .check_proof(&request(&["not-a-jwt"], None), None, NOW)
+            .await
             .unwrap_err();
         assert!(err
             .error_description()
             .starts_with("Failed to parse DPoP proof"));
     }
 
-    #[test]
-    fn empty_method_and_bad_request_uri() {
+    #[tokio::test]
+    async fn empty_method_and_bad_request_uri() {
         let token = standard_proof(&base_claims());
         let mut req = request(&[], None);
         req.method = "";
         assert_eq!(
-            manager().check_proof(&req, NOW).unwrap_err(),
+            manager().check_proof(&req, None, NOW).await.unwrap_err(),
             OAuthError::InvalidRequest("HTTP method is required".to_string())
         );
         let headers = [token.as_str()];
         let mut req = request(&headers, None);
         req.uri = "not a url";
         assert_eq!(
-            manager().check_proof(&req, NOW).unwrap_err(),
+            manager().check_proof(&req, None, NOW).await.unwrap_err(),
             OAuthError::InvalidRequest("invalid request URI".to_string())
         );
     }
 
-    #[test]
-    fn wrong_typ_rejected() {
+    #[tokio::test]
+    async fn wrong_typ_rejected() {
         let key = private_key(EcCurve::P256);
         for typ in [Some("JWT"), None] {
             let token = proof(&key, typ, true, &base_claims());
             assert_eq!(
                 manager()
-                    .check_proof(&request(&[token.as_str()], None), NOW)
+                    .check_proof(&request(&[token.as_str()], None), None, NOW)
+                    .await
                     .unwrap_err(),
                 OAuthError::InvalidDpopProof("DPoP proof \"typ\" must be \"dpop+jwt\"".to_string())
             );
         }
     }
 
-    #[test]
-    fn missing_jwk_rejected() {
+    #[tokio::test]
+    async fn missing_jwk_rejected() {
         let key = private_key(EcCurve::P256);
         let token = proof(&key, Some(DPOP_TYP), false, &base_claims());
         assert_eq!(
             manager()
-                .check_proof(&request(&[token.as_str()], None), NOW)
+                .check_proof(&request(&[token.as_str()], None), None, NOW)
+                .await
                 .unwrap_err(),
             OAuthError::InvalidDpopProof("DPoP proof missing \"jwk\" header".to_string())
         );
     }
 
-    #[test]
-    fn private_jwk_smuggled_rejected() {
+    #[tokio::test]
+    async fn private_jwk_smuggled_rejected() {
         let key = private_key(EcCurve::P256);
         let mut header = JwtHeader::new("ES256");
         header.typ = Some(DPOP_TYP.to_string());
@@ -477,14 +525,15 @@ mod tests {
         let token = crate::jwt::sign(&header, &base_claims(), &key).unwrap();
         assert_eq!(
             manager()
-                .check_proof(&request(&[token.as_str()], None), NOW)
+                .check_proof(&request(&[token.as_str()], None), None, NOW)
+                .await
                 .unwrap_err(),
             OAuthError::InvalidDpopProof("DPoP \"jwk\" must be a public key".to_string())
         );
     }
 
-    #[test]
-    fn tampered_signature_rejected() {
+    #[tokio::test]
+    async fn tampered_signature_rejected() {
         let token = standard_proof(&base_claims());
         let parts: Vec<&str> = token.split('.').collect();
         let tampered = format!(
@@ -494,33 +543,34 @@ mod tests {
             URL_SAFE_NO_PAD.encode([0x11u8; 64])
         );
         let err = manager()
-            .check_proof(&request(&[tampered.as_str()], None), NOW)
+            .check_proof(&request(&[tampered.as_str()], None), None, NOW)
+            .await
             .unwrap_err();
         assert!(err
             .error_description()
             .starts_with("Failed to verify DPoP proof"));
     }
 
-    #[test]
-    fn iat_and_exp_windows() {
+    #[tokio::test]
+    async fn iat_and_exp_windows() {
         let mut claims = base_claims();
         claims.iat = None;
         assert_eq!(
-            check_err(&claims),
+            check_err(&claims).await,
             OAuthError::InvalidDpopProof("DPoP \"iat\" missing".to_string())
         );
 
         let mut claims = base_claims();
         claims.iat = Some(NOW + DPOP_CLOCK_TOLERANCE + 1);
         assert_eq!(
-            check_err(&claims),
+            check_err(&claims).await,
             OAuthError::InvalidDpopProof("DPoP proof \"iat\" is in the future".to_string())
         );
 
         let mut claims = base_claims();
         claims.iat = Some(NOW - DPOP_IAT_MAX_AGE - DPOP_CLOCK_TOLERANCE - 1);
         assert_eq!(
-            check_err(&claims),
+            check_err(&claims).await,
             OAuthError::InvalidDpopProof("DPoP proof is too old".to_string())
         );
 
@@ -529,14 +579,15 @@ mod tests {
         claims.iat = Some(NOW - DPOP_IAT_MAX_AGE - DPOP_CLOCK_TOLERANCE);
         let token = standard_proof(&claims);
         manager()
-            .check_proof(&request(&[token.as_str()], None), NOW)
+            .check_proof(&request(&[token.as_str()], None), None, NOW)
+            .await
             .unwrap()
             .unwrap();
 
         let mut claims = base_claims();
         claims.exp = Some(NOW - DPOP_CLOCK_TOLERANCE);
         assert_eq!(
-            check_err(&claims),
+            check_err(&claims).await,
             OAuthError::InvalidDpopProof("DPoP proof has expired".to_string())
         );
 
@@ -544,23 +595,24 @@ mod tests {
         claims.exp = Some(NOW + 30);
         let token = standard_proof(&claims);
         manager()
-            .check_proof(&request(&[token.as_str()], None), NOW)
+            .check_proof(&request(&[token.as_str()], None), None, NOW)
+            .await
             .unwrap()
             .unwrap();
     }
 
-    #[test]
-    fn jti_required_and_single_use() {
+    #[tokio::test]
+    async fn jti_required_and_single_use() {
         let mut claims = base_claims();
         claims.jti = None;
         assert_eq!(
-            check_err(&claims),
+            check_err(&claims).await,
             OAuthError::InvalidDpopProof("DPoP \"jti\" missing".to_string())
         );
         let mut claims = base_claims();
         claims.jti = Some(String::new());
         assert_eq!(
-            check_err(&claims),
+            check_err(&claims).await,
             OAuthError::InvalidDpopProof("DPoP \"jti\" missing".to_string())
         );
 
@@ -568,60 +620,64 @@ mod tests {
         let token = standard_proof(&base_claims());
         let headers = [token.as_str()];
         dpop_manager
-            .check_proof(&request(&headers, None), NOW)
+            .check_proof(&request(&headers, None), None, NOW)
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(
             dpop_manager
-                .check_proof(&request(&headers, None), NOW)
+                .check_proof(&request(&headers, None), None, NOW)
+                .await
                 .unwrap_err(),
             OAuthError::InvalidDpopProof("DPoP proof \"jti\" replayed".to_string())
         );
-        // After the replay record expires, the jti is purged and reusable.
-        dpop_manager
-            .check_proof(
-                &request(&headers, None),
-                NOW + DPOP_IAT_MAX_AGE + DPOP_CLOCK_TOLERANCE,
-            )
-            .unwrap()
-            .unwrap();
+        // Once the replay record's window has passed, the jti is purged and
+        // reusable; namespaces keep token-endpoint and resource proofs apart.
+        let store = InMemoryReplayStore::default();
+        assert!(store.unique("DPoP", "x", 0).await.unwrap());
+        assert!(store.unique("DPoP", "x", 0).await.unwrap());
+        assert!(store.unique("DPoP", "y", 100_000).await.unwrap());
+        assert!(!store.unique("DPoP", "y", 100_000).await.unwrap());
+        assert!(store.unique("DPoP@client", "y", 100_000).await.unwrap());
+        assert_eq!(dpop_replay_namespace(Some("client")), "DPoP@client");
+        assert_eq!(dpop_replay_namespace(None), "DPoP");
     }
 
-    #[test]
-    fn htm_mismatch_rejected() {
+    #[tokio::test]
+    async fn htm_mismatch_rejected() {
         let mut claims = base_claims();
         claims.extra.insert("htm".to_string(), json!("GET"));
         assert_eq!(
-            check_err(&claims),
+            check_err(&claims).await,
             OAuthError::InvalidDpopProof("DPoP \"htm\" mismatch".to_string())
         );
         let mut claims = base_claims();
         claims.extra.insert("htm".to_string(), json!(5));
         assert_eq!(
-            check_err(&claims),
+            check_err(&claims).await,
             OAuthError::InvalidDpopProof("DPoP \"htm\" mismatch".to_string())
         );
         let mut claims = base_claims();
         claims.extra.remove("htm");
         assert_eq!(
-            check_err(&claims),
+            check_err(&claims).await,
             OAuthError::InvalidDpopProof("DPoP \"htm\" mismatch".to_string())
         );
     }
 
-    #[test]
-    fn htu_validation() {
+    #[tokio::test]
+    async fn htu_validation() {
         let mut claims = base_claims();
         claims.extra.remove("htu");
         assert_eq!(
-            check_err(&claims),
+            check_err(&claims).await,
             OAuthError::InvalidDpopProof("Invalid DPoP \"htu\" type".to_string())
         );
 
         let mut claims = base_claims();
         claims.extra.insert("htu".to_string(), json!(5));
         assert_eq!(
-            check_err(&claims),
+            check_err(&claims).await,
             OAuthError::InvalidDpopProof("Invalid DPoP \"htu\" type".to_string())
         );
 
@@ -631,14 +687,14 @@ mod tests {
             json!("https://other.example.com/oauth/token"),
         );
         assert_eq!(
-            check_err(&claims),
+            check_err(&claims).await,
             OAuthError::InvalidDpopProof("DPoP \"htu\" mismatch".to_string())
         );
 
         let mut claims = base_claims();
         claims.extra.insert("htu".to_string(), json!("not a url"));
         assert_eq!(
-            check_err(&claims),
+            check_err(&claims).await,
             OAuthError::InvalidDpopProof("DPoP \"htu\" is not a valid URL".to_string())
         );
 
@@ -648,7 +704,7 @@ mod tests {
             json!("https://user:pass@pds.example.com/oauth/token"),
         );
         assert_eq!(
-            check_err(&claims),
+            check_err(&claims).await,
             OAuthError::InvalidDpopProof("DPoP \"htu\" must not contain credentials".to_string())
         );
 
@@ -658,13 +714,13 @@ mod tests {
             json!("ftp://pds.example.com/oauth/token"),
         );
         assert_eq!(
-            check_err(&claims),
+            check_err(&claims).await,
             OAuthError::InvalidDpopProof("DPoP \"htu\" must be http or https".to_string())
         );
     }
 
-    #[test]
-    fn htu_normalization_accepts_equivalent_urls() {
+    #[tokio::test]
+    async fn htu_normalization_accepts_equivalent_urls() {
         // Legacy query/fragment, case-insensitive scheme and host, default
         // port elision, and dot-segment resolution all normalize away.
         for htu in [
@@ -677,15 +733,16 @@ mod tests {
             claims.extra.insert("htu".to_string(), json!(htu));
             let token = standard_proof(&claims);
             let result = manager()
-                .check_proof(&request(&[token.as_str()], None), NOW)
+                .check_proof(&request(&[token.as_str()], None), None, NOW)
+                .await
                 .unwrap()
                 .unwrap();
             assert_eq!(result.htu, htu);
         }
     }
 
-    #[test]
-    fn ath_binding() {
+    #[tokio::test]
+    async fn ath_binding() {
         let access_token = "access-token-value";
         let expected_ath = URL_SAFE_NO_PAD.encode(Sha256::digest(access_token.as_bytes()));
 
@@ -693,7 +750,8 @@ mod tests {
         claims.extra.insert("ath".to_string(), json!(expected_ath));
         let token = standard_proof(&claims);
         manager()
-            .check_proof(&request(&[token.as_str()], Some(access_token)), NOW)
+            .check_proof(&request(&[token.as_str()], Some(access_token)), None, NOW)
+            .await
             .unwrap()
             .unwrap();
 
@@ -703,7 +761,8 @@ mod tests {
         let token = standard_proof(&claims);
         assert_eq!(
             manager()
-                .check_proof(&request(&[token.as_str()], Some(access_token)), NOW)
+                .check_proof(&request(&[token.as_str()], Some(access_token)), None, NOW)
+                .await
                 .unwrap_err(),
             OAuthError::InvalidDpopProof("DPoP \"ath\" mismatch".to_string())
         );
@@ -712,7 +771,8 @@ mod tests {
         let token = standard_proof(&base_claims());
         assert_eq!(
             manager()
-                .check_proof(&request(&[token.as_str()], Some(access_token)), NOW)
+                .check_proof(&request(&[token.as_str()], Some(access_token)), None, NOW)
+                .await
                 .unwrap_err(),
             OAuthError::InvalidDpopProof("DPoP \"ath\" mismatch".to_string())
         );
@@ -723,14 +783,15 @@ mod tests {
         let token = standard_proof(&claims);
         assert_eq!(
             manager()
-                .check_proof(&request(&[token.as_str()], None), NOW)
+                .check_proof(&request(&[token.as_str()], None), None, NOW)
+                .await
                 .unwrap_err(),
             OAuthError::InvalidDpopProof("DPoP \"ath\" claim not allowed".to_string())
         );
     }
 
-    #[test]
-    fn nonce_required_and_rotation() {
+    #[tokio::test]
+    async fn nonce_required_and_rotation() {
         let dpop_manager = manager_with_nonce();
         let issued = dpop_manager.next_nonce(NOW).unwrap();
         assert!(manager().next_nonce(NOW).is_none());
@@ -738,7 +799,8 @@ mod tests {
         // Proof without a nonce claim: use_dpop_nonce.
         let token = standard_proof(&base_claims());
         let err = dpop_manager
-            .check_proof(&request(&[token.as_str()], None), NOW)
+            .check_proof(&request(&[token.as_str()], None), None, NOW)
+            .await
             .unwrap_err();
         assert_eq!(err, OAuthError::use_dpop_nonce());
         assert!(err.requires_dpop_nonce());
@@ -748,7 +810,8 @@ mod tests {
         claims.extra.insert("nonce".to_string(), json!(issued));
         let token = standard_proof(&claims);
         dpop_manager
-            .check_proof(&request(&[token.as_str()], None), NOW)
+            .check_proof(&request(&[token.as_str()], None), None, NOW)
+            .await
             .unwrap()
             .unwrap();
 
@@ -761,7 +824,8 @@ mod tests {
             claims.extra.insert("nonce".to_string(), json!(old));
             let token = standard_proof(&claims);
             dpop_manager
-                .check_proof(&request(&[token.as_str()], None), NOW)
+                .check_proof(&request(&[token.as_str()], None), None, NOW)
+                .await
                 .unwrap()
                 .unwrap();
         }
@@ -775,18 +839,19 @@ mod tests {
         let token = standard_proof(&claims);
         assert_eq!(
             dpop_manager
-                .check_proof(&request(&[token.as_str()], None), NOW)
+                .check_proof(&request(&[token.as_str()], None), None, NOW)
+                .await
                 .unwrap_err(),
             OAuthError::UseDpopNonce("DPoP \"nonce\" mismatch".to_string())
         );
     }
 
-    #[test]
-    fn nonce_type_and_disabled_manager() {
+    #[tokio::test]
+    async fn nonce_type_and_disabled_manager() {
         let mut claims = base_claims();
         claims.extra.insert("nonce".to_string(), json!(5));
         assert_eq!(
-            check_err(&claims),
+            check_err(&claims).await,
             OAuthError::InvalidDpopProof("Invalid DPoP \"nonce\" type".to_string())
         );
 
@@ -794,33 +859,34 @@ mod tests {
         let mut claims = base_claims();
         claims.extra.insert("nonce".to_string(), json!("anything"));
         assert_eq!(
-            check_err(&claims),
+            check_err(&claims).await,
             OAuthError::UseDpopNonce("DPoP \"nonce\" mismatch".to_string())
         );
     }
 
-    #[test]
-    fn nonce_check_near_epoch_skips_previous_bucket() {
+    #[tokio::test]
+    async fn nonce_check_near_epoch_skips_previous_bucket() {
         let nonce = DpopNonce::new([7u8; 32], DEFAULT_ROTATION_INTERVAL).unwrap();
         let now = DEFAULT_ROTATION_INTERVAL / 2;
         assert!(nonce.check(&nonce.next(now), now));
         assert!(!nonce.check("bogus", now));
     }
 
-    #[test]
-    fn nonce_constructor_validation() {
+    #[tokio::test]
+    async fn nonce_constructor_validation() {
         assert!(DpopNonce::new([0u8; 32], 0).is_err());
         assert!(DpopNonce::new([0u8; 32], DEFAULT_ROTATION_INTERVAL + 1).is_err());
         let random = DpopNonce::new_random(DEFAULT_ROTATION_INTERVAL).unwrap();
         assert!(!random.next(NOW).is_empty());
     }
 
-    #[test]
-    fn replay_store_purges_expired_entries() {
+    #[tokio::test]
+    async fn replay_store_purges_expired_entries() {
         let store = InMemoryReplayStore::default();
-        assert!(store.consume("a", NOW + 10, NOW));
-        assert!(!store.consume("a", NOW + 10, NOW));
-        assert!(store.consume("a", NOW + 30, NOW + 10));
+        assert!(store.unique("DPoP", "a", 10_000).await.unwrap());
+        assert!(!store.unique("DPoP", "a", 10_000).await.unwrap());
+        assert!(store.unique("DPoP", "b", 0).await.unwrap());
+        assert!(store.unique("DPoP", "b", 10_000).await.unwrap());
         assert!(!format!("{store:?}").is_empty());
     }
 }

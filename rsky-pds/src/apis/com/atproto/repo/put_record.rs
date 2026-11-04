@@ -3,7 +3,11 @@ use crate::account_manager::AccountManager;
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{RepoTarget, RepoWrite, Scoped};
 use crate::auth_verifier::AccessStandardIncludeChecks;
+use crate::metrics::record_repo_write;
+use crate::publication;
+use crate::rate_limits::{Caller, RateLimits};
 use crate::repo::prepare::{prepare_create, prepare_update, PrepareCreateOpts, PrepareUpdateOpts};
 use crate::SharedSequencer;
 use anyhow::{bail, Result};
@@ -18,7 +22,7 @@ use std::str::FromStr;
 #[tracing::instrument(skip_all)]
 async fn inner_put_record(
     body: Json<PutRecordInput>,
-    auth: AccessStandardIncludeChecks,
+    requester: String,
     sequencer: &State<SharedSequencer>,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
@@ -47,7 +51,7 @@ async fn inner_put_record(
             bail!("Account is deactivated")
         }
         let did = account.did;
-        if did != auth.access.credentials.unwrap().did.unwrap() {
+        if did != requester {
             bail!("AuthRequiredError")
         }
         let uri = AtUri::make(did.clone(), Some(collection.clone()), Some(rkey.clone()))?;
@@ -60,14 +64,11 @@ async fn inner_put_record(
             None => None,
         };
         let (commit, write): (Option<CommitDataWithOps>, PreparedWrite) = {
-            let mut actor_store = actor_store
+            let mut actor_txn = actor_store
                 .transact(did.clone(), blobstore_factory.blobstore(did.clone()))
                 .await?;
 
-            let current = actor_store
-                .record
-                .get_record(&uri, None, Some(true))
-                .await?;
+            let current = actor_txn.record.get_record(&uri, None, Some(true)).await?;
             tracing::debug!("@LOG: debug inner_put_record, current: {current:?}");
             let write: PreparedWrite = if current.is_some() {
                 PreparedWrite::Update(
@@ -98,7 +99,7 @@ async fn inner_put_record(
             match current {
                 Some(current) if current.cid == write.cid().unwrap().to_string() => (None, write),
                 _ => {
-                    let commit = actor_store
+                    let commit = actor_txn
                         .process_writes(vec![write.clone()], swap_commit_cid)
                         .await?;
                     (Some(commit), write)
@@ -106,12 +107,14 @@ async fn inner_put_record(
             }
         };
 
-        if let Some(commit) = commit {
-            let mut lock = sequencer.sequencer.write().await;
-            lock.sequence_commit(did.clone(), commit.clone()).await?;
-            account_manager
-                .update_repo_root(did, commit.commit_data.cid, commit.commit_data.rev)
+        if commit.is_some() {
+            publication::publish_pending(actor_store, sequencer, &account_manager, &did, None)
                 .await?;
+            record_repo_write(match &write {
+                PreparedWrite::Create(_) => "create",
+                PreparedWrite::Update(_) => "update",
+                PreparedWrite::Delete(_) => "delete",
+            });
         }
         Ok(PutRecordOutput {
             uri: write.uri().to_string(),
@@ -122,30 +125,43 @@ async fn inner_put_record(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.repo.putRecord", format = "json", data = "<body>")]
 pub async fn put_record(
     body: Json<PutRecordInput>,
-    auth: AccessStandardIncludeChecks,
+    auth: Scoped<RepoWrite, AccessStandardIncludeChecks>,
     sequencer: &State<SharedSequencer>,
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
+    limits: &State<RateLimits>,
+    caller: Caller,
 ) -> Result<Json<PutRecordOutput>, ApiError> {
     tracing::debug!("@LOG: debug put_record {body:#?}");
-    crate::apis::assert_repo_scope(
-        &auth.access.credentials,
-        &body.collection,
-        crate::oauth_scope::RepoAction::Create,
-    )?;
-    crate::apis::assert_repo_scope(
-        &auth.access.credentials,
-        &body.collection,
-        crate::oauth_scope::RepoAction::Update,
-    )?;
+    let requester = auth
+        .did_for(&vec![
+            RepoTarget::new(
+                body.collection.clone(),
+                crate::oauth_scope::RepoAction::Create,
+            ),
+            RepoTarget::new(
+                body.collection.clone(),
+                crate::oauth_scope::RepoAction::Update,
+            ),
+        ])
+        .await?;
+    limits
+        .consume_all(
+            &crate::rate_limits::REPO_WRITES,
+            &requester,
+            crate::rate_limits::UPDATE_POINTS,
+            caller.bypass,
+        )
+        .await?;
     match inner_put_record(
         body,
-        auth,
+        requester,
         sequencer,
         blobstore_factory,
         actor_store,
@@ -156,7 +172,7 @@ pub async fn put_record(
         Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");
-            Err(ApiError::RuntimeError)
+            Err(ApiError::from(error))
         }
     }
 }

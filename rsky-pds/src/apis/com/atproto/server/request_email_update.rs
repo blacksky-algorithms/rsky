@@ -1,22 +1,26 @@
 use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{OAuthForbiddenEmail, Scoped};
 use crate::auth_verifier::AccessStandardIncludeChecks;
 use crate::mailer;
 use crate::mailer::TokenParam;
 use crate::models::models::EmailTokenPurpose;
+use crate::rate_limits::{Caller, RateLimits};
 use anyhow::{bail, Result};
 use rocket::serde::json::Json;
+use rocket::State;
 use rsky_lexicon::com::atproto::server::RequestEmailUpdateOutput;
 
-async fn inner_request_email_update(
-    auth: AccessStandardIncludeChecks,
-    account_manager: AccountManager,
-) -> Result<RequestEmailUpdateOutput> {
-    let did = auth.access.credentials.unwrap().did.unwrap();
+/// Mails an update token when the account's address is confirmed; returns
+/// whether one is required to change the address.
+pub(crate) async fn request_email_update_for(
+    did: &str,
+    account_manager: &AccountManager,
+) -> Result<bool> {
     let account = account_manager
         .get_account(
-            &did,
+            did,
             Some(AvailabilityFlags {
                 include_deactivated: Some(true),
                 include_taken_down: Some(true),
@@ -28,12 +32,12 @@ async fn inner_request_email_update(
             let token_required = account.email_confirmed_at.is_some();
             if token_required {
                 let token = account_manager
-                    .create_email_token(&did, EmailTokenPurpose::UpdateEmail)
+                    .create_email_token(did, EmailTokenPurpose::UpdateEmail)
                     .await?;
                 mailer::send_update_email(email, TokenParam { token }).await?;
             }
 
-            Ok(RequestEmailUpdateOutput { token_required })
+            Ok(token_required)
         } else {
             bail!("Account does not have an email address")
         }
@@ -45,11 +49,22 @@ async fn inner_request_email_update(
 #[tracing::instrument(skip_all)]
 #[rocket::post("/xrpc/com.atproto.server.requestEmailUpdate")]
 pub async fn request_email_update(
-    auth: AccessStandardIncludeChecks,
+    auth: Scoped<OAuthForbiddenEmail, AccessStandardIncludeChecks>,
     account_manager: AccountManager,
+    limits: &State<RateLimits>,
+    caller: Caller,
 ) -> Result<Json<RequestEmailUpdateOutput>, ApiError> {
-    match inner_request_email_update(auth, account_manager).await {
-        Ok(res) => Ok(Json(res)),
+    let did = auth.did().await?;
+    limits
+        .consume_all(
+            &crate::rate_limits::REQUEST_EMAIL_UPDATE,
+            &did,
+            1,
+            caller.bypass,
+        )
+        .await?;
+    match request_email_update_for(&did, &account_manager).await {
+        Ok(token_required) => Ok(Json(RequestEmailUpdateOutput { token_required })),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::RuntimeError)

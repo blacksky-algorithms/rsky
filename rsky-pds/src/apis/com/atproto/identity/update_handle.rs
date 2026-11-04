@@ -2,9 +2,11 @@ use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::apis::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{IdentityHandle, Scoped};
 use crate::auth_verifier::AccessStandardCheckTakedown;
 use crate::config::ServerConfig;
 use crate::handle::{normalize_and_validate_handle, HandleValidationContext, HandleValidationOpts};
+use crate::rate_limits::{Caller, RateLimits};
 use crate::{plc, SharedIdResolver, SharedSequencer};
 use anyhow::{bail, Result};
 use rocket::serde::json::Json;
@@ -12,26 +14,25 @@ use rocket::State;
 use rsky_common::env::env_str;
 use rsky_lexicon::com::atproto::identity::UpdateHandleInput;
 
+/// Validates `handle`, records it for `requester` in the directory and the
+/// account, and announces the identity change.
 #[tracing::instrument(skip_all)]
-async fn inner_update_handle(
-    body: Json<UpdateHandleInput>,
-    sequencer: &State<SharedSequencer>,
-    server_config: &State<ServerConfig>,
-    id_resolver: &State<SharedIdResolver>,
-    auth: AccessStandardCheckTakedown,
-    account_manager: AccountManager,
+pub(crate) async fn update_handle_for(
+    requester: String,
+    handle: String,
+    sequencer: &SharedSequencer,
+    server_config: &ServerConfig,
+    id_resolver: &SharedIdResolver,
+    account_manager: &AccountManager,
 ) -> Result<()> {
-    let UpdateHandleInput { handle } = body.into_inner();
-    let requester = auth.access.credentials.unwrap().did.unwrap();
-
     let opts = HandleValidationOpts {
         handle,
         did: Some(requester.clone()),
         allow_reserved: None,
     };
     let validation_ctx = HandleValidationContext {
-        server_config,
-        id_resolver,
+        server_config: server_config.into(),
+        id_resolver: id_resolver.into(),
     };
     let handle = normalize_and_validate_handle(opts, validation_ctx).await?;
 
@@ -71,16 +72,10 @@ async fn inner_update_handle(
         Ok(_) => (),
         Err(error) => tracing::error!("Error: {}; DID: {}; Handle: {}", error, &requester, &handle),
     };
-    match lock
-        .sequence_handle_update(requester.clone(), handle.clone())
-        .await
-    {
-        Ok(_) => (),
-        Err(error) => tracing::error!("Error: {}; DID: {}; Handle: {}", error, &requester, &handle),
-    };
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 #[rocket::post(
     "/xrpc/com.atproto.identity.updateHandle",
@@ -92,16 +87,23 @@ pub async fn update_handle(
     sequencer: &State<SharedSequencer>,
     server_config: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
-    auth: AccessStandardCheckTakedown,
+    auth: Scoped<IdentityHandle, AccessStandardCheckTakedown>,
     account_manager: AccountManager,
+    limits: &State<RateLimits>,
+    caller: Caller,
 ) -> Result<(), ApiError> {
-    match inner_update_handle(
-        body,
+    let did = auth.did().await?;
+    limits
+        .consume_all(&crate::rate_limits::UPDATE_HANDLE, &did, 1, caller.bypass)
+        .await?;
+    let UpdateHandleInput { handle } = body.into_inner();
+    match update_handle_for(
+        did,
+        handle,
         sequencer,
         server_config,
         id_resolver,
-        auth,
-        account_manager,
+        &account_manager,
     )
     .await
     {

@@ -49,6 +49,45 @@ impl EcCurve {
     }
 }
 
+/// The key an authorization server signs its access tokens with: a private
+/// EC key, or a shared secret for HMAC-SHA256 (the reference PDS's scheme).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SigningKey {
+    Ec(Jwk),
+    Symmetric(Vec<u8>),
+}
+
+impl SigningKey {
+    pub fn alg(&self) -> Result<&'static str, OAuthError> {
+        match self {
+            SigningKey::Ec(jwk) => Ok(jwk.curve()?.alg()),
+            SigningKey::Symmetric(_) => Ok("HS256"),
+        }
+    }
+
+    /// The keys to publish: a symmetric key is never published, so the set
+    /// is empty for it.
+    pub fn public_jwks(&self) -> JwkSet {
+        match self {
+            SigningKey::Ec(jwk) => {
+                let mut key = jwk.to_public();
+                // Advertise `alg` and a stable `kid` so a client can pin the
+                // key and survive rotation (RFC 7517 recommendations).
+                if key.alg.is_none() {
+                    if let Ok(curve) = key.curve() {
+                        key.alg = Some(curve.alg().to_string());
+                    }
+                }
+                if key.kid.is_none() {
+                    key.kid = Some(key.thumbprint());
+                }
+                JwkSet { keys: vec![key] }
+            }
+            SigningKey::Symmetric(_) => JwkSet { keys: vec![] },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Jwk {
     pub kty: String,
@@ -348,5 +387,26 @@ mod tests {
         assert!(set.find_by_kid("missing").is_none());
         let parsed: JwkSet = serde_json::from_str(&serde_json::to_string(&set).unwrap()).unwrap();
         assert_eq!(parsed, set);
+    }
+
+    #[test]
+    fn signing_key_publishes_only_ec_keys() {
+        let mut ec = Jwk::from_private_key_bytes(EcCurve::K256, &[0x42u8; 32]).unwrap();
+        let published = SigningKey::Ec(ec.clone()).public_jwks();
+        assert_eq!(published.keys.len(), 1);
+        assert!(published.keys[0].d.is_none());
+        assert_eq!(published.keys[0].alg.as_deref(), Some("ES256K"));
+        assert_eq!(
+            published.keys[0].kid.as_deref(),
+            Some(ec.to_public().thumbprint().as_str())
+        );
+        ec.alg = Some("ES256K".to_string());
+        ec.kid = Some("key-1".to_string());
+        let pinned = SigningKey::Ec(ec.clone()).public_jwks();
+        assert_eq!(pinned.keys[0].kid.as_deref(), Some("key-1"));
+        assert_eq!(SigningKey::Ec(ec).alg().unwrap(), "ES256K");
+        let secret = SigningKey::Symmetric(b"secret".to_vec());
+        assert!(secret.public_jwks().keys.is_empty());
+        assert_eq!(secret.alg().unwrap(), "HS256");
     }
 }

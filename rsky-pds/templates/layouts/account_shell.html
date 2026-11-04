@@ -1,0 +1,59 @@
+{% extends "layouts/base.html" %}
+{% import "components/macros.html" as ui %}
+{% block title %}My Atmosphere Account{% endblock %}
+{% block body %}
+<div class="account-shell">
+  <input type="checkbox" id="nav-toggle" class="nav-toggle" aria-label="Navigation">
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      {% if let Some(logo) = shell.logo_url %}<img src="{{ logo }}" alt="">{% endif %}
+      <span>{{ shell.service_name }}</span>
+    </div>
+    <nav class="sidebar-group" aria-label="Navigation">
+      {% for item in nav.items %}
+      <a class="sidebar-link" href="{{ item.href }}"{% if item.current %} aria-current="page"{% endif %}>{% include "components/nav_icon.html" %}<span>{{ item.title }}</span></a>
+      {% endfor %}
+    </nav>
+    {% if !shell.links.is_empty() %}
+    <div class="sidebar-group bottom">
+      {% for link in shell.links %}<a class="sidebar-link" href="{{ link.href }}" rel="{{ link.rel }} noopener" target="_blank">{{ link.title }}</a>{% endfor %}
+    </div>
+    {% endif %}
+    <div class="sidebar-footer">
+      <details class="account-menu">
+        <summary aria-label="Account selector">
+          {% call ui::avatar("avatar-sm", nav.account.picture) %}
+          <span class="item-content">
+            {% if !nav.account.name.is_empty() %}<span class="item-title truncate">{{ nav.account.name }}</span>{% endif %}
+            <span class="item-description truncate">{{ nav.account.handle }}</span>
+          </span>
+          {% include "icons/ellipsis-vertical.svg.html" %}
+        </summary>
+        <div class="menu-body">
+          {% if nav.can_switch %}<a class="btn btn-ghost" href="{{ nav.switch_href }}">{% include "icons/users.svg.html" %}<span>Select another account</span></a>{% endif %}
+          <form method="post" action="{{ nav.sign_out_action }}">
+            {% call ui::csrf_fields(nav.csrf) %}
+            <button type="submit" class="btn btn-ghost">{% include "icons/log-out.svg.html" %}<span>Sign out</span></button>
+          </form>
+        </div>
+      </details>
+    </div>
+  </aside>
+  <label for="nav-toggle" class="nav-backdrop" aria-hidden="true"></label>
+  <div class="sidebar-inset">
+    <header class="app-header">
+      {% if !nav.at_base %}<a class="back-link show" href="{{ nav.base_href }}" aria-label="Back">{% include "icons/arrow-left.svg.html" %}</a>{% endif %}
+      <label for="nav-toggle" class="nav-trigger{% if !nav.at_base %} subpage{% endif %}" aria-label="Navigation">{% include "icons/menu.svg.html" %}</label>
+      <span class="header-separator"></span>
+      {% if !nav.page_title.is_empty() %}<h2>{{ nav.page_title }}</h2>{% endif %}
+      <div class="header-brand">
+        {% if let Some(logo) = shell.logo_url %}<img src="{{ logo }}" alt="">{% endif %}
+        <span class="truncate">{{ shell.service_name }}</span>
+      </div>
+    </header>
+    <main class="app-main" role="main">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</div>
+{% endblock %}

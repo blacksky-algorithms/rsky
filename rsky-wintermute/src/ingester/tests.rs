@@ -264,6 +264,7 @@ mod ingester_tests {
                 rev: "test-rev-123".to_owned(),
                 ops: vec![],
                 blocks: vec![10, 20, 30],
+                cid: None,
             }),
             identity: None,
             account: None,
@@ -387,6 +388,7 @@ mod ingester_tests {
                     rev: "rev1".to_owned(),
                     ops: vec![],
                     blocks: vec![],
+                    cid: None,
                 }),
                 identity: None,
                 account: None,
@@ -400,6 +402,7 @@ mod ingester_tests {
                     rev: "rev2".to_owned(),
                     ops: vec![],
                     blocks: vec![],
+                    cid: None,
                 }),
                 identity: None,
                 account: None,
@@ -413,6 +416,7 @@ mod ingester_tests {
                     rev: "rev3".to_owned(),
                     ops: vec![],
                     blocks: vec![],
+                    cid: None,
                 }),
                 identity: None,
                 account: None,
@@ -830,6 +834,8 @@ mod ingester_tests {
             time: "2024-01-01T00:00:00Z".to_owned(),
             kind: "commit".to_owned(),
             commit: Some(CommitData {
+                cid: None,
+
                 rev: "rev-abc".to_owned(),
                 ops: vec![
                     RepoOp {
@@ -868,8 +874,8 @@ mod ingester_tests {
             .await
             .unwrap();
 
-        // Should have 3 jobs (one for each operation)
-        assert_eq!(storage.firehose_live_len().unwrap(), 3);
+        // one job per operation, then the commit itself
+        assert_eq!(storage.firehose_live_len().unwrap(), 4);
 
         // Dequeue and verify jobs (order not guaranteed)
         let mut jobs = Vec::new();
@@ -878,7 +884,13 @@ mod ingester_tests {
             storage.remove_firehose_live(&key).unwrap();
         }
 
-        assert_eq!(jobs.len(), 3);
+        assert_eq!(jobs.len(), 4);
+        assert_eq!(
+            jobs.iter()
+                .filter(|j| matches!(j.action, crate::types::WriteAction::Commit))
+                .count(),
+            1
+        );
 
         // Verify we have one of each action type
         assert_eq!(
@@ -933,16 +945,22 @@ mod ingester_tests {
                 rev: "rev-abc".to_owned(),
                 ops: vec![], // No operations
                 blocks: vec![],
+                cid: None,
             }),
             identity: None,
             account: None,
         };
 
-        // Should succeed but not enqueue anything
+        // no record job, but the commit itself is queued so that progress
+        // records it
         IngesterManager::enqueue_event_for_indexing(&storage, &event)
             .await
             .unwrap();
-        assert_eq!(storage.firehose_live_len().unwrap(), 0);
+        assert_eq!(storage.firehose_live_len().unwrap(), 1);
+        let (_, job) = storage.dequeue_firehose_live().unwrap().unwrap();
+        assert!(matches!(job.action, crate::types::WriteAction::Commit));
+        assert_eq!(job.uri, format!("at://{}", event.did));
+        assert_eq!(job.rev, "rev-abc");
     }
 
     #[tokio::test]
@@ -1243,6 +1261,96 @@ mod ingester_tests {
                 Some(Some("identity-renamed.test".to_owned()))
             );
             delete_actor(&pool, did).await;
+        }
+
+        #[tokio::test]
+        async fn releases_handle_held_by_another_actor() {
+            let pool = setup_test_pool();
+            let previous = "did:plc:wintermute-test-identity-previous";
+            let current = "did:plc:wintermute-test-identity-current";
+            delete_actor(&pool, previous).await;
+            delete_actor(&pool, current).await;
+            let client = pool.get().await.unwrap();
+            client
+                .execute(
+                    "INSERT INTO actor (did, handle, \"indexedAt\") \
+                     VALUES ($1, 'identity-moved.test', '2026-01-01T00:00:00.000Z')",
+                    &[&previous],
+                )
+                .await
+                .unwrap();
+
+            IngesterManager::process_identity_event(
+                &pool,
+                current,
+                "2026-07-29T12:00:00.000Z",
+                Some("identity-moved.test"),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(
+                read_handle(&pool, current).await,
+                Some(Some("identity-moved.test".to_owned()))
+            );
+            assert_eq!(read_handle(&pool, previous).await, Some(None));
+            delete_actor(&pool, previous).await;
+            delete_actor(&pool, current).await;
+        }
+
+        #[tokio::test]
+        async fn null_handle_clears_the_stored_handle() {
+            let pool = setup_test_pool();
+            let did = "did:plc:wintermute-test-identity-null";
+            delete_actor(&pool, did).await;
+            let mut client = pool.get().await.unwrap();
+            for handle in [Some("identity-null.test"), None] {
+                crate::actor_handle::upsert_actor_handle(
+                    &mut client,
+                    did,
+                    handle,
+                    "2026-07-29T12:00:00.000Z",
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    read_handle(&pool, did).await,
+                    Some(handle.map(str::to_owned))
+                );
+            }
+            delete_actor(&pool, did).await;
+        }
+
+        #[tokio::test]
+        async fn concurrent_events_for_one_new_did_do_not_conflict() {
+            let pool = setup_test_pool();
+            let did = "did:plc:wintermute-test-identity-race";
+            delete_actor(&pool, did).await;
+            let mut tasks = Vec::new();
+            for _ in 0..8 {
+                let pool = pool.clone();
+                tasks.push(tokio::spawn(async move {
+                    IngesterManager::process_identity_event(
+                        &pool,
+                        did,
+                        "2026-07-29T12:00:00.000Z",
+                        Some("identity-race.test"),
+                    )
+                    .await
+                }));
+            }
+            let mut failures = Vec::new();
+            for t in tasks {
+                if let Err(e) = t.await.unwrap() {
+                    failures.push(e.to_string());
+                }
+            }
+            assert_eq!(
+                read_handle(&pool, did).await,
+                Some(Some("identity-race.test".to_owned()))
+            );
+            delete_actor(&pool, did).await;
+            assert!(failures.is_empty(), "{failures:?}");
         }
     }
 

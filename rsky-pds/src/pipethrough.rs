@@ -1,12 +1,13 @@
+use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
-use crate::auth_verifier::{AccessOutput, AccessStandard};
+use crate::auth_verifier::scope::{RpcProxy, Scoped};
 use crate::config::{ServerConfig, ServiceConfig};
 use crate::xrpc_server::types::{HandlerPipeThrough, InvalidRequestError, XRPCError};
 use crate::{context, SharedIdResolver, APP_USER_AGENT};
 use anyhow::{bail, Result};
 use lazy_static::lazy_static;
-use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
-use reqwest::{Client, RequestBuilder, Response};
+use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE, USER_AGENT};
+use reqwest::{RequestBuilder, Response};
 use rocket::data::ToByteUnit;
 use rocket::http::{Method, Status};
 use rocket::request::{FromRequest, Outcome, Request};
@@ -15,9 +16,9 @@ use rsky_common::{get_service_endpoint, GetServiceEndpointOpts};
 use rsky_repo::types::Ids;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
-use std::collections::{BTreeMap, HashSet};
-use std::str::FromStr;
-use std::time::Duration;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 use url::Url;
 
 pub struct OverrideOpts {
@@ -43,6 +44,7 @@ pub struct ProxyRequest<'r> {
     pub method: Method,
     pub id_resolver: &'r State<SharedIdResolver>,
     pub cfg: &'r State<ServerConfig>,
+    pub actor_store: &'r State<ActorStore>,
 }
 
 #[rocket::async_trait]
@@ -51,12 +53,17 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
 
     #[tracing::instrument(skip_all)]
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        match AccessStandard::from_request(req).await {
-            Outcome::Success(output) => {
-                let AccessOutput { credentials, .. } = output.access;
-                let requester: Option<String> = match credentials {
-                    None => None,
-                    Some(credentials) => credentials.did,
+        match Scoped::<RpcProxy>::from_request(req).await {
+            Outcome::Success(auth) => {
+                let requester: Option<String> = match auth.did_opt().await {
+                    Ok(requester) => requester,
+                    Err(api_error) => {
+                        req.local_cache(|| Some(api_error));
+                        return Outcome::Error((
+                            Status::Forbidden,
+                            anyhow::anyhow!("InsufficientScope"),
+                        ));
+                    }
                 };
                 let headers = req.headers().clone().into_iter().fold(
                     BTreeMap::new(),
@@ -72,6 +79,7 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
                     method: req.method(),
                     id_resolver: req.guard::<&State<SharedIdResolver>>().await.unwrap(),
                     cfg: req.guard::<&State<ServerConfig>>().await.unwrap(),
+                    actor_store: req.guard::<&State<ActorStore>>().await.unwrap(),
                 };
                 match pipethrough(
                     &proxy_req,
@@ -102,10 +110,7 @@ impl<'r> FromRequest<'r> for HandlerPipeThrough {
             }
             Outcome::Error(err) => {
                 req.local_cache(|| Some(ApiError::RuntimeError));
-                Outcome::Error((
-                    Status::BadRequest,
-                    anyhow::Error::new(InvalidRequestError::AuthError(err.1)),
-                ))
+                Outcome::Error((Status::BadRequest, anyhow::Error::new(err.1)))
             }
             _ => panic!("Unexpected outcome during Pipethrough"),
         }
@@ -131,6 +136,7 @@ impl<'r> FromRequest<'r> for ProxyRequest<'r> {
             method: req.method(),
             id_resolver: req.guard::<&State<SharedIdResolver>>().await.unwrap(),
             cfg: req.guard::<&State<ServerConfig>>().await.unwrap(),
+            actor_store: req.guard::<&State<ActorStore>>().await.unwrap(),
         })
     }
 }
@@ -220,6 +226,46 @@ pub async fn pipethrough_procedure_post(
     Ok(parse_proxy_res(res).await?)
 }
 
+/// Enforce an OAuth session's `rpc:` scope before a call is proxied to
+/// another service, at the seam every pipethrough request passes through
+/// (`bsky_api_get_forwarder` and friends all resolve to
+/// [`HandlerPipeThrough`]). Gating and `transition:generic` handling are
+/// [`crate::apis::scoped_session`]'s.
+pub async fn assert_rpc_scope(
+    granted_scopes: &Option<Vec<String>>,
+    req: &ProxyRequest<'_>,
+) -> Result<(), ApiError> {
+    let Some(scopes) = crate::apis::scoped_session(granted_scopes.as_ref(), true) else {
+        return Ok(());
+    };
+    let lxm = parse_req_nsid(req);
+    // The grant names a service (`did#service_id`), as the reference's
+    // `computeProxyTo` does, not the bare DID `format_url_and_aud` returns for
+    // the service-auth JWT. Checking the bare DID refused every spec-shaped
+    // grant, e.g. `rpc:app.bsky.feed.getTimeline?aud=did:web:api.bsky.app%23bsky_appview`.
+    let aud = configured_audience(crate::apis::rpc_audience(req, &lxm), &req.path)?;
+    // An `rpc:` grant is bound to an audience, so a destination we cannot
+    // resolve is a destination we cannot show the call is scoped for.
+    if let Err(error) = format_url_and_aud(req, None).await {
+        return Err(pipethrough_error(&error));
+    }
+    if scopes.allows_rpc(&lxm, &aud) {
+        Ok(())
+    } else {
+        Err(ApiError::InsufficientScope(format!(
+            "Token scope does not permit calling {lxm} on {aud}"
+        )))
+    }
+}
+
+fn configured_audience(aud: Option<String>, path: &str) -> Result<String, ApiError> {
+    aud.ok_or_else(|| {
+        pipethrough_error(&anyhow::anyhow!(InvalidRequestError::NoServiceConfigured(
+            path.to_owned()
+        )))
+    })
+}
+
 // Request setup/formatting
 // -------------------
 
@@ -266,7 +312,8 @@ pub async fn format_url_and_aud(
             if let Some(ref params) = req.query {
                 url.set_query(Some(params.as_str()));
             }
-            if !req.cfg.service.dev_mode && !is_safe_url(url.clone()) {
+            if let Err(refused) = crate::outbound::client().check(&url) {
+                tracing::warn!(%refused, "proxy target refused");
                 bail!(InvalidRequestError::InvalidServiceUrl(url.to_string()));
             }
             Ok(UrlAndAud {
@@ -286,7 +333,9 @@ pub async fn format_headers(
     requester: Option<String>,
 ) -> Result<HeaderMap> {
     let mut headers: HeaderMap = match requester {
-        Some(requester) => context::service_auth_headers(&requester, &aud, &lxm).await?,
+        Some(requester) => {
+            context::service_auth_headers(req.actor_store, &requester, &aud, &lxm).await?
+        }
         None => HeaderMap::new(),
     };
     // forward select headers to upstream services
@@ -299,42 +348,31 @@ pub async fn format_headers(
     Ok(headers)
 }
 
+/// A request on the shared outbound transport. Building a client per
+/// request loaded the certificate store and opened a new TLS connection
+/// every time, which is where the proxy path spent its time under load.
+fn proxy_request(method: Method, url: Url, headers: HeaderMap) -> Result<RequestBuilder> {
+    let transport = crate::outbound::client().transport();
+    let request = match method {
+        Method::Get => transport.get(url),
+        Method::Head => transport.head(url),
+        Method::Post => transport.post(url),
+        _ => bail!(InvalidRequestError::MethodNotFound),
+    };
+    Ok(request.header(USER_AGENT, APP_USER_AGENT).headers(headers))
+}
+
 pub fn format_req_init(
     req: &ProxyRequest,
     url: Url,
     headers: HeaderMap,
     body: Option<Vec<u8>>,
 ) -> Result<RequestBuilder> {
-    match req.method {
-        Method::Get => {
-            let client = Client::builder()
-                .user_agent(APP_USER_AGENT)
-                .http2_keep_alive_while_idle(true)
-                .http2_keep_alive_timeout(Duration::from_secs(5))
-                .default_headers(headers)
-                .build()?;
-            Ok(client.get(url))
-        }
-        Method::Head => {
-            let client = Client::builder()
-                .user_agent(APP_USER_AGENT)
-                .http2_keep_alive_while_idle(true)
-                .http2_keep_alive_timeout(Duration::from_secs(5))
-                .default_headers(headers)
-                .build()?;
-            Ok(client.head(url))
-        }
-        Method::Post => {
-            let client = Client::builder()
-                .user_agent(APP_USER_AGENT)
-                .http2_keep_alive_while_idle(true)
-                .http2_keep_alive_timeout(Duration::from_secs(5))
-                .default_headers(headers)
-                .build()?;
-            Ok(client.post(url).body(body.unwrap()))
-        }
-        _ => bail!(InvalidRequestError::MethodNotFound),
-    }
+    let request = proxy_request(req.method, url, headers)?;
+    Ok(match (req.method, body) {
+        (Method::Post, Some(body)) => request.body(body),
+        _ => request,
+    })
 }
 
 pub fn format_req_init_with_value(
@@ -343,36 +381,42 @@ pub fn format_req_init_with_value(
     headers: HeaderMap,
     body: Option<JsonValue>,
 ) -> Result<RequestBuilder> {
-    match req.method {
-        Method::Get => {
-            let client = Client::builder()
-                .user_agent(APP_USER_AGENT)
-                .http2_keep_alive_while_idle(true)
-                .http2_keep_alive_timeout(Duration::from_secs(5))
-                .default_headers(headers)
-                .build()?;
-            Ok(client.get(url))
-        }
-        Method::Head => {
-            let client = Client::builder()
-                .user_agent(APP_USER_AGENT)
-                .http2_keep_alive_while_idle(true)
-                .http2_keep_alive_timeout(Duration::from_secs(5))
-                .default_headers(headers)
-                .build()?;
-            Ok(client.head(url))
-        }
-        Method::Post => {
-            let client = Client::builder()
-                .user_agent(APP_USER_AGENT)
-                .http2_keep_alive_while_idle(true)
-                .http2_keep_alive_timeout(Duration::from_secs(5))
-                .default_headers(headers)
-                .build()?;
-            Ok(client.post(url).json(&body.unwrap()))
-        }
-        _ => bail!(InvalidRequestError::MethodNotFound),
+    let request = proxy_request(req.method, url, headers)?;
+    match (req.method, body) {
+        (Method::Post, Some(body)) => Ok(request.json(&body)),
+        _ => Ok(request),
     }
+}
+
+/// Service endpoints already resolved from `atproto-proxy` headers. The
+/// app names the same service on every proxied request, and resolving it
+/// each time serialised the whole proxy path behind one DID lookup.
+static PROXY_TARGETS: LazyLock<std::sync::RwLock<HashMap<String, (String, Instant)>>> =
+    LazyLock::new(|| std::sync::RwLock::new(HashMap::new()));
+const PROXY_TARGET_TTL: Duration = Duration::from_secs(300);
+const PROXY_TARGET_CAPACITY: usize = 4096;
+
+fn cached_proxy_target(header: &str) -> Option<String> {
+    let targets = PROXY_TARGETS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    targets
+        .get(header)
+        .filter(|(_, resolved_at)| resolved_at.elapsed() < PROXY_TARGET_TTL)
+        .map(|(service_url, _)| service_url.clone())
+}
+
+fn remember_proxy_target(header: &str, service_url: &str) {
+    let mut targets = PROXY_TARGETS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if targets.len() >= PROXY_TARGET_CAPACITY {
+        targets.retain(|_, (_, resolved_at)| resolved_at.elapsed() < PROXY_TARGET_TTL);
+        if targets.len() >= PROXY_TARGET_CAPACITY {
+            targets.clear();
+        }
+    }
+    targets.insert(header.to_owned(), (service_url.to_owned(), Instant::now()));
 }
 
 pub async fn parse_proxy_header(req: &ProxyRequest<'_>) -> Result<Option<ProxyHeader>> {
@@ -385,8 +429,11 @@ pub async fn parse_proxy_header(req: &ProxyRequest<'_>) -> Result<Option<ProxyHe
             match (parts.first(), parts.get(1), parts.get(2)) {
                 (Some(did), Some(service_id), None) => {
                     let did = did.to_string();
+                    if let Some(service_url) = cached_proxy_target(proxy_to) {
+                        return Ok(Some(ProxyHeader { did, service_url }));
+                    }
                     let id_resolver = req.id_resolver;
-                    let lock = id_resolver.id_resolver.write().await;
+                    let lock = id_resolver.id_resolver.read().await;
                     match lock.did.resolve(did.clone(), None).await? {
                         None => bail!(InvalidRequestError::CannotResolveProxyDid),
                         Some(did_doc) => {
@@ -398,7 +445,10 @@ pub async fn parse_proxy_header(req: &ProxyRequest<'_>) -> Result<Option<ProxyHe
                                 },
                             ) {
                                 None => bail!(InvalidRequestError::CannotResolveServiceUrl),
-                                Some(service_url) => Ok(Some(ProxyHeader { did, service_url })),
+                                Some(service_url) => {
+                                    remember_proxy_target(proxy_to, &service_url);
+                                    Ok(Some(ProxyHeader { did, service_url }))
+                                }
                             }
                         }
                     }
@@ -574,26 +624,23 @@ lazy_static! {
 
 }
 
+/// The service a method reaches without an `atproto-proxy` header, as the
+/// reference PDS decides it: every `tools.ozone.*` method goes to the
+/// moderation service, reports to the report service, everything else to
+/// the app view.
 pub async fn default_service(req: &ProxyRequest<'_>, nsid: &str) -> Option<ServiceConfig> {
-    let cfg = req.cfg;
-    match Ids::from_str(nsid) {
-        Ok(Ids::ToolsOzoneTeamAddMember) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneTeamDeleteMember) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneTeamUpdateMember) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneTeamListMembers) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneCommunicationCreateTemplate) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneCommunicationDeleteTemplate) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneCommunicationUpdateTemplate) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneCommunicationListTemplates) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneModerationEmitEvent) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneModerationGetEvent) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneModerationGetRecord) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneModerationGetRepo) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneModerationQueryEvents) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneModerationQueryStatuses) => cfg.mod_service.clone(),
-        Ok(Ids::ToolsOzoneModerationSearchRepos) => cfg.mod_service.clone(),
-        Ok(Ids::ComAtprotoModerationCreateReport) => cfg.report_service.clone(),
-        _ => cfg.bsky_app_view.clone(),
+    default_service_for(req.cfg, nsid)
+}
+
+pub fn default_service_for(cfg: &ServerConfig, nsid: &str) -> Option<ServiceConfig> {
+    if nsid.starts_with("tools.ozone.") {
+        cfg.mod_service.clone()
+    } else if Ids::from_str(nsid)
+        .is_ok_and(|id| matches!(id, Ids::ComAtprotoModerationCreateReport))
+    {
+        cfg.report_service.clone()
+    } else {
+        cfg.bsky_app_view.clone()
     }
 }
 
@@ -614,17 +661,103 @@ pub async fn read_array_buffer_res(res: Response) -> Result<Vec<u8>> {
     }
 }
 
-pub fn is_safe_url(url: Url) -> bool {
-    if url.scheme() != "https" {
-        return false;
+#[cfg(test)]
+mod default_service_tests {
+    use super::{configured_audience, default_service_for};
+    use crate::config::{env_to_cfg, ServiceConfig};
+
+    fn service(name: &str) -> Option<ServiceConfig> {
+        Some(ServiceConfig {
+            url: format!("https://{name}.example.com"),
+            did: format!("did:web:{name}.example.com"),
+            cdn_url_pattern: None,
+        })
     }
-    match url.host_str() {
-        None | Some("localhost") => false,
-        Some(hostname) => {
-            if std::net::IpAddr::from_str(hostname).is_ok() {
-                return false;
+
+    #[test]
+    fn methods_reach_the_reference_default_service() {
+        let mut cfg = env_to_cfg();
+        cfg.mod_service = service("mod");
+        cfg.report_service = service("report");
+        cfg.bsky_app_view = service("appview");
+        let did_for = |nsid: &str| default_service_for(&cfg, nsid).unwrap().did;
+        assert_eq!(
+            did_for("tools.ozone.moderation.queryStatuses"),
+            "did:web:mod.example.com"
+        );
+        assert_eq!(
+            did_for("tools.ozone.some.futureMethod"),
+            "did:web:mod.example.com"
+        );
+        assert_eq!(
+            did_for("com.atproto.moderation.createReport"),
+            "did:web:report.example.com"
+        );
+        assert_eq!(
+            did_for("app.bsky.feed.getTimeline"),
+            "did:web:appview.example.com"
+        );
+        assert_eq!(did_for("xyz.unknown.method"), "did:web:appview.example.com");
+        cfg.bsky_app_view = None;
+        assert!(default_service_for(&cfg, "app.bsky.feed.getTimeline").is_none());
+    }
+
+    #[test]
+    fn a_proxied_call_with_no_service_configured_is_refused() {
+        let path = "/xrpc/app.bsky.feed.getTimeline";
+        assert_eq!(
+            configured_audience(
+                Some("did:web:appview.example.com#bsky_appview".into()),
+                path
+            )
+            .unwrap(),
+            "did:web:appview.example.com#bsky_appview"
+        );
+        assert!(configured_audience(None, path).is_err());
+    }
+}
+
+#[cfg(test)]
+mod proxy_target_tests {
+    use super::{
+        cached_proxy_target, remember_proxy_target, PROXY_TARGETS, PROXY_TARGET_CAPACITY,
+        PROXY_TARGET_TTL,
+    };
+
+    #[test]
+    fn proxy_targets_are_remembered_until_they_expire() {
+        let header = "did:web:cache.test#bsky_appview";
+        assert_eq!(cached_proxy_target(header), None);
+        remember_proxy_target(header, "https://cache.test");
+        assert_eq!(
+            cached_proxy_target(header).as_deref(),
+            Some("https://cache.test")
+        );
+        remember_proxy_target(header, "https://cache.test/again");
+        assert_eq!(
+            cached_proxy_target(header).as_deref(),
+            Some("https://cache.test/again")
+        );
+        {
+            let mut targets = PROXY_TARGETS.write().unwrap();
+            let expired = std::time::Instant::now() - PROXY_TARGET_TTL * 2;
+            targets.insert(
+                header.to_owned(),
+                ("https://cache.test".to_owned(), expired),
+            );
+            for i in 0..PROXY_TARGET_CAPACITY {
+                targets.insert(
+                    format!("did:web:full{i}#svc"),
+                    ("https://full.test".to_owned(), expired),
+                );
             }
-            true
         }
+        assert_eq!(cached_proxy_target(header), None);
+        remember_proxy_target(header, "https://cache.test/fresh");
+        assert_eq!(
+            cached_proxy_target(header).as_deref(),
+            Some("https://cache.test/fresh")
+        );
+        assert!(PROXY_TARGETS.read().unwrap().len() <= 2);
     }
 }

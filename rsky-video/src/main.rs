@@ -24,6 +24,7 @@ mod bunny;
 mod config;
 mod db;
 mod error;
+mod media_signing;
 mod pds;
 mod signing;
 mod transcode;

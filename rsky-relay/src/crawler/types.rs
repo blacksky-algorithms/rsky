@@ -15,7 +15,8 @@ pub type MaybeTlsTcpStream = MaybeTlsStream<TcpStream>;
 pub type WebSocketClient = WebSocket<MaybeTlsTcpStream>;
 pub type Handshaking = MidHandshake<ClientHandshake<MaybeTlsTcpStream>>;
 pub type MaybeHandshake = Result<WebSocketClient, Handshaking>;
-pub type HandshakeResult = Result<MaybeHandshake, tungstenite::Error>;
+// Boxed: `tungstenite::Error` is 136 bytes, over clippy's `result_large_err` limit.
+pub type HandshakeResult = Result<MaybeHandshake, Box<tungstenite::Error>>;
 
 pub trait DecomposeError {
     fn decompose(self) -> HandshakeResult;
@@ -28,7 +29,7 @@ impl DecomposeError
         match self {
             Ok((client, _)) => Ok(Ok(client)),
             Err(HandshakeError::Interrupted(handshaking)) => Ok(Err(handshaking)),
-            Err(HandshakeError::Failure(err)) => Err(err),
+            Err(HandshakeError::Failure(err)) => Err(Box::new(err)),
         }
     }
 }
@@ -96,6 +97,6 @@ mod tests {
             HandshakeError<ClientHandshake<MaybeTlsTcpStream>>,
         > = Err(HandshakeError::Failure(tungstenite::Error::ConnectionClosed));
         let out = res.decompose();
-        assert!(matches!(out, Err(tungstenite::Error::ConnectionClosed)));
+        assert!(matches!(out, Err(err) if matches!(*err, tungstenite::Error::ConnectionClosed)));
     }
 }

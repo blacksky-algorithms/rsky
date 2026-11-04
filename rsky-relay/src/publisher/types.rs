@@ -225,13 +225,14 @@ mod maybe_tls_stream {
         fn plain_tcp_shutdown_succeeds() {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
-            let server_thread = std::thread::spawn(move || {
-                drop(listener.accept());
-            });
+            let server_thread = std::thread::spawn(move || listener.accept().map(|(s, _)| s));
             let client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            // Hold the accepted end open: a peer that closes first resets the connection and
+            // makes shutdown fail with ENOTCONN.
+            let accepted = server_thread.join().unwrap().unwrap();
             let mut s = MaybeTlsStream::Plain(client);
             s.shutdown().unwrap();
-            server_thread.join().unwrap();
+            drop(accepted);
         }
     }
 }

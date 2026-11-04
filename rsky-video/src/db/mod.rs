@@ -18,6 +18,7 @@ pub struct VideoJob {
     pub bunny_video_id: Option<String>,
     pub video_cid: Option<String>,
     pub pds_blob_ref: Option<JsonValue>,
+    pub private: bool,
     pub state: String,
     pub progress: i32,
     pub blob_ref: Option<JsonValue>,
@@ -97,6 +98,13 @@ pub async fn run_migrations(pool: &Pool) -> Result<()> {
 
     client
         .execute(
+            "ALTER TABLE videos.video_jobs ADD COLUMN IF NOT EXISTS private BOOLEAN NOT NULL DEFAULT FALSE",
+            &[],
+        )
+        .await?;
+
+    client
+        .execute(
             "CREATE INDEX IF NOT EXISTS idx_video_jobs_job_id ON videos.video_jobs (job_id)",
             &[],
         )
@@ -112,6 +120,13 @@ pub async fn run_migrations(pool: &Pool) -> Result<()> {
     client
         .execute(
             "CREATE INDEX IF NOT EXISTS idx_video_jobs_did ON videos.video_jobs (did)",
+            &[],
+        )
+        .await?;
+
+    client
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_video_jobs_did_video_cid ON videos.video_jobs (did, video_cid)",
             &[],
         )
         .await?;
@@ -164,6 +179,7 @@ pub async fn create_job(
     did: &str,
     filename: Option<&str>,
     file_size: Option<i64>,
+    private: bool,
 ) -> Result<VideoJob> {
     let client = pool.get().await?;
     let job_id = Uuid::new_v4();
@@ -171,11 +187,11 @@ pub async fn create_job(
     let row = client
         .query_one(
             r#"
-            INSERT INTO videos.video_jobs (job_id, did, original_filename, file_size)
-            VALUES ($1, $2, $3, $4)
-            RETURNING id, job_id, did, bunny_video_id, video_cid, pds_blob_ref, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
+            INSERT INTO videos.video_jobs (job_id, did, original_filename, file_size, private)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id, job_id, did, bunny_video_id, video_cid, pds_blob_ref, private, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
             "#,
-            &[&job_id, &did, &filename, &file_size],
+            &[&job_id, &did, &filename, &file_size, &private],
         )
         .await?;
 
@@ -189,7 +205,7 @@ pub async fn get_job(pool: &Pool, job_id: Uuid) -> Result<Option<VideoJob>> {
     let row = client
         .query_opt(
             r#"
-            SELECT id, job_id, did, bunny_video_id, video_cid, pds_blob_ref, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
+            SELECT id, job_id, did, bunny_video_id, video_cid, pds_blob_ref, private, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
             FROM videos.video_jobs
             WHERE job_id = $1
             "#,
@@ -207,7 +223,7 @@ pub async fn get_job_by_bunny_id(pool: &Pool, bunny_video_id: &str) -> Result<Op
     let row = client
         .query_opt(
             r#"
-            SELECT id, job_id, did, bunny_video_id, video_cid, pds_blob_ref, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
+            SELECT id, job_id, did, bunny_video_id, video_cid, pds_blob_ref, private, state, progress, blob_ref, error, message, original_filename, file_size, created_at, updated_at
             FROM videos.video_jobs
             WHERE bunny_video_id = $1
             "#,
@@ -410,17 +426,24 @@ pub async fn save_video_mapping(
 }
 
 /// Get bunny video ID from did/cid mapping
-pub async fn get_bunny_video_id(pool: &Pool, did: &str, cid: &str) -> Result<Option<String>> {
+pub async fn get_bunny_video_id(
+    pool: &Pool,
+    did: &str,
+    cid: &str,
+) -> Result<Option<(String, bool)>> {
     let client = pool.get().await?;
 
+    // A retried upload leaves several video_jobs rows at one (did, video_cid);
+    // aggregate so the lookup stays single-row, treating the video as private
+    // if any job was private, even after a later public upload.
     let row = client
         .query_opt(
-            "SELECT bunny_video_id FROM videos.video_mappings WHERE did = $1 AND cid = $2",
+            "SELECT m.bunny_video_id, COALESCE(bool_or(j.private), FALSE) FROM videos.video_mappings m LEFT JOIN videos.video_jobs j ON j.did = m.did AND j.video_cid = m.cid WHERE m.did = $1 AND m.cid = $2 GROUP BY m.bunny_video_id",
             &[&did, &cid],
         )
         .await?;
 
-    Ok(row.map(|r| r.get(0)))
+    Ok(row.map(|r| (r.get(0), r.get(1))))
 }
 
 fn row_to_job(row: &tokio_postgres::Row) -> VideoJob {
@@ -431,14 +454,102 @@ fn row_to_job(row: &tokio_postgres::Row) -> VideoJob {
         bunny_video_id: row.get(3),
         video_cid: row.get(4),
         pds_blob_ref: row.get(5),
-        state: row.get(6),
-        progress: row.get(7),
-        blob_ref: row.get(8),
-        error: row.get(9),
-        message: row.get(10),
-        original_filename: row.get(11),
-        file_size: row.get(12),
-        created_at: row.get(13),
-        updated_at: row.get(14),
+        private: row.get(6),
+        state: row.get(7),
+        progress: row.get(8),
+        blob_ref: row.get(9),
+        error: row.get(10),
+        message: row.get(11),
+        original_filename: row.get(12),
+        file_size: row.get(13),
+        created_at: row.get(14),
+        updated_at: row.get(15),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use deadpool_postgres::{Config as PgConfig, Runtime};
+    use tokio_postgres::NoTls;
+
+    static MIGRATIONS: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+    async fn test_pool() -> Pool {
+        let mut pg_config = PgConfig::new();
+        pg_config.url =
+            Some(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
+        let pool = pg_config
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .expect("failed to create test pool");
+        MIGRATIONS
+            .get_or_init(|| async { run_migrations(&pool).await.unwrap() })
+            .await;
+        pool
+    }
+
+    async fn insert_job(pool: &Pool, did: &str, video_cid: &str, private: bool) {
+        let client = pool.get().await.unwrap();
+        client
+            .execute(
+                "INSERT INTO videos.video_jobs (job_id, did, video_cid, private, state) VALUES ($1, $2, $3, $4, 'JOB_STATE_COMPLETED')",
+                &[&Uuid::new_v4(), &did, &video_cid, &private],
+            )
+            .await
+            .unwrap();
+    }
+
+    /// A DID that retries an upload gets multiple video_jobs rows at the same
+    /// video_cid; the playlist/thumbnail lookup must still return one row.
+    #[tokio::test]
+    #[ignore = "requires Postgres; run with TEST_DATABASE_URL set"]
+    async fn lookup_tolerates_multiple_jobs_at_one_cid() {
+        let pool = test_pool().await;
+
+        let did = format!("did:plc:test{}", Uuid::new_v4().simple());
+        let cid = "bafkreihdupejzitesting1";
+        save_video_mapping(&pool, &did, cid, "bunny-guid-1")
+            .await
+            .unwrap();
+        insert_job(&pool, &did, cid, false).await;
+        insert_job(&pool, &did, cid, false).await;
+
+        let got = get_bunny_video_id(&pool, &did, cid).await.unwrap();
+        assert_eq!(got, Some(("bunny-guid-1".to_string(), false)));
+    }
+
+    /// Fail closed: if ANY job at this (did, cid) marked the video private,
+    /// the lookup reports it private.
+    #[tokio::test]
+    #[ignore = "requires Postgres; run with TEST_DATABASE_URL set"]
+    async fn mixed_privacy_jobs_resolve_private() {
+        let pool = test_pool().await;
+
+        let did = format!("did:plc:test{}", Uuid::new_v4().simple());
+        let cid = "bafkreihdupejzitesting2";
+        save_video_mapping(&pool, &did, cid, "bunny-guid-2")
+            .await
+            .unwrap();
+        insert_job(&pool, &did, cid, false).await;
+        insert_job(&pool, &did, cid, true).await;
+
+        let got = get_bunny_video_id(&pool, &did, cid).await.unwrap();
+        assert_eq!(got, Some(("bunny-guid-2".to_string(), true)));
+    }
+
+    /// Mappings that predate job tracking have no video_jobs row at all.
+    #[tokio::test]
+    #[ignore = "requires Postgres; run with TEST_DATABASE_URL set"]
+    async fn mapping_without_job_resolves_public() {
+        let pool = test_pool().await;
+
+        let did = format!("did:plc:test{}", Uuid::new_v4().simple());
+        let cid = "bafkreihdupejzitesting3";
+        save_video_mapping(&pool, &did, cid, "bunny-guid-3")
+            .await
+            .unwrap();
+
+        let got = get_bunny_video_id(&pool, &did, cid).await.unwrap();
+        assert_eq!(got, Some(("bunny-guid-3".to_string(), false)));
     }
 }

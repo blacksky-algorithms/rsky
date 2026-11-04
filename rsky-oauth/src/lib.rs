@@ -14,6 +14,7 @@
 //! strict low-S.
 
 pub mod client;
+pub mod device;
 pub mod dpop;
 pub mod error;
 pub mod jwk;
@@ -25,13 +26,18 @@ pub mod token;
 pub mod types;
 
 pub use client::{Client, ClientManager, ClientMetadataFetcher, ParRequest};
+pub use device::{
+    generate_device_id, generate_session_id, AUTHENTICATION_MAX_AGE, DEVICE_TOUCH_INTERVAL,
+    EPHEMERAL_SESSION_MAX_AGE,
+};
 pub use dpop::{DpopManager, DpopNonce, DpopProof, DpopRequest, InMemoryReplayStore, ReplayStore};
 pub use error::OAuthError;
 pub use jwk::{EcCurve, Jwk, JwkSet};
 pub use jwt::{DecodedJwt, JwtClaims, JwtHeader};
 pub use provider::{
-    AuthorizePageData, ClientCredentials, OAuthProvider, OAuthProviderConfig, ParResponse,
-    ScopeExpander, TokenRequest, VerifiedAccess,
+    AccountProof, ActiveOAuthSession, AuthorizeOutcome, AuthorizePageData, ClientCredentials,
+    OAuthProvider, OAuthProviderConfig, ParResponse, ScopeExpandError, ScopeExpander, SessionInfo,
+    SignInResult, TokenRequest, VerifiedAccess,
 };
-pub use store::{AccountInfo, DeviceData, MemoryOAuthStore, OAuthStore};
+pub use store::{AccountInfo, DeviceAccount, DeviceData, MemoryOAuthStore, OAuthStore};
 pub use types::{AuthorizationRequestParameters, ClientAuth, OAuthClientMetadata, TokenResponse};

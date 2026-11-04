@@ -1,5 +1,7 @@
+use crate::actor_store::ActorStore;
 use crate::apis::app::bsky::util::get_did_doc;
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{RpcCall, RpcTarget, Scoped};
 use crate::auth_verifier::AccessStandardSignupQueued;
 use crate::config::ServerConfig;
 use crate::{context, SharedIdResolver, APP_USER_AGENT};
@@ -19,10 +21,11 @@ use rsky_repo::types::Ids;
 
 pub async fn inner_register_push(
     body: Json<RegisterPushInput>,
-    auth: AccessStandardSignupQueued,
+    auth: Scoped<RpcCall, AccessStandardSignupQueued>,
     cfg: &State<ServerConfig>,
     app_view_url: String,
     id_resolver: &State<SharedIdResolver>,
+    actor_store: &State<ActorStore>,
 ) -> Result<()> {
     let RegisterPushInput {
         service_did,
@@ -30,12 +33,15 @@ pub async fn inner_register_push(
         platform,
         app_id,
     } = body.into_inner();
-    let did: String = match auth.access.credentials {
-        None => "".to_string(),
-        Some(credentials) => credentials.did.unwrap_or("".to_string()),
-    };
     let nsid = Ids::AppBskyNotificationRegisterPush.as_str().to_string();
-    let auth_headers = context::service_auth_headers(&did, &service_did, &nsid).await?;
+    let did: String = auth
+        .did_for(&RpcTarget {
+            lxm: nsid.clone(),
+            aud: service_did.clone(),
+        })
+        .await?;
+    let auth_headers =
+        context::service_auth_headers(actor_store, &did, &service_did, &nsid).await?;
 
     let client = ReqwestClientBuilder::new(app_view_url)
         .client(
@@ -70,9 +76,11 @@ pub async fn inner_register_push(
         }
     }
     let notif_endpoint = get_endpoint(id_resolver, service_did.clone()).await?;
+    crate::outbound::client().checked(&notif_endpoint)?;
     let client = ReqwestClientBuilder::new(notif_endpoint)
         .client(
-            reqwest::ClientBuilder::new()
+            crate::outbound::client()
+                .builder()
                 .user_agent(APP_USER_AGENT)
                 .timeout(std::time::Duration::from_millis(1000))
                 .default_headers(auth_headers)
@@ -107,9 +115,10 @@ pub async fn inner_register_push(
 )]
 pub async fn register_push(
     body: Json<RegisterPushInput>,
-    auth: AccessStandardSignupQueued,
+    auth: Scoped<RpcCall, AccessStandardSignupQueued>,
     cfg: &State<ServerConfig>,
     id_resolver: &State<SharedIdResolver>,
+    actor_store: &State<ActorStore>,
 ) -> Result<(), ApiError> {
     if !["ios", "android", "web"].contains(&body.platform.as_str()) {
         return Err(ApiError::InvalidRequest("invalid platform".to_string()));
@@ -117,7 +126,15 @@ pub async fn register_push(
     match &cfg.bsky_app_view {
         None => return Err(ApiError::RuntimeError),
         Some(bsky_app_view) => {
-            match inner_register_push(body, auth, cfg, bsky_app_view.url.clone(), id_resolver).await
+            match inner_register_push(
+                body,
+                auth,
+                cfg,
+                bsky_app_view.url.clone(),
+                id_resolver,
+                actor_store,
+            )
+            .await
             {
                 Ok(_) => Ok(()),
                 Err(_) => {

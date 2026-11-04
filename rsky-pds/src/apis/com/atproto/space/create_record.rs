@@ -12,8 +12,8 @@ use crate::space_scope::{SpaceAction, SpaceRequest};
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_common::tid::TID;
-use rsky_syntax::nsid::ensure_valid_nsid;
 use rsky_lexicon::com::atproto::space::{CreateRecordInput, CreateRecordOutput};
+use rsky_syntax::nsid::ensure_valid_nsid;
 
 #[tracing::instrument(skip_all)]
 #[rocket::post(

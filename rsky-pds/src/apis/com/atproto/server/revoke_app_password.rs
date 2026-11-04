@@ -1,5 +1,6 @@
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
+use crate::auth_verifier::scope::{OAuthForbidden, Scoped};
 use crate::auth_verifier::AccessFull;
 use rocket::serde::json::Json;
 use rsky_lexicon::com::atproto::server::RevokeAppPasswordInput;
@@ -12,11 +13,11 @@ use rsky_lexicon::com::atproto::server::RevokeAppPasswordInput;
 )]
 pub async fn revoke_app_password(
     body: Json<RevokeAppPasswordInput>,
-    auth: AccessFull,
+    auth: Scoped<OAuthForbidden, AccessFull>,
     account_manager: AccountManager,
 ) -> Result<(), ApiError> {
     let RevokeAppPasswordInput { name } = body.into_inner();
-    let requester = auth.access.credentials.unwrap().did.unwrap();
+    let requester = auth.did().await?;
 
     match account_manager.revoke_app_password(requester, name).await {
         Ok(_) => Ok(()),

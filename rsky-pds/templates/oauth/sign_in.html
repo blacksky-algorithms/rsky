@@ -1,0 +1,64 @@
+{% extends "layouts/auth_shell.html" %}
+{% import "components/macros.html" as ui %}
+{% block title %}Sign in{% endblock %}
+{% block card_title %}Sign in{% endblock %}
+{% block card_subtitle %}<p class="card-description">{{ subtitle }}</p>{% endblock %}
+{% block content %}
+{% if let Some(message) = error %}{% call ui::error_notice(message) %}{% endif %}
+{% if show_picker %}
+<p class="text-sm font-medium muted">Sign in as...</p>
+<div class="item-group">
+  {% for session in sessions %}{% call ui::account_card(session, select_action, csrf, "Sign in as") %}{% endfor %}
+  <a class="item item-outline" href="{{ another_account_href }}" aria-label="Sign in to an account that is not listed">
+    <span class="item-media"><span class="avatar avatar-sm">{% include "icons/at-sign.svg.html" %}</span></span>
+    <span class="item-content"><span class="item-title">Another account</span></span>
+    <span class="item-actions">{% include "icons/chevron-right.svg.html" %}</span>
+  </a>
+</div>
+<div class="action-row">
+  {% if let Some(href) = signup_href %}<a class="btn btn-default" href="{{ href }}">Sign up</a>{% endif %}
+  {% if !back_href.is_empty() %}<a class="btn btn-secondary" href="{{ back_href }}">{{ back_label }}</a>{% endif %}
+</div>
+{% else %}
+<form method="post" action="{{ sign_in_action }}" class="form" autocomplete="on">
+  {% call ui::csrf_fields(csrf) %}
+  {% call ui::request_fields(client_id, request_uri) %}
+  <div class="field">
+    <label class="label" for="identifier">Identifier</label>
+    <div class="input-wrap">
+      <span class="input-icon">{% include "icons/at-sign.svg.html" %}</span>
+      <input class="input" type="text" id="identifier" name="identifier" value="{{ identifier }}" title="Username or email address" placeholder="Username or email address" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required {% if identifier_readonly %}readonly{% endif %}>
+    </div>
+  </div>
+  <div class="field">
+    <div class="field-head">
+      <label class="label" for="password">Password</label>
+      {% if let Some(href) = forgot_href %}<a class="label-action" href="{{ href }}" aria-label="Reset your password">Forgot?</a>{% endif %}
+    </div>
+    <input class="input" type="password" id="password" name="password" autocomplete="current-password" required>
+  </div>
+  {% call ui::notice("note", "warning", "Warning", "Verify the website address before entering your password. Only sign in on sites you recognize and trust.") %}
+  {% if let Some(hint) = otp_hint %}
+  <div class="field">
+    <label class="label" for="email_otp">2FA Confirmation</label>
+    <input class="input" type="text" id="email_otp" name="email_otp" title="Confirmation code" autocomplete="one-time-code" inputmode="text" required>
+    <p class="hint">Check your {{ hint }} email for a login code and enter it here.</p>
+  </div>
+  {% else if otp_error %}
+  <div class="field">
+    <label class="label" for="email_otp">2FA Confirmation</label>
+    <input class="input" type="text" id="email_otp" name="email_otp" title="Confirmation code" autocomplete="one-time-code" inputmode="text" required>
+    <p class="hint">Enter the code from your email.</p>
+  </div>
+  {% endif %}
+  {% if show_remember %}
+  <label class="checkbox-row"><input type="checkbox" name="remember" value="on" {% if remember_checked %}checked{% endif %}> <span>Remember this account on this device</span></label>
+  {% endif %}
+  <div class="action-column">
+    <button type="submit" class="btn btn-default">{{ submit_label }}</button>
+    {% if let Some(href) = signup_href %}<a class="btn btn-secondary" href="{{ href }}">Create a new account</a>{% endif %}
+    {% if !back_href.is_empty() %}<a class="btn btn-secondary" href="{{ back_href }}">{{ back_label }}</a>{% endif %}
+  </div>
+</form>
+{% endif %}
+{% endblock %}

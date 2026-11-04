@@ -7,6 +7,7 @@ use crate::{
     did::{ensure_valid_did, ensure_valid_did_regex},
     handle::{ensure_valid_handle, ensure_valid_handle_regex},
     nsid::{ensure_valid_nsid, ensure_valid_nsid_regex},
+    record_key::ensure_valid_record_key,
 };
 
 // Note: Typescript implementation allows for (8 * 1024) bytes
@@ -38,14 +39,14 @@ pub struct AtUriValidationError(String);
 //      - starts "at://"
 //      - "authority" is a valid DID or a valid handle
 //      - optionally, follow "authority" with "/" and valid NSID as start of path
-//      - optionally, if NSID given, follow that with "/" and rkey
-//      - rkey path component can include URL-encoded ("percent encoded"), or:
-//          ALPHA / DIGIT / "-" / "." / "_" / "~" / ":" / "@" / "!" / "$" / "&" / "'" / "(" / ")" / "*" / "+" / "," / ";" / "="
-//          [a-zA-Z0-9._~:@!$&\'()*+,;=-]
-//      - rkey must have at least one char
+//      - optionally, if NSID given, follow that with "/" and a valid Record Key
+//      - rkey path component is [a-zA-Z0-9._~:-], 1 to 512 characters, and not "." or ".."
 //      - regardless of path component, a fragment can follow as "#" and then a JSON pointer (RFC-6901)
 pub fn ensure_valid_at_uri<S: Into<String>>(uri: S) -> Result<AtUri, AtUriValidationError> {
     let uri: String = uri.into();
+    if uri.len() > MAX_URI_LEN {
+        return Err(AtUriValidationError("ATURI is far too long".into()));
+    }
     let uri_parts = uri.split("#").map(|p| p.into()).collect::<Vec<String>>();
     if uri_parts.len() > 2 {
         return Err(AtUriValidationError(
@@ -107,10 +108,15 @@ pub fn ensure_valid_at_uri<S: Into<String>>(uri: S) -> Result<AtUri, AtUriValida
         }
     }
 
-    if parts.len() >= 5 && parts[4].is_empty() {
-        return Err(AtUriValidationError(
-            "ATURI can not have a slash after collection, unless record key is provided".into(),
-        ));
+    if parts.len() >= 5 {
+        if parts[4].is_empty() {
+            return Err(AtUriValidationError(
+                "ATURI can not have a slash after collection, unless record key is provided".into(),
+            ));
+        }
+        if let Err(e) = ensure_valid_record_key(parts[4].clone()) {
+            return Err(AtUriValidationError(e.to_string()));
+        }
     }
 
     if parts.len() >= 6 {
@@ -139,9 +145,6 @@ pub fn ensure_valid_at_uri<S: Into<String>>(uri: S) -> Result<AtUri, AtUriValida
         }
     }
 
-    if uri.len() > MAX_URI_LEN {
-        return Err(AtUriValidationError("ATURI is far too long".into()));
-    }
     match uri.try_into() {
         Okay(at_uri) => Okay(at_uri),
         // should never fail since it is valid
@@ -151,6 +154,9 @@ pub fn ensure_valid_at_uri<S: Into<String>>(uri: S) -> Result<AtUri, AtUriValida
 
 pub fn ensure_valid_at_uri_regex<S: Into<String>>(uri: S) -> Result<(), AtUriValidationError> {
     let uri: String = uri.into();
+    if uri.len() > MAX_URI_LEN {
+        return Err(AtUriValidationError("ATURI is far too long".to_string()));
+    }
     let captures = ATURI_REGEX
         .captures(&uri)
         .ok_or_else(|| AtUriValidationError("ATURI didn't validate via regex".to_string()))?;
@@ -177,8 +183,10 @@ pub fn ensure_valid_at_uri_regex<S: Into<String>>(uri: S) -> Result<(), AtUriVal
         }
     }
 
-    if uri.len() > MAX_URI_LEN {
-        return Err(AtUriValidationError("ATURI is far too long".to_string()));
+    if let Some(rkey) = captures.name("rkey") {
+        if let Err(e) = ensure_valid_record_key(rkey.as_str()) {
+            return Err(AtUriValidationError(e.to_string()));
+        }
     }
 
     Ok(())
@@ -207,6 +215,10 @@ mod tests {
     fn test_debug_me() {
         expect_invalid(&format!(
             "at://did:plc:asdf123/com.atproto.feed.post/{}",
+            "o".repeat(MAX_URI_LEN + 100)
+        ));
+        expect_invalid(&format!(
+            "at://did:plc:asdf123#/{}",
             "o".repeat(MAX_URI_LEN + 100)
         ));
     }
@@ -351,30 +363,43 @@ mod tests {
     }
 
     #[test]
-    fn test_record_keys_are_very_permissive() {
+    fn test_record_keys_follow_the_record_key_syntax() {
         expect_valid("at://did:plc:asdf123/com.atproto.feed.post/asdf123");
         expect_valid("at://did:plc:asdf123/com.atproto.feed.post/a");
-        expect_valid("at://did:plc:asdf123/com.atproto.feed.post/%23");
+        expect_valid("at://did:plc:asdf123/com.atproto.feed.post/a~1.2-3_");
+        expect_valid("at://did:plc:asdf123/com.atproto.feed.post/pre:fix");
+        expect_valid(&format!(
+            "at://did:plc:asdf123/com.atproto.feed.post/{}",
+            "o".repeat(512)
+        ));
 
-        expect_valid("at://did:plc:asdf123/com.atproto.feed.post/$@!*)(:,;~.sdf123");
-        expect_valid("at://did:plc:asdf123/com.atproto.feed.post/~'sdf123");
+        expect_invalid("at://did:plc:asdf123/com.atproto.feed.post/%23");
+        expect_invalid("at://did:plc:asdf123/com.atproto.feed.post/$@!*)(:,;~.sdf123");
+        expect_invalid("at://did:plc:asdf123/com.atproto.feed.post/~'sdf123");
 
-        expect_valid("at://did:plc:asdf123/com.atproto.feed.post/$");
-        expect_valid("at://did:plc:asdf123/com.atproto.feed.post/@");
-        expect_valid("at://did:plc:asdf123/com.atproto.feed.post/!");
-        expect_valid("at://did:plc:asdf123/com.atproto.feed.post/*");
-        expect_valid("at://did:plc:asdf123/com.atproto.feed.post/(");
-        expect_valid("at://did:plc:asdf123/com.atproto.feed.post/,");
-        expect_valid("at://did:plc:asdf123/com.atproto.feed.post/;");
-        expect_valid("at://did:plc:asdf123/com.atproto.feed.post/abc%30123");
+        expect_invalid("at://did:plc:asdf123/com.atproto.feed.post/$");
+        expect_invalid("at://did:plc:asdf123/com.atproto.feed.post/@");
+        expect_invalid("at://did:plc:asdf123/com.atproto.feed.post/!");
+        expect_invalid("at://did:plc:asdf123/com.atproto.feed.post/*");
+        expect_invalid("at://did:plc:asdf123/com.atproto.feed.post/(");
+        expect_invalid("at://did:plc:asdf123/com.atproto.feed.post/,");
+        expect_invalid("at://did:plc:asdf123/com.atproto.feed.post/;");
+        expect_invalid("at://did:plc:asdf123/com.atproto.feed.post/abc%30123");
+        expect_invalid("at://did:plc:asdf123/com.atproto.feed.post/.");
+        expect_invalid("at://did:plc:asdf123/com.atproto.feed.post/..");
+        expect_invalid(&format!(
+            "at://did:plc:asdf123/com.atproto.feed.post/{}",
+            "o".repeat(513)
+        ));
     }
+
     #[test]
-    fn test_is_probably_too_permissive_about_url_encoding() {
-        expect_valid("at://did:plc:asdf123/com.atproto.feed.post/%30");
-        expect_valid("at://did:plc:asdf123/com.atproto.feed.post/%3");
-        expect_valid("at://did:plc:asdf123/com.atproto.feed.post/%");
-        expect_valid("at://did:plc:asdf123/com.atproto.feed.post/%zz");
-        expect_valid("at://did:plc:asdf123/com.atproto.feed.post/%%%");
+    fn test_percent_encoding_is_not_a_valid_record_key() {
+        expect_invalid("at://did:plc:asdf123/com.atproto.feed.post/%30");
+        expect_invalid("at://did:plc:asdf123/com.atproto.feed.post/%3");
+        expect_invalid("at://did:plc:asdf123/com.atproto.feed.post/%");
+        expect_invalid("at://did:plc:asdf123/com.atproto.feed.post/%zz");
+        expect_invalid("at://did:plc:asdf123/com.atproto.feed.post/%%%");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 // based on https://github.com/bluesky-social/atproto/blob/main/packages/pds/src/actor-store/db
 
-use crate::db::migrator::{migrate_to_latest, Migration};
-use crate::db::sqlite::Db;
+use crate::db::migrator::{migrate_to_latest, Migration, MigrationSet};
+use crate::db::sqlite::{Db, Synchronous};
 use anyhow::Result;
 use std::path::Path;
 
@@ -171,15 +171,73 @@ pub const ACTOR_DB_MIGRATIONS: &[Migration] = &[
         created_at TEXT NOT NULL\
     );",
     },
+    // A write commits its publication intent with its blocks, so a crash
+    // between the commit and the sequencer cannot lose or duplicate the
+    // event; blob work is journaled the same way instead of queued in
+    // memory; and repair steps are recognisable from the store itself.
+    Migration {
+        name: "005",
+        sql: "\
+    CREATE TABLE publish_intent (\
+        id INTEGER PRIMARY KEY AUTOINCREMENT, \
+        rev TEXT NOT NULL, \
+        cid TEXT NOT NULL, \
+        \"eventType\" TEXT NOT NULL, \
+        event BLOB NOT NULL, \
+        \"createdAt\" TEXT NOT NULL, \
+        state TEXT NOT NULL DEFAULT 'pending', \
+        \"seqFloor\" INTEGER, \
+        seq INTEGER\
+    );\
+    CREATE INDEX publish_intent_state_idx ON publish_intent (state, id);\
+    CREATE TABLE publish_ack (\
+        \"intentId\" INTEGER PRIMARY KEY, \
+        seq INTEGER NOT NULL, \
+        \"ackedAt\" TEXT NOT NULL\
+    );\
+    CREATE TABLE blob_work (\
+        id INTEGER PRIMARY KEY AUTOINCREMENT, \
+        kind TEXT NOT NULL, \
+        key TEXT NOT NULL, \
+        cid TEXT, \
+        state TEXT NOT NULL, \
+        version INTEGER, \
+        \"createdAt\" TEXT NOT NULL, \
+        \"updatedAt\" TEXT NOT NULL\
+    );\
+    CREATE INDEX blob_work_state_idx ON blob_work (state, id);\
+    CREATE TABLE blob_moderation (\
+        cid TEXT PRIMARY KEY, \
+        version INTEGER NOT NULL\
+    );\
+    CREATE TABLE repair_step (\
+        \"repairId\" TEXT NOT NULL, \
+        \"stepNo\" INTEGER NOT NULL, \
+        rev TEXT NOT NULL, \
+        cid TEXT NOT NULL, \
+        PRIMARY KEY (\"repairId\", \"stepNo\")\
+    );",
+    },
 ];
 
+/// The first migration is the reference actor-store schema; the rest are
+/// rsky-only tables that the reference PDS never reads.
+pub const ACTOR_DB_MIGRATION_SET: MigrationSet = MigrationSet {
+    shared: ACTOR_DB_MIGRATIONS.split_at(1).0,
+    local: ACTOR_DB_MIGRATIONS.split_at(1).1,
+    legacy: None,
+};
+
+/// Opens a store for reading with the default durability.
 pub fn get_db(location: impl AsRef<Path>) -> Result<ActorDb> {
     Db::open(location)
 }
 
+/// Opens a store for writing: every commit waits for stable storage, since
+/// the write is acknowledged to the client and published from it.
 pub async fn get_migrated_db(location: impl AsRef<Path>) -> Result<ActorDb> {
-    let db = get_db(location)?;
-    migrate_to_latest(&db, ACTOR_DB_MIGRATIONS).await?;
+    let db = Db::open_with(location, Synchronous::Full)?;
+    migrate_to_latest(&db, ACTOR_DB_MIGRATION_SET).await?;
     Ok(db)
 }
 
@@ -253,7 +311,9 @@ mod tests {
             .await
             .unwrap();
         // migrating again is a no-op
-        migrate_to_latest(&db, ACTOR_DB_MIGRATIONS).await.unwrap();
+        migrate_to_latest(&db, ACTOR_DB_MIGRATION_SET)
+            .await
+            .unwrap();
         let tables: Vec<String> = db
             .run(|conn| {
                 let mut stmt = conn.prepare(
@@ -273,9 +333,16 @@ mod tests {
                 "account_pref",
                 "backlink",
                 "blob",
+                "blob_moderation",
+                "blob_work",
+                "kysely_migration",
+                "kysely_migration_lock",
                 "migrations",
+                "publish_ack",
+                "publish_intent",
                 "record",
                 "record_blob",
+                "repair_step",
                 "repo_block",
                 "repo_root",
                 "space_blob_ref",

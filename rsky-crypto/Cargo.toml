@@ -1,6 +1,6 @@
 [package]
 name = "rsky-crypto"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Rudy Fraser <him@rudyfraser.com>"]
 description = "Rust library providing basic cryptographic helpers as needed in atproto"
 license = "Apache-2.0"
@@ -19,3 +19,6 @@ unsigned-varint = "0.8.0"
 
 [dev-dependencies]
 sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = "0.22"

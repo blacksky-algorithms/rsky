@@ -36,10 +36,13 @@ async fn inner_get_blocks(
         .map(|c| Cid::from_str(&c).map_err(anyhow::Error::new))
         .collect::<Result<Vec<Cid>>>()?;
 
-    let actor_store = actor_store
+    let reader = actor_store
         .read(did.clone(), blobstore_factory.blobstore(did.clone()))
         .await?;
-    let storage_guard = actor_store.storage.read().await;
+    let storage_guard = reader.storage.read().await;
+    if let Ok(root) = storage_guard.get_root_detailed().await {
+        actor_store.note_exposure(&did, &root.rev).await?;
+    }
     let got = storage_guard.get_blocks(cids).await?;
 
     if !got.missing.is_empty() {
@@ -80,7 +83,7 @@ pub async fn get_blocks(
         Ok(res) => Ok(BlockResponder(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");
-            Err(ApiError::RuntimeError)
+            Err(ApiError::from(error))
         }
     }
 }

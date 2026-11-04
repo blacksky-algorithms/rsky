@@ -1,0 +1,1 @@
+{"did": "did:plc:o7trnb2fzf2w4n6cs4xagkwh", "verificationMethods": {"atproto": "did:key:zQ3shdbZ2LsT64ZHhrmYkWeC9j8QnbwWHzR5RftjhexQP1Qjt"}, "rotationKeys": ["did:key:zQ3shrk75wEcu2LSJ9VvVdT4J5LLQPgqtN7GA6K3w5rZ3yDwF"], "alsoKnownAs": ["at://erin.fixture.test"], "services": {"atproto_pds": {"type": "AtprotoPersonalDataServer", "endpoint": "https://fixture.test"}}}

@@ -1,8 +1,10 @@
-use crate::context;
+use crate::account_manager::helpers::auth::ServiceJwtParams;
+use crate::xrpc_server::auth::create_service_auth_headers;
 use anyhow::{bail, Result};
 use reqwest::header::HeaderMap;
 use rsky_common::env::{env_bool, env_int, env_list, env_str};
 use rsky_common::time::{DAY, HOUR, SECOND};
+use secp256k1::Keypair;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServerConfig {
@@ -19,15 +21,26 @@ pub struct ServerConfig {
     pub blobstore: BlobstoreConfig,
 }
 
+/// S3-compatible object storage, configured the way the reference PDS is.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct S3Config {
+    /// One bucket holding every actor under DID-prefixed keys; legacy
+    /// deployments without one keep a bucket per actor named after the DID.
+    pub bucket: Option<String>,
+    pub region: Option<String>,
+    pub endpoint: Option<String>,
+    pub force_path_style: bool,
+    pub access_key_id: Option<String>,
+    pub secret_access_key: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum BlobstoreConfig {
     Disk {
         location: String,
         tmp_location: Option<String>,
     },
-    S3 {
-        bucket: Option<String>,
-    },
+    S3(S3Config),
     #[cfg(feature = "opendal")]
     Opendal {
         operator_kind: String,
@@ -35,22 +48,39 @@ pub enum BlobstoreConfig {
     },
 }
 
-pub fn blobstore_cfg_from(
-    disk_location: Option<String>,
-    disk_tmp_location: Option<String>,
-    s3_bucket: Option<String>,
-) -> Result<BlobstoreConfig> {
-    match (disk_location, s3_bucket) {
-        (Some(_), Some(_)) => bail!("Cannot set both S3 and disk blobstore env vars"),
-        (Some(location), None) => Ok(BlobstoreConfig::Disk {
+/// The `PDS_BLOBSTORE_*` variables as read from the environment.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BlobstoreEnv {
+    pub disk_location: Option<String>,
+    pub disk_tmp_location: Option<String>,
+    pub s3: S3Config,
+}
+
+pub fn blobstore_cfg_from(env: BlobstoreEnv) -> Result<BlobstoreConfig> {
+    if env.disk_location.is_some() && env.s3.bucket.is_some() {
+        bail!("Cannot set both S3 and disk blobstore env vars");
+    }
+    if env.s3.access_key_id.is_some() != env.s3.secret_access_key.is_some() {
+        bail!("Must specify both S3 access key id and secret access key blobstore env vars");
+    }
+    match env.disk_location {
+        Some(location) => Ok(BlobstoreConfig::Disk {
             location,
-            tmp_location: disk_tmp_location,
+            tmp_location: env.disk_tmp_location,
         }),
-        (None, Some(bucket)) => Ok(BlobstoreConfig::S3 {
-            bucket: Some(bucket),
-        }),
-        // legacy deployments derive a per-actor bucket from the DID
-        (None, None) => Ok(BlobstoreConfig::S3 { bucket: None }),
+        None => {
+            #[cfg(feature = "aws-s3")]
+            {
+                Ok(BlobstoreConfig::S3(env.s3))
+            }
+            #[cfg(not(feature = "aws-s3"))]
+            {
+                let _ = env.s3;
+                bail!(
+                    "S3 blobstore requires the `aws-s3` feature; set PDS_BLOBSTORE_DISK_LOCATION or rebuild with `aws-s3`"
+                )
+            }
+        }
     }
 }
 
@@ -65,28 +95,70 @@ pub struct ServiceDbConfig {
     pub account_db_location: String,
     pub sequencer_db_location: String,
     pub did_cache_db_location: String,
+    /// The deletion and purge journal, kept outside every actor store.
+    pub lifecycle_db_location: String,
+    /// Per-actor advisory locks shared with maintenance tooling.
+    pub lock_dir: String,
+    /// The journal of every physical object-storage write.
+    pub blob_attempts_db_location: String,
+    /// The append-only registry of retired object keys, never restored.
+    pub blob_generations_db_location: String,
+    /// The repair and quarantine journal.
+    pub repair_db_location: String,
+}
+
+/// Per-location overrides of the layout under the data directory.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StorageOverrides {
+    pub actor_store_directory: Option<String>,
+    pub actor_store_cache_size: Option<usize>,
+    pub account_db_location: Option<String>,
+    pub sequencer_db_location: Option<String>,
+    pub did_cache_db_location: Option<String>,
+    pub lifecycle_db_location: Option<String>,
+    pub lock_dir: Option<String>,
+    pub blob_attempts_db_location: Option<String>,
+    pub blob_generations_db_location: Option<String>,
+    pub repair_db_location: Option<String>,
 }
 
 pub fn storage_cfg_from(
     data_directory: Option<String>,
-    actor_store_directory: Option<String>,
-    actor_store_cache_size: Option<usize>,
-    account_db_location: Option<String>,
-    sequencer_db_location: Option<String>,
-    did_cache_db_location: Option<String>,
+    overrides: StorageOverrides,
 ) -> (ActorStoreConfig, ServiceDbConfig) {
     let db_loc = |name: &str| match &data_directory {
         Some(data_directory) => format!("{data_directory}/{name}"),
         None => name.to_string(),
     };
     let actor_store = ActorStoreConfig {
-        directory: actor_store_directory.unwrap_or_else(|| db_loc("actors")),
-        cache_size: actor_store_cache_size.unwrap_or(100),
+        directory: overrides
+            .actor_store_directory
+            .unwrap_or_else(|| db_loc("actors")),
+        cache_size: overrides.actor_store_cache_size.unwrap_or(100),
     };
     let service_db = ServiceDbConfig {
-        account_db_location: account_db_location.unwrap_or_else(|| db_loc("account.sqlite")),
-        sequencer_db_location: sequencer_db_location.unwrap_or_else(|| db_loc("sequencer.sqlite")),
-        did_cache_db_location: did_cache_db_location.unwrap_or_else(|| db_loc("did_cache.sqlite")),
+        account_db_location: overrides
+            .account_db_location
+            .unwrap_or_else(|| db_loc("account.sqlite")),
+        sequencer_db_location: overrides
+            .sequencer_db_location
+            .unwrap_or_else(|| db_loc("sequencer.sqlite")),
+        did_cache_db_location: overrides
+            .did_cache_db_location
+            .unwrap_or_else(|| db_loc("did_cache.sqlite")),
+        lifecycle_db_location: overrides
+            .lifecycle_db_location
+            .unwrap_or_else(|| db_loc("rsky/lifecycle.sqlite")),
+        lock_dir: overrides.lock_dir.unwrap_or_else(|| db_loc("rsky/locks")),
+        blob_attempts_db_location: overrides
+            .blob_attempts_db_location
+            .unwrap_or_else(|| db_loc("rsky/blob-attempts.sqlite")),
+        blob_generations_db_location: overrides
+            .blob_generations_db_location
+            .unwrap_or_else(|| db_loc("rsky/blob-generations.sqlite")),
+        repair_db_location: overrides
+            .repair_db_location
+            .unwrap_or_else(|| db_loc("rsky/repair.sqlite")),
     };
     (actor_store, service_db)
 }
@@ -113,8 +185,24 @@ pub struct IdentityConfig {
     pub cache_max_ttl: u64,
     pub recovery_did_key: Option<String>,
     pub service_handle_domains: Vec<String>,
+    /// Handle domains served here but not offered at signup.
+    pub extra_handle_domains: Vec<String>,
     pub handle_backup_name_servers: Option<Vec<String>>,
     pub enable_did_doc_with_session: bool,
+}
+
+impl IdentityConfig {
+    /// Whether `handle` is one this server serves, on an offered or an
+    /// extra domain, with the reference's rule for bare domains.
+    pub fn is_hosted_handle(&self, handle: &str) -> bool {
+        self.service_handle_domains
+            .iter()
+            .chain(self.extra_handle_domains.iter())
+            .any(|available| match available.strip_prefix('.') {
+                Some(bare) => handle == bare || handle.ends_with(available.as_str()),
+                None => handle == available || handle.ends_with(&format!(".{available}")),
+            })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -137,6 +225,35 @@ pub struct CoreConfig {
     pub blob_upload_limit: usize,
     pub contact_email_address: Option<String>,
     pub dev_mode: bool,
+    /// Another implementation shares this data directory and may still
+    /// serve its objects, so nothing in blob storage is deleted here.
+    pub coexistence: bool,
+    /// The write allowlist naming the actors this process may write; every
+    /// actor is admitted when unset.
+    pub write_allowlist_file: Option<String>,
+    /// Serve reads only: every database opens read-only without migrating,
+    /// no worker runs, and every mutating request is refused.
+    pub read_only: bool,
+    /// How long in-flight requests may finish after a stop signal.
+    pub shutdown_grace_secs: u32,
+    /// Where uploads are spooled while they are hashed and stored.
+    pub upload_spool_dir: String,
+    /// Device authentications (unix seconds) older than this must sign in
+    /// again before they count for the account pages or silent consent.
+    pub account_ui_sessions_since: Option<u64>,
+    /// Whether the browser account pages under `/account` are served.
+    pub account_ui_enabled: bool,
+}
+
+/// `PDS_ACCOUNT_UI_SESSIONS_SINCE` as unix seconds; the value is RFC 3339.
+fn sessions_since_from(value: Option<String>) -> Option<u64> {
+    value.map(|value| {
+        chrono::DateTime::parse_from_rfc3339(value.trim())
+            .map(|instant| instant.timestamp().max(0) as u64)
+            .unwrap_or_else(|error| {
+                panic!("PDS_ACCOUNT_UI_SESSIONS_SINCE must be an RFC 3339 timestamp: {error}")
+            })
+    })
 }
 
 pub fn env_to_cfg() -> ServerConfig {
@@ -160,6 +277,18 @@ pub fn env_to_cfg() -> ServerConfig {
         blob_upload_limit: env_int("PDS_BLOB_UPLOAD_LIMIT").unwrap_or(5 * 1024 * 1024), // 5mb
         contact_email_address: env_str("PDS_CONTACT_EMAIL_ADDRESS"),
         dev_mode: env_bool("PDS_DEV_MODE").unwrap_or(false),
+        coexistence: env_bool("PDS_COEXISTENCE").unwrap_or(false),
+        write_allowlist_file: env_str("PDS_WRITE_ALLOWLIST_FILE"),
+        read_only: env_bool("PDS_READ_ONLY").unwrap_or(false),
+        shutdown_grace_secs: env_int("PDS_SHUTDOWN_GRACE_SECS").unwrap_or(100) as u32,
+        account_ui_sessions_since: sessions_since_from(env_str("PDS_ACCOUNT_UI_SESSIONS_SINCE")),
+        account_ui_enabled: env_bool("PDS_ACCOUNT_UI_ENABLED").unwrap_or(true),
+        upload_spool_dir: env_str("PDS_UPLOAD_SPOOL_DIR").unwrap_or_else(|| {
+            std::env::temp_dir()
+                .join("rsky-pds-spool")
+                .to_string_lossy()
+                .to_string()
+        }),
     };
     let service_handle_domains: Vec<String>;
     if !env_list("PDS_SERVICE_HANDLE_DOMAINS").is_empty() {
@@ -177,6 +306,7 @@ pub fn env_to_cfg() -> ServerConfig {
         cache_max_ttl: env_int("PDS_DID_CACHE_MAX_TTL").unwrap_or(DAY as usize) as u64,
         recovery_did_key: env_str("PDS_RECOVERY_DID_KEY"),
         service_handle_domains,
+        extra_handle_domains: env_list("PDS_EXTRA_HANDLE_DOMAINS"),
         handle_backup_name_servers: Some(env_list("PDS_HANDLE_BACKUP_NAMESERVERS")),
         enable_did_doc_with_session: env_bool("PDS_ENABLE_DID_DOC_WITH_SESSION").unwrap_or(false),
     };
@@ -228,17 +358,31 @@ pub fn env_to_cfg() -> ServerConfig {
     let crawlers_cfg = env_list("PDS_CRAWLERS");
     let (actor_store_cfg, service_db_cfg) = storage_cfg_from(
         env_str("PDS_DATA_DIRECTORY"),
-        env_str("PDS_ACTOR_STORE_DIRECTORY"),
-        env_int("PDS_ACTOR_STORE_CACHE_SIZE"),
-        env_str("PDS_ACCOUNT_DB_LOCATION"),
-        env_str("PDS_SEQUENCER_DB_LOCATION"),
-        env_str("PDS_DID_CACHE_DB_LOCATION"),
+        StorageOverrides {
+            actor_store_directory: env_str("PDS_ACTOR_STORE_DIRECTORY"),
+            actor_store_cache_size: env_int("PDS_ACTOR_STORE_CACHE_SIZE"),
+            account_db_location: env_str("PDS_ACCOUNT_DB_LOCATION"),
+            sequencer_db_location: env_str("PDS_SEQUENCER_DB_LOCATION"),
+            did_cache_db_location: env_str("PDS_DID_CACHE_DB_LOCATION"),
+            lifecycle_db_location: env_str("PDS_LIFECYCLE_DB"),
+            lock_dir: env_str("PDS_LOCK_DIR"),
+            blob_attempts_db_location: env_str("PDS_BLOB_ATTEMPTS_DB"),
+            blob_generations_db_location: env_str("PDS_BLOB_GENERATIONS_DB"),
+            repair_db_location: env_str("PDS_REPAIR_DB"),
+        },
     );
-    let blobstore_cfg = blobstore_cfg_from(
-        env_str("PDS_BLOBSTORE_DISK_LOCATION"),
-        env_str("PDS_BLOBSTORE_DISK_TMP_LOCATION"),
-        env_str("PDS_BLOBSTORE_S3_BUCKET"),
-    )
+    let blobstore_cfg = blobstore_cfg_from(BlobstoreEnv {
+        disk_location: env_str("PDS_BLOBSTORE_DISK_LOCATION"),
+        disk_tmp_location: env_str("PDS_BLOBSTORE_DISK_TMP_LOCATION"),
+        s3: S3Config {
+            bucket: env_str("PDS_BLOBSTORE_S3_BUCKET"),
+            region: env_str("PDS_BLOBSTORE_S3_REGION"),
+            endpoint: env_str("PDS_BLOBSTORE_S3_ENDPOINT").or_else(|| env_str("AWS_ENDPOINT")),
+            force_path_style: env_bool("PDS_BLOBSTORE_S3_FORCE_PATH_STYLE").unwrap_or(false),
+            access_key_id: env_str("PDS_BLOBSTORE_S3_ACCESS_KEY_ID"),
+            secret_access_key: env_str("PDS_BLOBSTORE_S3_SECRET_ACCESS_KEY"),
+        },
+    })
     .expect("invalid blobstore configuration");
 
     ServerConfig {
@@ -257,11 +401,28 @@ pub fn env_to_cfg() -> ServerConfig {
 }
 
 impl ServerConfig {
-    pub async fn appview_auth_headers(&self, did: &str, lxm: &str) -> Result<HeaderMap> {
+    /// `keypair` must be the signing key of `did`, the account the token is
+    /// issued on behalf of.
+    pub async fn appview_auth_headers(
+        &self,
+        did: &str,
+        lxm: &str,
+        keypair: &Keypair,
+    ) -> Result<HeaderMap> {
         match &self.bsky_app_view {
             None => bail!("No appview configured."),
             Some(bsky_app_view) => {
-                context::service_auth_headers(did, &bsky_app_view.did, lxm).await
+                create_service_auth_headers(
+                    ServiceJwtParams {
+                        iss: did.to_owned(),
+                        aud: bsky_app_view.did.clone(),
+                        exp: None,
+                        lxm: Some(lxm.to_owned()),
+                        jti: None,
+                    },
+                    keypair,
+                )
+                .await
             }
         }
     }
@@ -270,6 +431,29 @@ impl ServerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sessions_since_parses_rfc3339_into_unix_seconds() {
+        assert_eq!(sessions_since_from(None), None);
+        assert_eq!(
+            sessions_since_from(Some("2023-11-14T22:13:20Z".to_string())),
+            Some(1_700_000_000)
+        );
+        assert_eq!(
+            sessions_since_from(Some(" 2023-11-14T17:13:20-05:00 ".to_string())),
+            Some(1_700_000_000)
+        );
+        assert_eq!(
+            sessions_since_from(Some("1900-01-01T00:00:00Z".to_string())),
+            Some(0)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "RFC 3339")]
+    fn sessions_since_rejects_other_formats() {
+        sessions_since_from(Some("yesterday".to_string()));
+    }
 
     #[test]
     fn env_to_cfg_builds_default_and_configured_config() {
@@ -339,21 +523,86 @@ mod tests {
         );
 
         // no appview configured means no auth headers
-        let mut no_appview = cfg;
+        let mut no_appview = cfg.clone();
         no_appview.bsky_app_view = None;
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
+        let secret = secp256k1::SecretKey::from_slice(&[0x29u8; 32]).unwrap();
+        let keypair = Keypair::from_secret_key(&secp256k1::Secp256k1::new(), &secret);
         assert!(rt
-            .block_on(
-                no_appview.appview_auth_headers("did:example:alice", "app.bsky.feed.getTimeline")
-            )
+            .block_on(no_appview.appview_auth_headers(
+                "did:example:alice",
+                "app.bsky.feed.getTimeline",
+                &keypair
+            ))
             .is_err());
+
+        // with one configured, the header is signed by the key it was handed
+        let mut with_appview = cfg;
+        with_appview.bsky_app_view = Some(ServiceConfig {
+            url: "https://appview.example.com".to_owned(),
+            did: "did:web:appview.example.com".to_owned(),
+            cdn_url_pattern: None,
+        });
+        let headers = rt
+            .block_on(with_appview.appview_auth_headers(
+                "did:example:alice",
+                "app.bsky.feed.getTimeline",
+                &keypair,
+            ))
+            .unwrap();
+        let jwt = headers
+            .get(reqwest::header::AUTHORIZATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .strip_prefix("Bearer ")
+            .unwrap()
+            .to_owned();
+        let did_key = rsky_crypto::utils::encode_did_key(&keypair.public_key());
+        let payload = rt
+            .block_on(crate::xrpc_server::auth::verify_jwt(
+                jwt,
+                Some("did:web:appview.example.com".to_owned()),
+                Some("app.bsky.feed.getTimeline"),
+                move |_iss, _refresh| {
+                    let did_key = did_key.clone();
+                    async move { Ok(did_key) }
+                },
+            ))
+            .unwrap();
+        assert_eq!(payload.iss, "did:example:alice");
+    }
+
+    #[test]
+    fn hosted_handles_cover_offered_and_extra_domains() {
+        let identity = IdentityConfig {
+            plc_url: String::new(),
+            resolver_timeout: 0,
+            cache_state_ttl: 0,
+            cache_max_ttl: 0,
+            recovery_did_key: None,
+            service_handle_domains: vec![".rsky.com".to_owned()],
+            extra_handle_domains: vec!["extra.test".to_owned()],
+            handle_backup_name_servers: None,
+            enable_did_doc_with_session: false,
+        };
+        assert!(identity.is_hosted_handle("alice.rsky.com"));
+        assert!(identity.is_hosted_handle("rsky.com"));
+        assert!(identity.is_hosted_handle("bob.extra.test"));
+        assert!(identity.is_hosted_handle("extra.test"));
+        assert!(!identity.is_hosted_handle("alice.elsewhere.test"));
+        assert!(!identity.is_hosted_handle("notrsky.com"));
     }
 
     #[test]
     fn blobstore_cfg_prefers_disk_when_disk_location_set() {
-        let cfg = blobstore_cfg_from(Some("/data/blobs".to_owned()), None, None).unwrap();
+        let cfg = blobstore_cfg_from(BlobstoreEnv {
+            disk_location: Some("/data/blobs".to_owned()),
+            ..Default::default()
+        })
+        .unwrap();
         assert_eq!(
             cfg,
             BlobstoreConfig::Disk {
@@ -361,83 +610,142 @@ mod tests {
                 tmp_location: None,
             }
         );
-
-        let cfg = blobstore_cfg_from(
-            Some("/data/blobs".to_owned()),
-            Some("/data/tmp".to_owned()),
-            None,
-        )
+        let cfg = blobstore_cfg_from(BlobstoreEnv {
+            disk_location: Some("/data/blobs".to_owned()),
+            disk_tmp_location: Some("/tmp/blobs".to_owned()),
+            ..Default::default()
+        })
         .unwrap();
         assert_eq!(
             cfg,
             BlobstoreConfig::Disk {
                 location: "/data/blobs".to_owned(),
-                tmp_location: Some("/data/tmp".to_owned()),
+                tmp_location: Some("/tmp/blobs".to_owned()),
             }
         );
     }
 
+    #[cfg(feature = "aws-s3")]
     #[test]
-    fn blobstore_cfg_uses_s3_bucket_when_set() {
-        let cfg = blobstore_cfg_from(None, None, Some("my-bucket".to_owned())).unwrap();
+    fn blobstore_cfg_reads_the_reference_s3_settings() {
+        let s3 = S3Config {
+            bucket: Some("my-bucket".to_owned()),
+            region: Some("nyc3".to_owned()),
+            endpoint: Some("https://nyc3.digitaloceanspaces.com".to_owned()),
+            force_path_style: true,
+            access_key_id: Some("key".to_owned()),
+            secret_access_key: Some("secret".to_owned()),
+        };
+        let cfg = blobstore_cfg_from(BlobstoreEnv {
+            s3: s3.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(cfg, BlobstoreConfig::S3(s3));
+        // no bucket at all is the legacy per-actor layout
         assert_eq!(
-            cfg,
-            BlobstoreConfig::S3 {
+            blobstore_cfg_from(BlobstoreEnv::default()).unwrap(),
+            BlobstoreConfig::S3(S3Config::default())
+        );
+        assert!(blobstore_cfg_from(BlobstoreEnv {
+            disk_location: Some("/data/blobs".to_owned()),
+            s3: S3Config {
                 bucket: Some("my-bucket".to_owned()),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .is_err());
+        assert!(blobstore_cfg_from(BlobstoreEnv {
+            s3: S3Config {
+                access_key_id: Some("key".to_owned()),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .is_err());
+    }
+
+    #[cfg(not(feature = "aws-s3"))]
+    #[test]
+    fn blobstore_cfg_refuses_s3_without_the_aws_feature() {
+        assert!(blobstore_cfg_from(BlobstoreEnv::default()).is_err());
+        // an explicit disk location still configures a store
+        assert_eq!(
+            blobstore_cfg_from(BlobstoreEnv {
+                disk_location: Some("/data/blobs".to_owned()),
+                ..Default::default()
+            })
+            .unwrap(),
+            BlobstoreConfig::Disk {
+                location: "/data/blobs".to_owned(),
+                tmp_location: None,
             }
         );
-    }
-
-    #[test]
-    fn blobstore_cfg_falls_back_to_legacy_s3() {
-        let cfg = blobstore_cfg_from(None, None, None).unwrap();
-        assert_eq!(cfg, BlobstoreConfig::S3 { bucket: None });
-    }
-
-    #[test]
-    fn blobstore_cfg_rejects_both_disk_and_s3() {
-        assert!(blobstore_cfg_from(
-            Some("/data/blobs".to_owned()),
-            None,
-            Some("my-bucket".to_owned()),
-        )
-        .is_err());
     }
 
     #[test]
     fn storage_cfg_defaults_without_data_directory() {
-        let (actor_store, service_db) = storage_cfg_from(None, None, None, None, None, None);
+        let (actor_store, service_db) = storage_cfg_from(None, StorageOverrides::default());
         assert_eq!(actor_store.directory, "actors");
         assert_eq!(actor_store.cache_size, 100);
         assert_eq!(service_db.account_db_location, "account.sqlite");
         assert_eq!(service_db.sequencer_db_location, "sequencer.sqlite");
         assert_eq!(service_db.did_cache_db_location, "did_cache.sqlite");
+        assert_eq!(service_db.lifecycle_db_location, "rsky/lifecycle.sqlite");
+        assert_eq!(service_db.lock_dir, "rsky/locks");
+        assert_eq!(
+            service_db.blob_attempts_db_location,
+            "rsky/blob-attempts.sqlite"
+        );
+        assert_eq!(service_db.repair_db_location, "rsky/repair.sqlite");
     }
 
     #[test]
     fn storage_cfg_defaults_under_data_directory() {
         let (actor_store, service_db) =
-            storage_cfg_from(Some("/data".to_owned()), None, None, None, None, None);
+            storage_cfg_from(Some("/data".to_owned()), StorageOverrides::default());
         assert_eq!(actor_store.directory, "/data/actors");
         assert_eq!(service_db.account_db_location, "/data/account.sqlite");
         assert_eq!(service_db.sequencer_db_location, "/data/sequencer.sqlite");
         assert_eq!(service_db.did_cache_db_location, "/data/did_cache.sqlite");
+        assert_eq!(
+            service_db.lifecycle_db_location,
+            "/data/rsky/lifecycle.sqlite"
+        );
+        assert_eq!(service_db.lock_dir, "/data/rsky/locks");
+        assert_eq!(
+            service_db.blob_attempts_db_location,
+            "/data/rsky/blob-attempts.sqlite"
+        );
+        assert_eq!(service_db.repair_db_location, "/data/rsky/repair.sqlite");
     }
 
     #[test]
     fn storage_cfg_explicit_values_win() {
         let (actor_store, service_db) = storage_cfg_from(
             Some("/data".to_owned()),
-            Some("/elsewhere/actors".to_owned()),
-            Some(5),
-            Some("/dbs/account.sqlite".to_owned()),
-            Some("/dbs/sequencer.sqlite".to_owned()),
-            Some("/dbs/did_cache.sqlite".to_owned()),
+            StorageOverrides {
+                actor_store_directory: Some("/elsewhere/actors".to_owned()),
+                actor_store_cache_size: Some(5),
+                account_db_location: Some("/dbs/account.sqlite".to_owned()),
+                sequencer_db_location: Some("/dbs/sequencer.sqlite".to_owned()),
+                did_cache_db_location: Some("/dbs/did_cache.sqlite".to_owned()),
+                lifecycle_db_location: Some("/dbs/lifecycle.sqlite".to_owned()),
+                lock_dir: Some("/dbs/locks".to_owned()),
+                blob_attempts_db_location: Some("/dbs/attempts.sqlite".to_owned()),
+                blob_generations_db_location: None,
+                repair_db_location: Some("/dbs/repair.sqlite".to_owned()),
+            },
         );
         assert_eq!(actor_store.directory, "/elsewhere/actors");
         assert_eq!(actor_store.cache_size, 5);
         assert_eq!(service_db.account_db_location, "/dbs/account.sqlite");
         assert_eq!(service_db.sequencer_db_location, "/dbs/sequencer.sqlite");
         assert_eq!(service_db.did_cache_db_location, "/dbs/did_cache.sqlite");
+        assert_eq!(service_db.lifecycle_db_location, "/dbs/lifecycle.sqlite");
+        assert_eq!(service_db.lock_dir, "/dbs/locks");
+        assert_eq!(service_db.blob_attempts_db_location, "/dbs/attempts.sqlite");
+        assert_eq!(service_db.repair_db_location, "/dbs/repair.sqlite");
     }
 }

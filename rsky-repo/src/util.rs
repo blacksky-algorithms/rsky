@@ -41,7 +41,7 @@ pub fn verify_commit_sig(commit: Commit, did_key: &String) -> Result<bool> {
     };
     let encoded = serde_ipld_dagcbor::to_vec(&rest)?;
     let hash = Sha256::digest(&*encoded);
-    rsky_crypto::verify::verify_signature(did_key, hash.as_ref(), sig.as_slice(), None)
+    rsky_crypto::verify::verify_signature_digest(did_key, hash.as_ref(), sig.as_slice(), None)
 }
 
 pub fn format_data_key<T: FromStr + Display>(collection: T, rkey: T) -> String {
@@ -367,6 +367,95 @@ mod tests {
         assert_eq!(reencoded, bytes);
     }
 
+    /// Bytes and raw links read from a record's DAG-CBOR take their data
+    /// model JSON forms, `{"$bytes": base64}` and `{"$link": cid}`, when the
+    /// record is served as JSON; a bare integer array is not valid atproto
+    /// data.
+    #[test]
+    fn cbor_bytes_and_links_serialize_to_their_json_forms() {
+        let cid: Cid = "bafkreiey6e2xp4ncufvsyfmubucbsz5xujbc7lguospuziohtgfdik3pr4"
+            .parse()
+            .unwrap();
+        let record = Ipld::Map(BTreeMap::from([
+            (
+                "$type".to_string(),
+                Ipld::String("com.example.declaration".to_string()),
+            ),
+            ("currentKey".to_string(), Ipld::Bytes(vec![1, 2, 3, 4])),
+            ("prev".to_string(), Ipld::Link(cid)),
+        ]));
+        let bytes = serde_ipld_dagcbor::to_vec(&record).unwrap();
+        let parsed = cbor_to_lex_record(bytes).unwrap();
+        let json = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "$type": "com.example.declaration",
+                "currentKey": {"$bytes": "AQIDBA"},
+                "prev": {"$link": cid.to_string()},
+            })
+        );
+    }
+
+    /// Only a tag-42 value is a link: a byte string whose bytes happen to
+    /// form a valid CID is still bytes, in CBOR and in the JSON served.
+    #[test]
+    fn cid_shaped_bytes_stay_bytes() {
+        let cid: Cid = "bafkreiey6e2xp4ncufvsyfmubucbsz5xujbc7lguospuziohtgfdik3pr4"
+            .parse()
+            .unwrap();
+        let record = Ipld::Map(BTreeMap::from([(
+            "key".to_string(),
+            Ipld::Bytes(cid.to_bytes()),
+        )]));
+        let bytes = serde_ipld_dagcbor::to_vec(&record).unwrap();
+        assert!(!bytes.windows(2).any(|window| window == [0xd8, 0x2a]));
+        let parsed = cbor_to_lex_record(bytes.clone()).unwrap();
+        assert_eq!(
+            parsed.get("key"),
+            Some(&Lex::Ipld(Ipld::Bytes(cid.to_bytes())))
+        );
+        let json = serde_json::to_value(&parsed).unwrap();
+        assert!(json["key"]["$bytes"].is_string());
+        let reencoded = serde_ipld_dagcbor::to_vec(&lex_to_ipld(Lex::Map(parsed))).unwrap();
+        assert_eq!(reencoded, bytes);
+    }
+
+    /// The write direction: `$bytes` and `$link` objects in a JSON record body
+    /// must encode as a CBOR byte string and a tag-42 link, so the block and
+    /// its CID match what the client and every other implementation compute.
+    #[test]
+    fn json_bytes_and_links_encode_natively_and_round_trip() {
+        let cid: Cid = "bafkreiey6e2xp4ncufvsyfmubucbsz5xujbc7lguospuziohtgfdik3pr4"
+            .parse()
+            .unwrap();
+        let json = serde_json::json!({
+            "$type": "com.example.declaration",
+            "currentKey": {"$bytes": "AQIDBA=="},
+            "prev": {"$link": cid.to_string()},
+            "nested": [{"$bytes": "AQID"}],
+        });
+        let record: RepoRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            record.get("currentKey"),
+            Some(&Lex::Ipld(Ipld::Bytes(vec![1, 2, 3, 4])))
+        );
+        assert_eq!(record.get("prev"), Some(&Lex::Ipld(Ipld::Link(cid))));
+        let bytes = serde_ipld_dagcbor::to_vec(&lex_to_ipld(Lex::Map(record.clone()))).unwrap();
+        // tag 42 for the link and a 4-byte byte string for the key
+        assert!(bytes.windows(2).any(|window| window == [0xd8, 0x2a]));
+        assert!(bytes.windows(5).any(|window| window == [0x44, 1, 2, 3, 4]));
+        let reparsed = cbor_to_lex_record(bytes.clone()).unwrap();
+        assert_eq!(reparsed.get("currentKey"), record.get("currentKey"));
+        assert_eq!(reparsed.get("prev"), record.get("prev"));
+        let reencoded = serde_ipld_dagcbor::to_vec(&lex_to_ipld(Lex::Map(reparsed))).unwrap();
+        assert_eq!(reencoded, bytes);
+        // an object that is not a bytes or link object stays a map
+        let other: RepoRecord =
+            serde_json::from_value(serde_json::json!({"k": {"$bytes": 5}})).unwrap();
+        assert!(matches!(other.get("k"), Some(Lex::Ipld(Ipld::Map(_)))));
+    }
+
     /// A blob ref decoded from real DAG-CBOR (map with a tag-42 link) must
     /// come out as `Lex::Blob`, or record-blob associations are silently
     /// lost on every CAR import.
@@ -401,5 +490,94 @@ mod tests {
             }
             other => panic!("avatar should parse as Lex::Blob, got {other:?}"),
         }
+    }
+
+    fn unsigned_commit() -> UnsignedCommit {
+        UnsignedCommit {
+            did: "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            rev: "3lbqxyzabcd2z".to_string(),
+            data: "bafkreiey6e2xp4ncufvsyfmubucbsz5xujbc7lguospuziohtgfdik3pr4"
+                .parse()
+                .unwrap(),
+            prev: None,
+            version: 3,
+        }
+    }
+
+    fn commit_digest(unsigned: &UnsignedCommit) -> Vec<u8> {
+        Sha256::digest(&*serde_ipld_dagcbor::to_vec(unsigned).unwrap()).to_vec()
+    }
+
+    fn to_commit(unsigned: UnsignedCommit, sig: Vec<u8>) -> Commit {
+        Commit {
+            did: unsigned.did,
+            rev: unsigned.rev,
+            data: unsigned.data,
+            prev: unsigned.prev,
+            version: unsigned.version,
+            sig,
+        }
+    }
+
+    /// A P-256 signing key signs the commit digest; verification must hash the
+    /// commit exactly once, or every P-256-keyed repo fails to verify.
+    #[test]
+    fn verifies_p256_signed_commit() {
+        use p256::ecdsa::signature::hazmat::PrehashSigner;
+        use p256::ecdsa::{Signature, SigningKey};
+
+        let signing_key = SigningKey::from_slice(&[0x2au8; 32]).unwrap();
+        let did_key = rsky_crypto::did::format_did_key(
+            rsky_crypto::constants::P256_JWT_ALG.to_string(),
+            signing_key
+                .verifying_key()
+                .to_encoded_point(true)
+                .as_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+
+        let unsigned = unsigned_commit();
+        let digest = commit_digest(&unsigned);
+        let sig: Signature = signing_key.sign_prehash(&digest).unwrap();
+        let sig = sig.normalize_s().unwrap_or(sig);
+        let commit = to_commit(unsigned, sig.to_vec());
+
+        assert!(verify_commit_sig(commit.clone(), &did_key).unwrap());
+
+        let mut tampered = commit;
+        tampered.rev = "3lbqxyzabce2z".to_string();
+        assert!(!verify_commit_sig(tampered, &did_key).unwrap());
+    }
+
+    #[test]
+    fn verifies_secp256k1_signed_commit() {
+        use rsky_crypto::utils::encode_did_key;
+        use secp256k1::{PublicKey, Secp256k1, SecretKey};
+
+        let secret = SecretKey::from_slice(&[0x2au8; 32]).unwrap();
+        let did_key = encode_did_key(&PublicKey::from_secret_key(&Secp256k1::new(), &secret));
+
+        let unsigned = unsigned_commit();
+        let sig = sign_without_indexmap(&unsigned, &secret).unwrap();
+        let commit = to_commit(unsigned, sig.to_vec());
+
+        assert!(verify_commit_sig(commit.clone(), &did_key).unwrap());
+
+        let mut tampered = commit;
+        tampered.rev = "3lbqxyzabce2z".to_string();
+        assert!(!verify_commit_sig(tampered, &did_key).unwrap());
+    }
+
+    #[test]
+    fn sign_commit_round_trips() {
+        use rsky_crypto::utils::encode_did_key;
+        use secp256k1::{Keypair, Secp256k1};
+
+        let secp = Secp256k1::new();
+        let keypair = Keypair::from_seckey_slice(&secp, &[0x2au8; 32]).unwrap();
+        let did_key = encode_did_key(&keypair.public_key());
+        let commit = sign_commit(unsigned_commit(), &keypair).unwrap();
+        assert!(verify_commit_sig(commit, &did_key).unwrap());
     }
 }

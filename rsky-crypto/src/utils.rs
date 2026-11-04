@@ -23,7 +23,7 @@ pub fn extract_prefixed_bytes(multikey: String) -> Result<Vec<u8>> {
 }
 
 pub fn has_prefix(bytes: &Vec<u8>, prefix: &Vec<u8>) -> bool {
-    *prefix == bytes[0..prefix.len()]
+    bytes.len() >= prefix.len() && *prefix == bytes[0..prefix.len()]
 }
 
 pub fn random_bytes(len: usize) -> Vec<u8> {
@@ -71,6 +71,16 @@ mod tests {
     #[test]
     fn extract_prefixed_bytes_requires_base58btc() {
         assert!(extract_prefixed_bytes("bAbc".to_string()).is_err());
+    }
+
+    #[test]
+    fn has_prefix_rejects_input_shorter_than_prefix() {
+        let prefix = vec![0xe7u8, 0x01];
+        assert!(!has_prefix(&vec![], &prefix));
+        assert!(!has_prefix(&vec![0xe7], &prefix));
+        assert!(has_prefix(&vec![0xe7, 0x01], &prefix));
+        assert!(has_prefix(&vec![0xe7, 0x01, 0x99], &prefix));
+        assert!(!has_prefix(&vec![0x80, 0x24], &prefix));
     }
 
     #[test]
