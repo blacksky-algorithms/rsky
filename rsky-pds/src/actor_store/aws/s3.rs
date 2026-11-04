@@ -10,8 +10,6 @@ use aws_sdk_s3::operation::put_object::builders::PutObjectFluentBuilder;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use futures::future::BoxFuture;
-use futures::StreamExt;
-use futures::TryStreamExt;
 use lexicon_cid::Cid;
 use rsky_common::get_random_str;
 
@@ -495,11 +493,9 @@ impl BlobStore for S3BlobStore {
 
     fn get_stream(&self, cid: Cid) -> BoxFuture<'_, Result<BoxedBlobStream>> {
         Box::pin(async move {
-            let body = S3BlobStore::get_stream(self, cid).await?.into_async_read();
-            Ok(tokio_util::io::ReaderStream::new(body)
-                .map_ok(bytes::Bytes::from)
-                .map_err(anyhow::Error::from)
-                .boxed())
+            S3BlobStore::get_stream(self, cid)
+                .await
+                .map(|body| rsky_blobstore::boxed_read_stream(body.into_async_read()))
         })
     }
 
@@ -692,5 +688,7 @@ mod tests {
         assert!(bare.delete_many(vec![cid]).await.is_err());
         assert!(bare.make_permanent("k".to_owned(), cid).await.is_err());
         assert!(bare.quarantine(cid).await.is_err());
+        // the streamed body is boxed through the crate's adapter
+        assert!(BlobStore::get_stream(&store, cid).await.is_err());
     }
 }

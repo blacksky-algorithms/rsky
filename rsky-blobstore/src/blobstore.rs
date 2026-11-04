@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::stream::{BoxStream, StreamExt};
+use futures::TryStreamExt;
 use lexicon_cid::Cid;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -46,6 +47,18 @@ pub fn generation_name(name: &str, generation: u32) -> String {
     } else {
         format!("{name}.g{generation}")
     }
+}
+
+/// Wraps a tokio reader as the boxed stream the trait returns, so a backend
+/// that hands out its own body type keeps streaming through it.
+pub fn boxed_read_stream<R>(reader: R) -> BoxedBlobStream
+where
+    R: tokio::io::AsyncRead + Send + 'static,
+{
+    tokio_util::io::ReaderStream::new(reader)
+        .map_ok(Bytes::from)
+        .map_err(anyhow::Error::from)
+        .boxed()
 }
 
 /// Object storage for blob bytes, keyed by actor.
