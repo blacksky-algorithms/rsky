@@ -168,11 +168,9 @@ impl BlobstoreFactory {
                 operator_kind,
                 bucket,
             } => {
-                let operator = rsky_blobstore::backends::opendal::build_operator(
-                    operator_kind,
-                    bucket,
-                )
-                .expect("opendal blobstore construction failed");
+                let operator =
+                    rsky_blobstore::backends::opendal::build_operator(operator_kind, bucket)
+                        .expect("opendal blobstore construction failed");
                 Arc::new(OpendalBlobStore::new(operator, did.clone()))
             }
             #[cfg(any(not(feature = "disk"), not(feature = "aws-s3")))]
