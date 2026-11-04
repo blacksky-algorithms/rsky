@@ -175,13 +175,21 @@ impl BlobstoreFactory {
                 .expect("opendal blobstore construction failed");
                 Arc::new(OpendalBlobStore::new(operator, did.clone()))
             }
-            #[allow(unreachable_patterns)]
-            other => panic!(
-                "blobstore backend for {other:?} is not enabled in this build; enable `disk`, `aws-s3`, or `opendal`"
-            ),
+            #[cfg(any(not(feature = "disk"), not(feature = "aws-s3")))]
+            other => disabled_backend(other),
         };
         self.generation_aware(did, inner)
     }
+}
+
+/// Refuses a configuration whose backend this build left out. Only compiled
+/// when a backend is missing, so a build with every backend never carries the
+/// unreachable arm.
+#[cfg(any(not(feature = "disk"), not(feature = "aws-s3")))]
+fn disabled_backend(cfg: &BlobstoreConfig) -> Arc<dyn BlobStore> {
+    panic!(
+        "blobstore backend for {cfg:?} is not enabled in this build; enable `disk`, `aws-s3`, or `opendal`"
+    )
 }
 
 /// The SDK configuration for an S3 store: the environment's defaults with

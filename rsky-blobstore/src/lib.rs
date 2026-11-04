@@ -10,8 +10,8 @@ pub mod backends;
 pub mod blobstore;
 
 pub use blobstore::{
-    generation_name, unavailable, BlobNotFoundError, BlobStore, BlobUnavailableError,
-    BoxedBlobStream, DeleteError, MemoryBlobStore, ObjectKind,
+    boxed_read_stream, generation_name, unavailable, BlobNotFoundError, BlobStore,
+    BlobUnavailableError, BoxedBlobStream, DeleteError, MemoryBlobStore, ObjectKind,
 };
 
 #[cfg(feature = "disk")]
