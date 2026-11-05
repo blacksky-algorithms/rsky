@@ -825,6 +825,15 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 com::atproto::memberspace::list_members::memberspace_list_members,
                 com::atproto::memberspace::put_member::memberspace_put_member,
                 com::atproto::memberspace::remove_member::memberspace_remove_member,
+                // Legacy simplespace endpoints (backward compatibility - 6 endpoints)
+                // NOTE: getSpace NOT included - didn't exist in old API
+                // NOTE: checkUserAccess NOT included - served by managing apps
+                com::atproto::simplespace::simplespace_create_space,
+                com::atproto::simplespace::simplespace_update_space,
+                com::atproto::simplespace::simplespace_delete_space,
+                com::atproto::simplespace::simplespace_add_member,
+                com::atproto::simplespace::simplespace_list_members,
+                com::atproto::simplespace::simplespace_remove_member,
                 com::atproto::space::apply_writes::space_apply_writes,
                 com::atproto::space::clear_records::space_clear_records,
                 com::atproto::space::export_space_meta::space_export_space_meta,
