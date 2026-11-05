@@ -102,12 +102,13 @@ fn parse_resource_identifier(resource: &str) -> Result<ResourceIdentifier, ApiEr
         ));
     }
 
-    // Parse by URI scheme
-    if resource.starts_with("did:") {
+    // Parse by URI scheme (case-insensitive per RFC 3986 Section 3.1)
+    let resource_lower = resource.to_lowercase();
+    if resource_lower.starts_with("did:") {
         parse_did_uri(resource)
-    } else if resource.starts_with("acct:") {
+    } else if resource_lower.starts_with("acct:") {
         parse_acct_uri(resource)
-    } else if resource.starts_with("at://") {
+    } else if resource_lower.starts_with("at://") {
         parse_at_uri(resource)
     } else {
         // REJECT: RFC 7033 requires resource to be a URI
@@ -133,7 +134,8 @@ fn parse_did_uri(resource: &str) -> Result<ResourceIdentifier, ApiError> {
 
 /// Parse an acct-URI (acct:user@host)
 fn parse_acct_uri(resource: &str) -> Result<ResourceIdentifier, ApiError> {
-    let acct = resource.strip_prefix("acct:").unwrap();
+    // Skip "acct:" prefix (5 chars) - scheme is case-insensitive per RFC 3986
+    let acct = &resource[5..];
 
     if acct.is_empty() {
         return Err(ApiError::InvalidRequest(
@@ -172,7 +174,8 @@ fn parse_acct_uri(resource: &str) -> Result<ResourceIdentifier, ApiError> {
 
 /// Parse an AT Protocol URI (at://...)
 fn parse_at_uri(resource: &str) -> Result<ResourceIdentifier, ApiError> {
-    let path = resource.strip_prefix("at://").unwrap();
+    // Skip "at://" prefix (5 chars) - scheme is case-insensitive per RFC 3986
+    let path = &resource[5..];
 
     if path.is_empty() {
         return Err(ApiError::InvalidRequest(
@@ -742,6 +745,65 @@ mod tests {
             }
             _ => panic!("Expected AcctUri variant"),
         }
+    }
+
+    // ============================================================================
+    // URI Scheme Case-Insensitivity Tests (RFC 3986 Section 3.1)
+    // ============================================================================
+
+    #[test]
+    fn accepts_did_scheme_uppercase() {
+        // RFC 3986: URI schemes are case-insensitive
+        let resource = "DID:plc:abc123def456";
+        let parsed = parse_resource_identifier(resource).unwrap();
+        match parsed {
+            ResourceIdentifier::Did(did) => {
+                // The identifier part should preserve its original case
+                assert!(did.contains("abc123def456"));
+            }
+            _ => panic!("Expected Did variant"),
+        }
+    }
+
+    #[test]
+    fn accepts_did_scheme_mixed_case() {
+        let resource = "DiD:plc:abc123def456";
+        let parsed = parse_resource_identifier(resource).unwrap();
+        assert!(matches!(parsed, ResourceIdentifier::Did(_)));
+    }
+
+    #[test]
+    fn accepts_acct_scheme_uppercase() {
+        let resource = "ACCT:alice@example.com";
+        let parsed = parse_resource_identifier(resource).unwrap();
+        match parsed {
+            ResourceIdentifier::AcctUri { handle, host } => {
+                assert_eq!(handle, "alice");
+                assert_eq!(host, "example.com");
+            }
+            _ => panic!("Expected AcctUri variant"),
+        }
+    }
+
+    #[test]
+    fn accepts_acct_scheme_mixed_case() {
+        let resource = "AcCt:alice@example.com";
+        let parsed = parse_resource_identifier(resource).unwrap();
+        assert!(matches!(parsed, ResourceIdentifier::AcctUri { .. }));
+    }
+
+    #[test]
+    fn accepts_at_scheme_uppercase() {
+        let resource = "AT://alice.test";
+        let parsed = parse_resource_identifier(resource).unwrap();
+        assert!(matches!(parsed, ResourceIdentifier::AtUri(_)));
+    }
+
+    #[test]
+    fn accepts_at_scheme_mixed_case() {
+        let resource = "aT://alice.test";
+        let parsed = parse_resource_identifier(resource).unwrap();
+        assert!(matches!(parsed, ResourceIdentifier::AtUri(_)));
     }
 
     // ============================================================================
