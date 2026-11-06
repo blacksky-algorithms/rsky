@@ -82,10 +82,13 @@ mod tests {
             .get_one("Content-Type")
             .unwrap()
             .starts_with("text/css"));
-        assert!(response
-            .into_string()
-            .unwrap()
-            .contains("--branding-color-primary"));
+        let body = response.into_string().unwrap();
+        assert!(body.contains("--branding-color-primary"));
+        let card = body
+            .lines()
+            .find(|line| line.starts_with(".auth-card-wrap {"))
+            .expect("auth card rule");
+        assert!(card.contains("max-width: 48rem"), "{card}");
 
         let response = client
             .get("/oauth/assets/ui-0000000000000000.css")
