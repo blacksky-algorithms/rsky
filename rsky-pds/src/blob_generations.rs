@@ -49,15 +49,7 @@ pub struct Generations {
     db: Db,
 }
 
-/// The physical name of a content's object at a generation: the base name
-/// for generation zero, a suffixed name afterwards.
-pub fn generation_name(cid: &str, generation: u32) -> String {
-    if generation == 0 {
-        cid.to_owned()
-    } else {
-        format!("{cid}.g{generation}")
-    }
-}
+pub use rsky_blobstore::generation_name;
 
 impl Generations {
     /// Opens the registry, creating it. The collector uses `open_existing`

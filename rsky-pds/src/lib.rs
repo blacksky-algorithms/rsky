@@ -1,3 +1,9 @@
+#[cfg(not(any(feature = "disk", feature = "aws-s3", feature = "opendal")))]
+compile_error!(
+    "rsky-pds requires at least one of the `disk`, `aws-s3`, or `opendal` features. \
+     Build with e.g. `cargo build -p rsky-pds --features \"disk aws-s3\"`."
+);
+
 #[macro_use]
 extern crate serde_derive;
 extern crate core;

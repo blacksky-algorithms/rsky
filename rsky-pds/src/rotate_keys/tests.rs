@@ -3,7 +3,6 @@ use crate::account_manager::CreateAccountOpts;
 use crate::config::{ActorStoreConfig, BlobstoreConfig};
 use crate::crawlers::Crawlers;
 use crate::plc::test_support::MockPlc;
-use aws_config::SdkConfig;
 use lexicon_cid::Cid;
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -108,13 +107,10 @@ async fn harness(dids: &[&str]) -> Harness {
         Crawlers::new("pds.test".to_owned(), vec![]),
         None,
     ));
-    let blobstore_factory = BlobstoreFactory::new(
-        BlobstoreConfig::Disk {
-            location: path("blobs"),
-            tmp_location: None,
-        },
-        SdkConfig::builder().build(),
-    );
+    let blobstore_factory = crate::actor_store::blobstore::test_factory(BlobstoreConfig::Disk {
+        location: path("blobs"),
+        tmp_location: None,
+    });
 
     let plc_rotation_key = keypair(0x11);
     let shared_signing_key = keypair(0x22);
