@@ -291,13 +291,14 @@ mod tests {
 
     /// Full write -> validate roundtrip with real commit verification, plus a
     /// golden vector pinning the CAR serialization byte-for-byte.
+    /// Updated for spec-compliant domain separator "atproto-space-repo-v1".
     #[tokio::test]
     async fn roundtrip_and_golden_vector() {
         let f = fixture();
         let car = car_of(&f).await;
         assert_eq!(
             hex::encode(Sha256::digest(&car)),
-            "b1e702230790c5bcad45e910f74891a76def02764ddb6d434e18e517e5d68a60"
+            "13450847a4fcdbb384e0e6f15f749cb5c63126f46f9ea6fe1a60b0314ec71bda"
         );
 
         let v = RepoCarValidator::new(car.as_slice()).await.unwrap();

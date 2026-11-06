@@ -15,7 +15,7 @@ Apps sync directly from each member's PDS (there is no relay).
 - `lthash` — homomorphic set-hash commitment over a repo's records (2048-byte
   state, BLAKE3-XOF lanes, `sha256(state)` digest). Order-independent; add/remove
   are single cheap operations.
-- `commit` — the domain-separated commit context (`atproto-space-v1`) and
+- `commit` — the domain-separated commit context (`atproto-space-repo-v1`) and
   deniable signature + HKDF/HMAC MAC verification.
 - `credential` — delegation tokens, space credentials, and client attestations:
   the JWT envelope, `typ`/claim validation, and signature verification. Signing

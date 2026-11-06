@@ -15,15 +15,16 @@ use subtle::ConstantTimeEq;
 
 use crate::error::{Result, SpaceError};
 
-/// Fixed protocol tag; also names the commit format version (`ver = 1`).
-const PROTO_TAG: &[u8] = b"atproto-space-v1";
+/// Fixed protocol tag for commit MACs (proposal §Commit signature).
+/// The specification requires `atproto-space-repo-v1` for repo-level commits.
+const PROTO_TAG: &[u8] = b"atproto-space-repo-v1";
 
 type HmacSha256 = Hmac<Sha256>;
 
 /// Build the domain-separation context:
 ///
 /// ```text
-/// ctx = "atproto-space-v1"
+/// ctx = "atproto-space-repo-v1"
 ///    || u16be(len(space))  || space   // at://authority/space/type/skey
 ///    || u16be(len(author)) || author  // author DID of the repo
 ///    || u16be(len(rev))    || rev     // commit revision (TID)
@@ -105,10 +106,10 @@ mod tests {
 
     #[test]
     fn ctx_is_byte_exact() {
-        // tag(16) + [len2||"sp"] + [len2||"au"] + [len2||"r"] + [len2||0xAA]
+        // tag(21) + [len2||"sp"] + [len2||"au"] + [len2||"r"] + [len2||0xAA]
         let ctx = build_ctx("sp", "au", "r", &[0xAA]);
         let mut expected = Vec::new();
-        expected.extend_from_slice(b"atproto-space-v1");
+        expected.extend_from_slice(b"atproto-space-repo-v1");
         expected.extend_from_slice(&[0x00, 0x02]);
         expected.extend_from_slice(b"sp");
         expected.extend_from_slice(&[0x00, 0x02]);
@@ -140,12 +141,13 @@ mod tests {
     fn mac_matches_cross_implementation_vector() {
         // Pinned expand-only HKDF vector, independently derived; catches an
         // accidental extract step that a roundtrip test cannot.
+        // Updated for spec-compliant domain separator "atproto-space-repo-v1".
         let ikm = [7u8; 32];
         let ctx = build_ctx("at://a/space/t/main", "did:plc:author", "3krev", &ikm);
         let mac = compute_mac(&ikm, &ctx, &[42u8; 32]).unwrap();
         assert_eq!(
             hex::encode(mac),
-            "d1bd9b47b2e0ec67c390ce4ad16460b2bf37bdd3bec33f8119e19b4001cd64b2"
+            "88d7d33cf56a68b7be6757dfb8851db24403e3fb56bfeb647229b2c8c7cf501c"
         );
     }
 
