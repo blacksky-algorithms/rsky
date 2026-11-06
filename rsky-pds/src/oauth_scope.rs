@@ -332,6 +332,9 @@ impl OAuthScope {
         if let Some(rest) = token.strip_prefix("rpc?") {
             return OAuthScope::Rpc(format!("?{rest}"));
         }
+        if let Some(rest) = token.strip_prefix("blob?") {
+            return OAuthScope::Blob(format!("?{rest}"));
+        }
         for (prefix, ctor) in [
             (
                 TRANSITION_PREFIX,
@@ -765,6 +768,11 @@ mod tests {
         assert!(g.allows_blob("image/png"));
         assert!(g.allows_blob("video/mp4"));
         assert!(!g.allows_blob("text/plain"));
+
+        // The reference writes several patterns without a colon.
+        let g = GrantedScopes::parse(&["atproto".into(), "blob?accept=image/*".into()]);
+        assert!(g.allows_blob("image/png"));
+        assert!(!g.allows_blob("video/mp4"));
     }
 
     #[test]
