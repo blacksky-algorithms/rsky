@@ -31,7 +31,7 @@ cargo install --path .
 If you want to include the embedded database CLI:
 
 ```bash
-cargo build --package rsky-pdsadmin --features db_cli
+cargo build --features db_cli
 ```
 
 ## Configuration
