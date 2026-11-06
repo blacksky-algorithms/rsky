@@ -12,7 +12,10 @@ use crate::actor_store::{ActorStore, ActorStoreReader};
 use crate::apis::com::atproto::repo::assert_repo_availability;
 use crate::apis::ApiError;
 use crate::config::ServerConfig;
-use crate::space_auth::{mint_space_service_token, NOTIFY_SPACE_DELETED_LXM, NOTIFY_WRITE_LXM};
+use crate::space_auth::{
+    mint_space_service_token, session_permits, NOTIFY_SPACE_DELETED_LXM, NOTIFY_WRITE_LXM,
+};
+use crate::space_scope::{ManageOp, SpaceRequest};
 use anyhow::Result;
 use rocket::State;
 use rsky_lexicon::com::atproto::space::CommitMeta;
@@ -20,8 +23,12 @@ use rsky_space::space_id::SpaceId;
 use secp256k1::Keypair;
 
 pub mod apply_writes;
+pub mod clear_records;
 pub mod create_record;
+pub mod create_space;
 pub mod delete_record;
+pub mod delete_space;
+pub mod export_space_meta;
 pub mod get_blob;
 pub mod get_delegation_token;
 pub mod get_latest_commit;
@@ -31,16 +38,22 @@ pub mod get_repo_state;
 pub mod get_space;
 pub mod get_space_credential;
 pub mod host;
+pub mod import_repo;
+pub mod import_space_meta;
 pub mod list_blobs;
 pub mod list_records;
 pub mod list_repo_ops;
 pub mod list_repos;
 pub mod list_spaces;
+pub mod notify_credential_revoked;
 pub mod notify_space_deleted;
 pub mod notify_write;
+pub mod publish;
 pub mod put_record;
 pub mod register_notify;
+pub mod remove_writer;
 pub mod unregister_notify;
+pub mod update_space;
 
 /// How long a notify registration (explicit or auto) stays live.
 pub const NOTIFY_REGISTRATION_TTL_SECS: i64 = 7 * 24 * 3600;
@@ -85,11 +98,84 @@ pub fn space_error(error: anyhow::Error) -> ApiError {
         Some(SpaceStoreError::InvalidSwap(_)) => {
             ApiError::BadRequest("InvalidSwap".to_string(), error.to_string())
         }
+        Some(SpaceStoreError::MemberNotFound(_)) => {
+            ApiError::BadRequest("MemberNotFound".to_string(), error.to_string())
+        }
         None => {
             tracing::error!("space route error: {error}");
             ApiError::RuntimeError
         }
     }
+}
+
+/// Space-definition errors: a conflicting `createSpace` is a
+/// `SpaceAlreadyExists`, everything else maps like a repo error.
+pub fn space_def_error(error: anyhow::Error) -> ApiError {
+    match error.downcast_ref::<SpaceStoreError>() {
+        Some(SpaceStoreError::RecordExists(_)) => ApiError::BadRequest(
+            "SpaceAlreadyExists".to_string(),
+            "a space with this type and key already exists".to_string(),
+        ),
+        _ => space_error(error),
+    }
+}
+
+/// Space-management procedures run on the space authority's own account:
+/// the caller must be the authority, and their session must carry the
+/// relevant `manage` scope.
+pub fn require_manage(
+    credentials: &crate::auth_verifier::Credentials,
+    did: &str,
+    space: &SpaceId,
+    op: ManageOp,
+) -> Result<(), ApiError> {
+    if space.authority != did {
+        return Err(ApiError::AuthRequiredError(
+            "only the space authority may manage a space".to_string(),
+        ));
+    }
+    if !session_permits(credentials, did, space, &SpaceRequest::Manage(op)) {
+        return Err(ApiError::AuthRequiredError(
+            "session does not cover managing this space".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// `listMembers`-style queries accept a `read_self` grant from the space
+/// authority rather than a manage scope.
+pub fn require_read_self(
+    credentials: &crate::auth_verifier::Credentials,
+    did: &str,
+    space: &SpaceId,
+) -> Result<(), ApiError> {
+    if space.authority != did {
+        return Err(ApiError::AuthRequiredError(
+            "only the space authority may read this space's management state".to_string(),
+        ));
+    }
+    if !session_permits(
+        credentials,
+        did,
+        space,
+        &SpaceRequest::ReadSelf { collection: None },
+    ) {
+        return Err(ApiError::AuthRequiredError(
+            "session does not cover reading this space".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve the caller's keypair for signed notifications.
+pub async fn actor_keypair(
+    actor_store: &ActorStore,
+    did: &str,
+) -> Result<secp256k1::Keypair, ApiError> {
+    actor_store
+        .keypair(did)
+        .await
+        .map_err(internal_error("missing actor keypair"))
 }
 
 /// A write names the repo it targets, which must be the authenticated one:
@@ -111,17 +197,31 @@ pub async fn open_local_repo(
     account_manager: &AccountManager,
     did: &str,
     is_user_or_admin: bool,
+    auth: &crate::space_auth::SpaceReadAuth,
 ) -> Result<ActorStoreReader, ApiError> {
     assert_repo_availability(did, is_user_or_admin, account_manager)
         .await
         .map_err(|error| ApiError::BadRequest("RepoNotFound".to_string(), error.to_string()))?;
-    actor_store
+    let reader = actor_store
         .read(
             did.to_string(),
             blobstore_factory.blobstore(did.to_string()),
         )
         .await
-        .map_err(|error| ApiError::BadRequest("RepoNotFound".to_string(), error.to_string()))
+        .map_err(|error| ApiError::BadRequest("RepoNotFound".to_string(), error.to_string()))?;
+    // Credentials revoked for this repo's space are rejected here
+    // (com.atproto.space.notifyCredentialRevoked).
+    if let crate::space_auth::SpaceReadAuth::Credential(credential) = auth {
+        if reader
+            .space
+            .credential_revoked(&credential.space_uri, &credential.jti)
+            .await
+            .unwrap_or(false)
+        {
+            return Err(ApiError::InvalidToken("Token is invalid".to_string()));
+        }
+    }
+    Ok(reader)
 }
 
 /// Sign the current commit for a repo at serve time.
@@ -218,7 +318,7 @@ pub async fn apply_space_writes(
 /// space host is auto-registered as a subscriber on the first write into a
 /// shared space; a local authority is updated in place instead.
 #[allow(clippy::too_many_arguments)]
-async fn notify_after_write(
+pub async fn notify_after_write(
     actor_store: &State<ActorStore>,
     blobstore_factory: &State<BlobstoreFactory>,
     server_config: &State<ServerConfig>,
@@ -393,8 +493,8 @@ impl NotifyWriteTask {
     }
 }
 
-/// Resolve the authority's `#atproto_space_host` service endpoint, falling
-/// back to its `#atproto_pds` endpoint (spec §Space authority).
+/// Resolve the authority's `#atproto_pds` service endpoint, falling
+/// back to its `#atproto_space_host` endpoint (spec §Space authority).
 pub async fn resolve_space_host_endpoint(plc_url: &str, authority: &str) -> Result<String> {
     use rsky_identity::did::did_resolver::DidResolver;
     use rsky_identity::types::{DidResolverOpts, MemoryCache};
@@ -412,7 +512,7 @@ pub async fn resolve_space_host_endpoint(plc_url: &str, authority: &str) -> Resu
         .service
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("no services in DID document for {authority}"))?;
-    for fragment in ["atproto_space_host", "atproto_pds"] {
+    for fragment in ["atproto_pds", "atproto_space_host"] {
         if let Some(service) = services
             .iter()
             .find(|s| s.id.rsplit_once('#').map(|(_, f)| f) == Some(fragment) || s.id == fragment)

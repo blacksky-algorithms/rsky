@@ -1,0 +1,25 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.memberspace.member",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A published member-list entry. Written into the space authority's own repo in the space when the space's policy sets publishMembers; the record key is the member's DID. Direct writes of this record type are rejected: the PDS keeps the records in sync with the configured member list.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["read", "write"],
+        "properties": {
+          "read": {
+            "type": "boolean",
+            "description": "Whether the member is authorized to read the space."
+          },
+          "write": {
+            "type": "boolean",
+            "description": "Whether the member's writes are tracked and forwarded by the space authority."
+          }
+        }
+      }
+    }
+  }
+}

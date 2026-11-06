@@ -1,10 +1,10 @@
 {
   "lexicon": 1,
-  "id": "com.atproto.simplespace.addMember",
+  "id": "com.atproto.space.removeWriter",
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Add a member (by DID) to view a simplespace-managed space. Requires auth with a covering manage=update grant, implemented by PDS.",
+      "description": "Remove an account from a space's writer set. A removed account can be re-added to the writer set later if they make an authorized write to the space. Requires auth with a covering manage=update grant, implemented by a space host.",
       "input": {
         "encoding": "application/json",
         "schema": {
@@ -18,7 +18,7 @@
             "did": {
               "type": "string",
               "format": "did",
-              "description": "The DID of the account to add as a member."
+              "description": "The DID of the writer to remove."
             }
           }
         }

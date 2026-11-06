@@ -1,8 +1,8 @@
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
-use crate::apis::com::atproto::simplespace::{actor_keypair, require_manage, space_error};
 use crate::apis::com::atproto::space::{
-    parse_space_uri, queue_space_deleted_notifications, resolve_space_host_endpoint,
+    actor_keypair, parse_space_uri, queue_space_deleted_notifications, require_manage,
+    resolve_space_host_endpoint, space_def_error,
 };
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessSpace;
@@ -10,17 +10,17 @@ use crate::config::ServerConfig;
 use crate::space_scope::ManageOp;
 use rocket::serde::json::Json;
 use rocket::State;
-use rsky_lexicon::com::atproto::simplespace::DeleteSpaceInput;
+use rsky_lexicon::com::atproto::space::DeleteSpaceInput;
 
 /// Delete a space: stop minting credentials, flag local repos, and notify
 /// registered syncers and writers' hosts best-effort (spec §Space deletion).
 #[tracing::instrument(skip_all)]
 #[rocket::post(
-    "/xrpc/com.atproto.simplespace.deleteSpace",
+    "/xrpc/com.atproto.space.deleteSpace",
     format = "json",
     data = "<body>"
 )]
-pub async fn simplespace_delete_space(
+pub async fn space_delete_space(
     body: Json<DeleteSpaceInput>,
     auth: AccessSpace,
     actor_store: &State<ActorStore>,
@@ -40,32 +40,29 @@ pub async fn simplespace_delete_space(
         .space
         .live_space_def(&space_id.uri())
         .await
-        .map_err(space_error)?;
-    // Stop answering for the space and delete the authority's own repo.
+        .map_err(space_def_error)?;
     reader
         .space
         .flag_space_def_deleted(&space_id.uri())
         .await
-        .map_err(space_error)?;
+        .map_err(space_def_error)?;
     reader
         .space
         .flag_repo_deleted(&space_id.uri())
         .await
-        .map_err(space_error)?;
+        .map_err(space_def_error)?;
 
-    // Collect notification targets: registered syncers plus the repo hosts of
-    // every known writer. Local writers are flagged directly.
     let now = rsky_common::now();
     let mut endpoints = reader
         .space
         .host_notify_endpoints(&space_id.uri(), &now)
         .await
-        .map_err(space_error)?;
+        .map_err(space_def_error)?;
     let writers = reader
         .space
         .list_writers(&space_id.uri(), usize::MAX >> 1, None)
         .await
-        .map_err(space_error)?;
+        .map_err(space_def_error)?;
     let mut remote_writers: Vec<String> = Vec::new();
     for writer in writers {
         if writer.did == did {
@@ -90,15 +87,12 @@ pub async fn simplespace_delete_space(
     let keypair = actor_keypair(actor_store, &did).await?;
     let plc_url = server_config.identity.plc_url.clone();
     if !remote_writers.is_empty() {
-        // Resolve remote writers' PDS endpoints in the background, then fold
-        // them into the notification fan-out.
         let authority = space_id.authority.clone();
         let space_uri = space_id.uri();
         actor_store.background_queue.add(async move {
             let mut writer_endpoints = Vec::new();
             for writer in remote_writers {
                 match resolve_space_host_endpoint(&plc_url, &writer).await {
-                    // A writer's own host is the audience for its notice.
                     Ok(endpoint) => writer_endpoints.push(crate::actor_store::space::Subscriber {
                         endpoint,
                         service: Some(writer.clone()),

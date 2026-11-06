@@ -1,0 +1,21 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.managedspace.policy",
+  "defs": {
+    "main": {
+      "type": "object",
+      "description": "Policy for a space that defers each user access decision to an external managing app via com.atproto.managedspace.checkUserAccess.",
+      "required": ["managingApp"],
+      "properties": {
+        "managingApp": {
+          "type": "string",
+          "description": "Service identifier (a DID with a service fragment) of the application that decides user access for this space."
+        },
+        "publishPolicy": {
+          "type": "boolean",
+          "description": "Publish the policy to readers as a com.atproto.space.policy record in the authority's own repo in the space."
+        }
+      }
+    }
+  }
+}

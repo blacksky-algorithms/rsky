@@ -1,15 +1,19 @@
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
-use crate::apis::com::atproto::space::host::local_space_def;
+use crate::apis::com::atproto::space::host::{def_policy, local_space_def};
 use crate::apis::com::atproto::space::{deliver_notifications, parse_space_uri, space_error};
 use crate::apis::ApiError;
 use crate::auth_verifier::bearer_token_from_req;
+use crate::config::ServerConfig;
 use crate::space_auth::{verify_space_service_token, NOTIFY_WRITE_LXM};
 use crate::SharedIdResolver;
 use rocket::request::{FromRequest, Outcome, Request};
 use rocket::serde::json::Json;
 use rocket::State;
+use rsky_lexicon::com::atproto::managedspace::Access;
 use rsky_lexicon::com::atproto::space::NotifyWriteInput;
+use rsky_space_host::signing::Signer;
+use secp256k1::SecretKey;
 
 pub struct BearerToken(pub String);
 
@@ -44,6 +48,7 @@ pub async fn space_notify_write(
     actor_store: &State<ActorStore>,
     blobstore_factory: &State<BlobstoreFactory>,
     id_resolver: &State<SharedIdResolver>,
+    server_config: &State<ServerConfig>,
 ) -> Result<(), ApiError> {
     let NotifyWriteInput { space, repo, rev } = body.into_inner();
     let space_id = parse_space_uri(&space)?;
@@ -71,7 +76,7 @@ pub async fn space_notify_write(
     if claims.iss != repo {
         return Err(ApiError::InvalidToken("Token is invalid".to_string()));
     }
-    let (_, space_store, keypair) =
+    let (def, space_store, keypair) =
         local_space_def(actor_store, blobstore_factory, &space_id).await?;
     let fresh = space_store
         .consume_jti(
@@ -83,6 +88,30 @@ pub async fn space_notify_write(
         .map_err(space_error)?;
     if !fresh {
         return Err(ApiError::InvalidToken("Token is invalid".to_string()));
+    }
+    // The space's write axis decides whether this writer is tracked and their
+    // notice forwarded; an unauthorized writer's notice is rejected (spec
+    // §Baseline policies).
+    let signer = Signer::from_secret(
+        SecretKey::from_slice(&keypair.secret_bytes()).expect("actor key is a valid secret"),
+    );
+    let policy = def_policy(
+        &def,
+        &space_store,
+        signer,
+        &space_id.authority,
+        &server_config.identity.plc_url,
+    )
+    .await?;
+    let authorized = policy
+        .authorizes(&space_id.uri(), Some(&repo), Access::Write, None)
+        .await
+        .unwrap_or(false);
+    if !authorized {
+        tracing::debug!(space = %space, %repo, %rev, "write notice from unauthorized writer rejected");
+        return Err(ApiError::Forbidden(format!(
+            "repo {repo} is not authorized to write in this space"
+        )));
     }
     space_store
         .upsert_writer(&space_id.uri(), &repo, &rev, None)

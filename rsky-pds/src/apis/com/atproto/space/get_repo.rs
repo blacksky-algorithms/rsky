@@ -44,6 +44,7 @@ pub async fn space_get_repo(
         &account_manager,
         &repo,
         false,
+        &auth,
     )
     .await?;
     let state = reader
