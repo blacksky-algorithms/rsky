@@ -169,12 +169,7 @@ impl Permission {
         if self.accept.is_empty() {
             return None;
         }
-        let params: Vec<String> = self.accept.iter().map(|a| format!("accept={a}")).collect();
-        Some(format!(
-            "{}?{}",
-            crate::oauth_scope::BLOB_PREFIX,
-            params.join("&")
-        ))
+        Some(scope_string("blob", "accept", &self.accept, Vec::new()))
     }
 
     fn to_rpc_scope(&self, inherited_aud: Option<&str>) -> Option<String> {
@@ -643,7 +638,9 @@ mod tests {
             accept: vec!["image/*".to_string()],
             ..Default::default()
         };
-        assert_eq!(blob.to_scope_string().unwrap(), "blob:?accept=image/*");
+        let scope = blob.to_scope_string().unwrap();
+        assert_eq!(scope, "blob:image/*");
+        assert!(crate::oauth_scope::GrantedScopes::parse(&[scope]).allows_blob("image/png"));
 
         let rpc = Permission {
             resource: "rpc".to_string(),
@@ -723,6 +720,17 @@ mod tests {
         assert_eq!(scope, "rpc?lxm=app.example.getA&lxm=app.example.getB&aud=*");
         assert!(crate::oauth_scope::GrantedScopes::parse(&[scope])
             .allows_rpc("app.example.getB", "did:web:api.example.com"));
+
+        let blob = Permission {
+            resource: "blob".to_string(),
+            accept: vec!["image/*".to_string(), "video/mp4".to_string()],
+            ..Default::default()
+        };
+        let scope = blob.to_scope_string().unwrap();
+        assert_eq!(scope, "blob?accept=image/*&accept=video/mp4");
+        let granted = crate::oauth_scope::GrantedScopes::parse(&[scope]);
+        assert!(granted.allows_blob("video/mp4"));
+        assert!(!granted.allows_blob("text/plain"));
     }
 
     /// The bug this whole file exists to fix: a permission set naming only a
