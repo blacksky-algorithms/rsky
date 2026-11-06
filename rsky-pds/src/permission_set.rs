@@ -156,16 +156,12 @@ impl Permission {
         if self.collection.is_empty() {
             return None;
         }
-        let mut params: Vec<String> = self
-            .collection
-            .iter()
-            .map(|c| format!("collection={c}"))
-            .collect();
-        params.extend(self.action.iter().map(|a| format!("action={a}")));
-        Some(format!(
-            "{}?{}",
-            crate::oauth_scope::REPO_PREFIX,
-            params.join("&")
+        let actions = self.action.iter().map(|a| format!("action={a}")).collect();
+        Some(scope_string(
+            "repo",
+            "collection",
+            &self.collection,
+            actions,
         ))
     }
 
@@ -191,12 +187,11 @@ impl Permission {
             self.aud.clone()
         };
         let aud = aud?;
-        let mut params: Vec<String> = self.lxm.iter().map(|l| format!("lxm={l}")).collect();
-        params.push(format!("aud={aud}"));
-        Some(format!(
-            "{}?{}",
-            crate::oauth_scope::RPC_PREFIX,
-            params.join("&")
+        Some(scope_string(
+            "rpc",
+            "lxm",
+            &self.lxm,
+            vec![format!("aud={aud}")],
         ))
     }
 
@@ -216,6 +211,29 @@ impl Permission {
             crate::oauth_scope::ACCOUNT_PREFIX,
             params.join("&")
         ))
+    }
+}
+
+/// A scope string in the form the reference implementation writes: a single
+/// `key` value goes in the positional slot (`rpc:<lxm>?aud=...`), several go
+/// in the query form, which has no colon (`rpc?lxm=...&lxm=...&aud=...`). The
+/// reference parser rejects an empty positional slot (`rpc:?lxm=...`).
+fn scope_string(resource: &str, key: &str, values: &[String], params: Vec<String>) -> String {
+    let (head, params): (String, Vec<String>) = match values {
+        [value] => (format!("{resource}:{value}"), params),
+        _ => (
+            resource.to_string(),
+            values
+                .iter()
+                .map(|value| format!("{key}={value}"))
+                .chain(params)
+                .collect(),
+        ),
+    };
+    if params.is_empty() {
+        head
+    } else {
+        format!("{head}?{}", params.join("&"))
     }
 }
 
@@ -616,9 +634,7 @@ mod tests {
             ..Default::default()
         };
         let scope = repo.to_scope_string().unwrap();
-        assert!(scope.starts_with("repo:?"), "{scope}");
-        assert!(scope.contains("collection=app.bulleted.node"), "{scope}");
-        assert!(scope.contains("action=create"), "{scope}");
+        assert_eq!(scope, "repo:app.bulleted.node?action=create");
         assert!(crate::oauth_scope::GrantedScopes::parse(&[scope])
             .allows_repo("app.bulleted.node", crate::oauth_scope::RepoAction::Create));
 
@@ -636,9 +652,9 @@ mod tests {
             ..Default::default()
         };
         let scope = rpc.to_scope_string().unwrap();
-        assert!(scope.starts_with("rpc:?"), "{scope}");
-        assert!(scope.contains("lxm=com.example.method"), "{scope}");
-        assert!(scope.contains("aud=did:web:example.com"), "{scope}");
+        assert_eq!(scope, "rpc:com.example.method?aud=did:web:example.com");
+        assert!(crate::oauth_scope::GrantedScopes::parse(&[scope])
+            .allows_rpc("com.example.method", "did:web:example.com"));
 
         let identity = Permission {
             resource: "identity".to_string(),
@@ -673,6 +689,40 @@ mod tests {
         }
         .to_scope_string()
         .is_none());
+    }
+
+    /// Several collections or methods use the query form, which has no colon
+    /// (`repo?collection=...`), as the reference implementation writes it.
+    #[test]
+    fn to_scope_string_uses_the_query_form_for_several_values() {
+        let repo = Permission {
+            resource: "repo".to_string(),
+            collection: vec!["app.example.a".to_string(), "app.example.b".to_string()],
+            action: vec!["create".to_string()],
+            ..Default::default()
+        };
+        let scope = repo.to_scope_string().unwrap();
+        assert_eq!(
+            scope,
+            "repo?collection=app.example.a&collection=app.example.b&action=create"
+        );
+        let granted = crate::oauth_scope::GrantedScopes::parse(&[scope]);
+        assert!(granted.allows_repo("app.example.b", crate::oauth_scope::RepoAction::Create));
+        assert!(!granted.allows_repo("app.example.b", crate::oauth_scope::RepoAction::Delete));
+
+        let rpc = Permission {
+            resource: "rpc".to_string(),
+            lxm: vec![
+                "app.example.getA".to_string(),
+                "app.example.getB".to_string(),
+            ],
+            aud: Some("*".to_string()),
+            ..Default::default()
+        };
+        let scope = rpc.to_scope_string().unwrap();
+        assert_eq!(scope, "rpc?lxm=app.example.getA&lxm=app.example.getB&aud=*");
+        assert!(crate::oauth_scope::GrantedScopes::parse(&[scope])
+            .allows_rpc("app.example.getB", "did:web:api.example.com"));
     }
 
     /// The bug this whole file exists to fix: a permission set naming only a
@@ -751,7 +801,7 @@ mod tests {
                 .try_resolved_scopes("app.example.cached")
                 .await
                 .unwrap(),
-            vec!["repo:?collection=app.example.record".to_string()]
+            vec!["repo:app.example.record".to_string()]
         );
         // an expired entry is fetched again
         resolver.cache.write().await.insert(
@@ -844,15 +894,15 @@ mod tests {
                 .await
                 .unwrap(),
             [
-                "rpc:?lxm=app.example.getThing&aud=did:web:api.example.com#svc",
-                "rpc:?lxm=app.example.getOther&aud=*",
+                "rpc:app.example.getThing?aud=did:web:api.example.com#svc",
+                "rpc:app.example.getOther?aud=*",
             ]
         );
         assert_eq!(
             resolver.resolved_scopes("app.example.viewAll").await,
             [
-                "rpc:?lxm=app.example.getThing&aud=*",
-                "rpc:?lxm=app.example.getOther&aud=*",
+                "rpc:app.example.getThing?aud=*",
+                "rpc:app.example.getOther?aud=*",
             ]
         );
         assert!(resolver
