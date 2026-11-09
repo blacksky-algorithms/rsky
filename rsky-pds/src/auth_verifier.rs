@@ -1296,7 +1296,7 @@ pub async fn verify_service_jwt(
         let opts_iss = opts.iss.clone();
         async move {
             match &opts_iss {
-                Some(opts_iss) if opts_iss.contains(&iss) => {
+                Some(opts_iss) if !opts_iss.contains(&iss) => {
                     bail!("UntrustedIss: Untrusted issuer")
                 }
                 _ => (),

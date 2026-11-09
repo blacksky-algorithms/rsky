@@ -1607,13 +1607,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(views.len(), 2);
-        assert_eq!(
-            views["app.example.set"].scopes,
-            ["repo:?collection=app.example.record"]
-        );
+        assert_eq!(views["app.example.set"].scopes, ["repo:app.example.record"]);
         assert_eq!(
             views["app.example.set?aud=did:web:x%23y"].scopes,
-            ["repo:?collection=app.example.record"]
+            ["repo:app.example.record"]
         );
         assert!(views["app.example.set"].title.is_none());
         let error = include_sets(&sets, &["include:invalid.example.nothing".into()])

@@ -144,7 +144,7 @@ strong, b { font-weight: 600; }
   .auth-background { background-image: var(--branding-background-dark-image, none); }
 }
 @media (min-width: 768px) { .auth-background { padding: 2.5rem; } }
-.auth-card-wrap { display: flex; width: 100%; max-width: 24rem; min-width: 0; flex-direction: column; }
+.auth-card-wrap { display: flex; width: 100%; max-width: 48rem; min-width: 0; flex-direction: column; }
 .auth-card-wrap > .card, .card > * { min-width: 0; max-width: 100%; }
 .brand-row {
   display: flex; align-items: center; justify-content: center; gap: 0.5rem;
@@ -353,7 +353,7 @@ a.item:hover, button.item:hover { background: var(--muted); }
 /* ---- permission tables ----------------------------------------------------- */
 
 .permission-groups { display: flex; flex-direction: column; gap: 0.5rem; }
-.permission-group { display: flex; flex-direction: column; gap: 0.5rem; }
+.permission-group { display: flex; flex-direction: column; align-items: stretch; gap: 0.5rem; }
 .permission-intro { color: var(--muted-foreground); font-size: 0.8125rem; }
 .table-wrap { width: 100%; overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-lg); }
 .table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; }
