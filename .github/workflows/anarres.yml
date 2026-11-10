@@ -70,12 +70,16 @@ jobs:
           fi
           pr="$(gh api "repos/$REPO/pulls/$PR_NUMBER")"
           if [ "$(jq -r .head.repo.full_name <<< "$pr")" = "$REPO" ]; then
-            echo "ref=$(jq -r .head.sha <<< "$pr")" >> "$GITHUB_OUTPUT"
+            ref="$(jq -r .head.sha <<< "$pr")"
           else
-            echo "ref=$(jq -r .base.sha <<< "$pr")" >> "$GITHUB_OUTPUT"
+            ref="$(jq -r .base.sha <<< "$pr")"
           fi
-          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
-          echo "proceed=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "ref=$ref"
+            echo "files=$(jq -r .changed_files <<< "$pr")"
+            echo "number=$PR_NUMBER"
+            echo "proceed=true"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Checkout repository
         if: steps.request.outputs.proceed == 'true'
@@ -108,12 +112,15 @@ jobs:
           fi
 
       - name: Gather context
+        id: context
         if: steps.model.outputs.online == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
           PR_NUMBER: ${{ steps.request.outputs.number }}
+          CHANGED_FILES: ${{ steps.request.outputs.files }}
+          MAX_DIFF_BYTES: '400000'
           REQUEST_BODY: ${{ github.event.comment.body || github.event.review.body }}
           REQUEST_PATH: ${{ github.event.comment.path }}
           REQUEST_LINE: ${{ github.event.comment.line }}
@@ -123,7 +130,24 @@ jobs:
           mkdir -p .anarres
           gh pr view "$PR_NUMBER" --repo "$REPO" --json title,body \
             --jq '"Title: " + .title + "\n\n" + (.body // "")' > .anarres/pr.md
-          gh pr diff "$PR_NUMBER" --repo "$REPO" | head -c 600000 > .anarres/pr.diff
+          # GitHub refuses to render a diff above 300 files.
+          gh pr diff "$PR_NUMBER" --repo "$REPO" > .anarres/pr.diff 2> /dev/null || : > .anarres/pr.diff
+          bytes="$(wc -c < .anarres/pr.diff | tr -d ' ')"
+          if [ "$bytes" -eq 0 ] || [ "$bytes" -gt "$MAX_DIFF_BYTES" ]; then
+            if [ "$EVENT" = "pull_request" ]; then
+              # shellcheck disable=SC2016
+              printf 'This pull request is too large for an automated review (%s files changed). Mention `@anarres-llm` with a specific question about part of it instead.\n' \
+                "$CHANGED_FILES" > "$RUNNER_TEMP/response.md"
+              echo "run=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            { gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" \
+              --jq '.[] | "--- " + .filename + " (" + .status + ")\n" + (.patch // "[no patch available]") + "\n"' \
+              || true; } | head -c "$MAX_DIFF_BYTES" > .anarres/pr.diff
+            printf '\nThe diff in .anarres/pr.diff is truncated; this pull request changes %s files. Read files directly for anything not shown.\n' \
+              "$CHANGED_FILES" >> .anarres/pr.md
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
           if [ "$EVENT" != "pull_request" ]; then
             {
               if [ -n "$REQUEST_PATH" ]; then
@@ -134,7 +158,7 @@ jobs:
           fi
 
       - name: Install OpenCode
-        if: steps.model.outputs.online == 'true'
+        if: steps.context.outputs.run == 'true'
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
@@ -144,7 +168,7 @@ jobs:
           dirname "$(find "$RUNNER_TEMP/opencode" -type f -name opencode | head -1)" >> "$GITHUB_PATH"
 
       - name: Run Anarres
-        if: steps.model.outputs.online == 'true'
+        if: steps.context.outputs.run == 'true'
         env:
           EVENT: ${{ github.event_name }}
           ANARRES_BASE_URL: ${{ secrets.ANARRES_BASE_URL }}
