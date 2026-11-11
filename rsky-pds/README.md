@@ -291,6 +291,23 @@ Requests for any well-formed method without a local handler are proxied:
 to `PDS_REPORT_SERVICE_URL`, and everything else to `PDS_BSKY_APP_VIEW_URL`,
 unless an `atproto-proxy` header names the service.
 
+### WebFinger
+
+`GET /.well-known/webfinger?resource=<uri>` implements RFC 7033 WebFinger
+for AT Protocol identity discovery. Supported resource URI schemes:
+
+| Scheme | Example |
+|--------|---------|
+| `did:` | `did:plc:abc123def456` |
+| `acct:` | `acct:alice.example.com@pds.example.com` |
+| `at://` | `at://alice.example.com` |
+
+Returns a JSON Resource Descriptor (JRD) with the account's DID, handle,
+and links to the PLC directory, repository export, and identity resolution
+endpoints. CORS headers allow cross-origin discovery. URI schemes are
+case-insensitive per RFC 3986 Section 3.1. Deactivated and taken-down
+accounts return 400 AccountNotFound.
+
 ### Operating
 
 `GET /metrics` serves Prometheus metrics: requests by route and status

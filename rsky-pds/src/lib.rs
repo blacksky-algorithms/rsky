@@ -56,6 +56,7 @@ pub mod space_scope;
 pub mod spool;
 pub mod telemetry;
 pub mod ui;
+pub mod webfinger;
 pub mod well_known;
 pub mod xrpc_server;
 use crate::account_manager::AccountManager;
@@ -877,6 +878,7 @@ pub async fn build_rocket(rocket_cfg: Option<RocketConfig>) -> Rocket<Build> {
                 community::blacksky::pds::get_convergence::get_convergence,
                 community::blacksky::pds::get_publication_frontier::get_publication_frontier,
                 community::lexicon::service::describe::service_describe,
+                webfinger::webfinger,
                 well_known::well_known,
                 oauth::routes::oauth_par,
                 oauth::routes::oauth_token,
