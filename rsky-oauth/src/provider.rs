@@ -9,7 +9,7 @@ use crate::request::{
     generate_code, generate_request_id, is_code, request_id_from_uri, request_uri_from_id,
     RequestData, AUTHORIZATION_INACTIVITY_TIMEOUT, PAR_EXPIRES_IN,
 };
-use crate::store::{AccountInfo, DeviceAccount, OAuthStore};
+use crate::store::{AccountInfo, DeviceAccount, OAuthStore, RefreshGraceStore};
 use crate::token::{
     generate_refresh_token, generate_token_id, is_refresh_token, is_token_id,
     verify_code_challenge, TokenData, TokenInfo, TOKEN_MAX_AGE,
@@ -197,6 +197,7 @@ pub struct OAuthProvider {
     trusted_clients: Vec<String>,
     scope_expander: Option<Arc<dyn ScopeExpander>>,
     sessions_since: Option<u64>,
+    refresh_grace: Option<(u64, Arc<dyn RefreshGraceStore>)>,
 }
 
 impl OAuthProvider {
@@ -211,7 +212,14 @@ impl OAuthProvider {
             trusted_clients: config.trusted_clients,
             scope_expander: config.scope_expander,
             sessions_since: config.sessions_since,
+            refresh_grace: None,
         }
+    }
+
+    /// Lets a refresh retried within `window` seconds of a rotation succeed.
+    pub fn with_refresh_grace(mut self, window: u64, store: Arc<dyn RefreshGraceStore>) -> Self {
+        self.refresh_grace = Some((window, store));
+        self
     }
 
     pub fn issuer(&self) -> &str {
@@ -1034,6 +1042,12 @@ impl OAuthProvider {
             ));
         };
         if token.current_refresh_token.as_deref() != Some(refresh_token) {
+            if let Some(response) = self
+                .regrant_within_grace(client, &client_auth, &token, refresh_token, proof, now)
+                .await
+            {
+                return Ok(response);
+            }
             self.store.delete_token(&token.token_id).await?;
             return Err(OAuthError::InvalidGrant(
                 "Refresh token replayed".to_string(),
@@ -1053,14 +1067,53 @@ impl OAuthProvider {
         }
     }
 
-    async fn validate_refresh(
+    async fn regrant_within_grace(
+        &self,
+        client: &Client,
+        client_auth: &ClientAuth,
+        token: &TokenInfo,
+        refresh_token: &str,
+        proof: &DpopProof,
+        now: u64,
+    ) -> Option<TokenResponse> {
+        let (window, store) = self.refresh_grace.as_ref()?;
+        let age = now.saturating_sub(token.data.updated_at);
+        if age >= *window {
+            return None;
+        }
+        self.check_refresh_session(client, client_auth, token, proof, now)
+            .ok()?;
+        let previous = store
+            .is_previous_refresh_token(&token.token_id, refresh_token)
+            .await;
+        if !matches!(previous, Ok(true)) {
+            return None;
+        }
+        let response = self
+            .build_token_response(
+                &token.token_id,
+                &token.data,
+                token.current_refresh_token.clone(),
+                now,
+            )
+            .ok()?;
+        tracing::info!(
+            token_id = %token.token_id,
+            client_id = %client.id,
+            age,
+            "answered a retried refresh with the current tokens"
+        );
+        Some(response)
+    }
+
+    fn check_refresh_session(
         &self,
         client: &Client,
         client_auth: &ClientAuth,
         token: &TokenInfo,
         proof: &DpopProof,
         now: u64,
-    ) -> Result<TokenResponse, OAuthError> {
+    ) -> Result<(), OAuthError> {
         if token.data.client_id != client.id {
             return Err(OAuthError::InvalidGrant(
                 "refresh token was issued to another client".to_string(),
@@ -1084,7 +1137,18 @@ impl OAuthProvider {
         }
         token
             .data
-            .validate_refresh_lifetimes(now, self.trusted_clients.contains(&client.id))?;
+            .validate_refresh_lifetimes(now, self.trusted_clients.contains(&client.id))
+    }
+
+    async fn validate_refresh(
+        &self,
+        client: &Client,
+        client_auth: &ClientAuth,
+        token: &TokenInfo,
+        proof: &DpopProof,
+        now: u64,
+    ) -> Result<TokenResponse, OAuthError> {
+        self.check_refresh_session(client, client_auth, token, proof, now)?;
         // The grants are recompiled from the request the user accepted so a
         // changed permission set takes effect at refresh; when the sets cannot
         // be resolved the session keeps what it had rather than dying.
@@ -1149,7 +1213,7 @@ impl OAuthProvider {
         Ok(TokenResponse {
             access_token,
             token_type: "DPoP".to_string(),
-            expires_in: TOKEN_MAX_AGE,
+            expires_in: data.expires_at.saturating_sub(now),
             refresh_token,
             scope: data.granted_scope().to_string(),
             sub: data.did.clone(),
@@ -1505,6 +1569,7 @@ mod tests {
         trusted: Vec<String>,
         sessions_since: Option<u64>,
         expander: bool,
+        refresh_grace: Option<u64>,
     }
 
     fn account(did: &str, handle: &str, email: Option<&str>) -> AccountInfo {
@@ -1548,6 +1613,10 @@ mod tests {
                 .then(|| expander.clone() as Arc<dyn ScopeExpander>),
             sessions_since: options.sessions_since,
         });
+        let provider = match options.refresh_grace {
+            Some(window) => provider.with_refresh_grace(window, store.clone()),
+            None => provider,
+        };
         Setup {
             provider,
             store,
@@ -2806,6 +2875,158 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.error_description().contains("expired"));
+    }
+
+    fn setup_with_grace(window: u64) -> Setup {
+        build_setup(
+            vec![public_metadata(CLIENT_ID), public_metadata(OTHER_CLIENT_ID)],
+            SetupOptions {
+                refresh_grace: Some(window),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Returns the rotated-out refresh token and the rotation's response.
+    async fn rotated_session(setup: &Setup, key: &Jwk, rotated_at: u64) -> (String, TokenResponse) {
+        let code = run_authorization(setup, CLIENT_ID, key, NOW).await;
+        let tokens = run_token(setup, CLIENT_ID, key, &code, NOW).await.unwrap();
+        let previous = tokens.refresh_token.unwrap();
+        let rotated = run_refresh(setup, CLIENT_ID, key, &previous, rotated_at)
+            .await
+            .unwrap();
+        (previous, rotated)
+    }
+
+    async fn assert_replay_revokes(
+        setup: &Setup,
+        client_id: &str,
+        key: &Jwk,
+        refresh_token: &str,
+        current: &TokenResponse,
+        now: u64,
+    ) {
+        let err = run_refresh(setup, client_id, key, refresh_token, now)
+            .await
+            .unwrap_err();
+        assert_eq!(err.error_description(), "Refresh token replayed");
+        let err = run_verify(setup, &dpop_key(), &current.access_token, now)
+            .await
+            .unwrap_err();
+        assert_eq!(err.error_description(), "Invalid token");
+    }
+
+    #[tokio::test]
+    async fn refresh_grace_reissues_current_tokens() {
+        let setup = setup_with_grace(60);
+        let key = dpop_key();
+        let (previous, rotated) = rotated_session(&setup, &key, NOW + 100).await;
+        let current = rotated.refresh_token.clone().unwrap();
+
+        for now in [NOW + 100, NOW + 130, NOW + 159] {
+            let retried = run_refresh(&setup, CLIENT_ID, &key, &previous, now)
+                .await
+                .unwrap();
+            assert_eq!(retried.refresh_token.as_deref(), Some(current.as_str()));
+            assert_eq!(retried.expires_in, NOW + 100 + TOKEN_MAX_AGE - now);
+            assert_eq!(retried.scope, rotated.scope);
+            assert_eq!(retried.sub, rotated.sub);
+            run_verify(&setup, &key, &retried.access_token, now)
+                .await
+                .unwrap();
+        }
+        // the tokens from the first response keep working
+        run_verify(&setup, &key, &rotated.access_token, NOW + 160)
+            .await
+            .unwrap();
+        let next = run_refresh(&setup, CLIENT_ID, &key, &current, NOW + 200)
+            .await
+            .unwrap();
+
+        // two generations back is a replay, even inside the window
+        assert_replay_revokes(&setup, CLIENT_ID, &key, &previous, &next, NOW + 210).await;
+    }
+
+    #[tokio::test]
+    async fn refresh_grace_concurrent_retries_agree() {
+        let setup = setup_with_grace(60);
+        let key = dpop_key();
+        let (previous, rotated) = rotated_session(&setup, &key, NOW + 100).await;
+
+        let (first, second) = tokio::join!(
+            run_refresh(&setup, CLIENT_ID, &key, &previous, NOW + 105),
+            run_refresh(&setup, CLIENT_ID, &key, &previous, NOW + 105),
+        );
+        assert_eq!(first.unwrap().refresh_token, rotated.refresh_token);
+        assert_eq!(second.unwrap().refresh_token, rotated.refresh_token);
+        let tokens = setup.store.list_account_tokens("did:plc:alice").await;
+        let tokens = tokens.unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].current_refresh_token, rotated.refresh_token);
+    }
+
+    #[tokio::test]
+    async fn refresh_grace_rejections_revoke_the_session() {
+        let key = dpop_key();
+        let rotated_at = NOW + 100;
+
+        // past the window
+        let setup = setup_with_grace(60);
+        let (previous, rotated) = rotated_session(&setup, &key, rotated_at).await;
+        assert_replay_revokes(
+            &setup,
+            CLIENT_ID,
+            &key,
+            &previous,
+            &rotated,
+            rotated_at + 60,
+        )
+        .await;
+
+        // a window of zero turns the grace off
+        let setup = setup_with_grace(0);
+        let (previous, rotated) = rotated_session(&setup, &key, rotated_at).await;
+        assert_replay_revokes(&setup, CLIENT_ID, &key, &previous, &rotated, rotated_at).await;
+
+        // another DPoP key
+        let setup = setup_with_grace(60);
+        let (previous, rotated) = rotated_session(&setup, &key, rotated_at).await;
+        assert_replay_revokes(
+            &setup,
+            CLIENT_ID,
+            &other_dpop_key(),
+            &previous,
+            &rotated,
+            rotated_at + 1,
+        )
+        .await;
+
+        // another client
+        let setup = setup_with_grace(60);
+        let (previous, rotated) = rotated_session(&setup, &key, rotated_at).await;
+        assert_replay_revokes(
+            &setup,
+            OTHER_CLIENT_ID,
+            &key,
+            &previous,
+            &rotated,
+            rotated_at + 1,
+        )
+        .await;
+
+        // a session past its lifetime
+        let setup = setup_with_grace(60);
+        let lifetime = crate::token::PUBLIC_CLIENT_SESSION_LIFETIME;
+        let (previous, rotated) = rotated_session(&setup, &key, NOW + lifetime).await;
+        assert_replay_revokes(
+            &setup,
+            CLIENT_ID,
+            &key,
+            &previous,
+            &rotated,
+            NOW + lifetime + 1,
+        )
+        .await;
     }
 
     #[tokio::test]

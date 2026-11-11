@@ -6,7 +6,7 @@ use rocket::fairing::{Fairing, Info, Kind};
 use rocket::http::{Cookie, CookieJar, Header, SameSite};
 use rocket::time::Duration;
 use rocket::{Request, Response};
-use rsky_common::env::{env_list, env_str};
+use rsky_common::env::{env_int, env_list, env_str};
 use rsky_oauth::dpop::{
     DpopManager, DpopNonce, InMemoryReplayStore, ReplayStore, DEFAULT_ROTATION_INTERVAL,
 };
@@ -138,17 +138,20 @@ impl SharedOAuthProvider {
             None => DpopNonce::new_random(DEFAULT_ROTATION_INTERVAL),
         }
         .expect("valid DPoP nonce rotation interval");
+        let store = Arc::new(PdsOAuthStore::new(account_db));
+        let refresh_grace = env_int("PDS_OAUTH_REFRESH_GRACE_SECONDS").unwrap_or(60) as u64;
         let provider = OAuthProvider::new(OAuthProviderConfig {
             issuer,
             audience,
             signing_key,
             fetcher: Arc::new(fetcher::HttpClientMetadataFetcher::default()),
-            store: Arc::new(PdsOAuthStore::new(account_db)),
+            store: store.clone(),
             dpop: DpopManager::new(Some(nonce), replay_store),
             trusted_clients: env_list("PDS_OAUTH_TRUSTED_CLIENTS"),
             scope_expander: Some(Arc::new(IncludeExpander::default())),
             sessions_since,
-        });
+        })
+        .with_refresh_grace(refresh_grace, store);
         Self {
             secure_cookies: provider.issuer().starts_with("https://"),
             provider: Arc::new(provider),

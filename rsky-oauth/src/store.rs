@@ -172,6 +172,16 @@ pub trait OAuthStore: Send + Sync {
     async fn delete_authorized_clients(&self, did: &str) -> Result<(), OAuthError>;
 }
 
+/// Identifies the refresh token a session's latest rotation replaced.
+#[async_trait::async_trait]
+pub trait RefreshGraceStore: Send + Sync {
+    async fn is_previous_refresh_token(
+        &self,
+        token_id: &str,
+        refresh_token: &str,
+    ) -> Result<bool, OAuthError>;
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct Membership {
     created_at: u64,
@@ -185,6 +195,8 @@ struct MemoryState {
     /// Insertion order of token ids, so listings are stable.
     token_order: Vec<String>,
     used_refresh_tokens: HashMap<String, String>,
+    /// Token id to the refresh token its latest rotation replaced.
+    previous_refresh_tokens: HashMap<String, String>,
     accounts: HashMap<String, (AccountInfo, String)>,
     devices: HashMap<String, DeviceData>,
     device_accounts: HashMap<(String, String), Membership>,
@@ -275,6 +287,21 @@ impl MemoryOAuthStore {
             data: data.clone(),
             current_refresh_token: refresh.clone(),
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl RefreshGraceStore for MemoryOAuthStore {
+    async fn is_previous_refresh_token(
+        &self,
+        token_id: &str,
+        refresh_token: &str,
+    ) -> Result<bool, OAuthError> {
+        let state = self.state.lock().expect("memory store lock poisoned");
+        Ok(state
+            .previous_refresh_tokens
+            .get(token_id)
+            .is_some_and(|previous| previous == refresh_token))
     }
 }
 
@@ -391,10 +418,14 @@ impl OAuthStore for MemoryOAuthStore {
         let Some((mut data, refresh)) = state.tokens.remove(token_id) else {
             return Err(OAuthError::ServerError("unknown token".to_string()));
         };
+        state.previous_refresh_tokens.remove(token_id);
         if let Some(refresh) = refresh {
             state
                 .used_refresh_tokens
-                .insert(refresh, new_token_id.to_string());
+                .insert(refresh.clone(), new_token_id.to_string());
+            state
+                .previous_refresh_tokens
+                .insert(new_token_id.to_string(), refresh);
         }
         // rewire previously-used refresh tokens to the rotated id
         for used_token_id in state.used_refresh_tokens.values_mut() {
@@ -426,6 +457,7 @@ impl OAuthStore for MemoryOAuthStore {
         state
             .used_refresh_tokens
             .retain(|_, used_token_id| used_token_id != token_id);
+        state.previous_refresh_tokens.remove(token_id);
         Ok(())
     }
 
@@ -450,6 +482,7 @@ impl OAuthStore for MemoryOAuthStore {
             .collect();
         for token_id in &removed {
             state.tokens.remove(token_id);
+            state.previous_refresh_tokens.remove(token_id);
         }
         state
             .token_order
@@ -1097,6 +1130,40 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(found.token_id, "tok-4");
+
+        // only the refresh token the latest rotation replaced is "previous"
+        for (token_id, refresh, expected) in [
+            ("tok-4", "ref-2", true),
+            ("tok-4", "ref-1", false),
+            ("tok-4", "ref-4", false),
+            ("tok-2", "ref-1", false),
+        ] {
+            assert_eq!(
+                store
+                    .is_previous_refresh_token(token_id, refresh)
+                    .await
+                    .unwrap(),
+                expected
+            );
+        }
+        store.delete_token("tok-4").await.unwrap();
+        assert!(!store
+            .is_previous_refresh_token("tok-4", "ref-2")
+            .await
+            .unwrap());
+        store
+            .create_token("tok-5", &token, Some("ref-5"))
+            .await
+            .unwrap();
+        store
+            .rotate_token("tok-5", "tok-6", "ref-6", 5, 6, None)
+            .await
+            .unwrap();
+        store.remove_tokens_by_did("did:plc:alice").await.unwrap();
+        assert!(!store
+            .is_previous_refresh_token("tok-6", "ref-5")
+            .await
+            .unwrap());
     }
 
     #[test]

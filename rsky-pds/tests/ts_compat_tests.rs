@@ -957,7 +957,7 @@ async fn reference_oauth_sessions_authenticate() {
 }
 
 /// A refresh token the reference PDS issued rotates on rsky-pds, and a
-/// replay of the consumed refresh token revokes the session.
+/// replay of a long-consumed refresh token revokes the session.
 #[tokio::test]
 async fn reference_oauth_refresh_tokens_rotate() {
     let (fixture, _dir, client) = get_client_with_fixture_copy().await;
@@ -1000,7 +1000,24 @@ async fn reference_oauth_refresh_tokens_rotate() {
         serde_json::json!({"error": "invalid_token", "message": "Invalid token"})
     );
 
-    // replaying the consumed refresh token is refused and revokes the session
+    let next_form = format!(
+        "grant_type=refresh_token&refresh_token={}&client_id={}",
+        json["refresh_token"].as_str().unwrap(),
+        urlencoding::encode(client_id)
+    );
+    let (status, json, _) = dpop_request(
+        &client,
+        "POST",
+        "/oauth/token",
+        &key,
+        None,
+        Some(&next_form),
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{json}");
+    let access = json["access_token"].as_str().unwrap();
+
+    // replaying an older consumed refresh token is refused and revokes the session
     let (status, json, _) =
         dpop_request(&client, "POST", "/oauth/token", &key, None, Some(&form)).await;
     let exercised = fixture.oauth("alice-exercised");

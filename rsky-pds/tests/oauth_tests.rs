@@ -296,7 +296,42 @@ async fn oauth_full_flow_with_dpop_bound_resource_access() {
     let new_refresh_token = rotated["refresh_token"].as_str().unwrap().to_string();
     assert_ne!(new_refresh_token, refresh_token);
 
-    // replaying the rotated-out refresh token kills the session
+    // a retry with the token that was just rotated out gets the current tokens
+    let response = client
+        .post("/oauth/token")
+        .header(ContentType::Form)
+        .header(Header::new(
+            "DPoP",
+            dpop_proof(&key, "POST", &token_htu, Some(&nonce), None),
+        ))
+        .body(form_encode(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", &refresh_token),
+            ("client_id", LOOPBACK_CLIENT_ID),
+        ]))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let retried: Value = serde_json::from_str(&response.into_string().await.unwrap()).unwrap();
+    assert_eq!(retried["refresh_token"], new_refresh_token.as_str());
+
+    let response = client
+        .post("/oauth/token")
+        .header(ContentType::Form)
+        .header(Header::new(
+            "DPoP",
+            dpop_proof(&key, "POST", &token_htu, Some(&nonce), None),
+        ))
+        .body(form_encode(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", &new_refresh_token),
+            ("client_id", LOOPBACK_CLIENT_ID),
+        ]))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+
+    // replaying a refresh token from before the previous rotation kills the session
     let response = client
         .post("/oauth/token")
         .header(ContentType::Form)

@@ -5,7 +5,7 @@ use anyhow::Result;
 use rsky_common::time::from_str_to_micros;
 use rsky_common::RFC3339_VARIANT;
 use rsky_oauth::request::RequestData;
-use rsky_oauth::store::{AccountInfo, DeviceAccount, DeviceData, OAuthStore};
+use rsky_oauth::store::{AccountInfo, DeviceAccount, DeviceData, OAuthStore, RefreshGraceStore};
 use rsky_oauth::token::{TokenData, TokenInfo};
 use rsky_oauth::types::{AuthorizationRequestParameters, ClientAuth};
 use rsky_oauth::OAuthError;
@@ -260,6 +260,34 @@ impl PdsOAuthStore {
             }
         }
         Ok(found)
+    }
+}
+
+#[async_trait::async_trait]
+impl RefreshGraceStore for PdsOAuthStore {
+    async fn is_previous_refresh_token(
+        &self,
+        token_id: &str,
+        refresh_token: &str,
+    ) -> Result<bool, OAuthError> {
+        let token_id = token_id.to_string();
+        let refresh_token = refresh_token.to_string();
+        self.db
+            .run(move |conn| {
+                // Rows are only appended per session, so the highest rowid is the latest.
+                let previous: Option<bool> = conn
+                    .query_row(
+                        "SELECT u.\"refreshToken\" = ?2 FROM used_refresh_token u \
+                         JOIN token t ON t.id = u.\"tokenId\" WHERE t.\"tokenId\" = ?1 \
+                         ORDER BY u.rowid DESC LIMIT 1",
+                        params![token_id, refresh_token],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                Ok(previous.unwrap_or(false))
+            })
+            .await
+            .map_err(server_error)
     }
 }
 
@@ -1112,6 +1140,33 @@ mod tests {
             .unwrap();
         assert_eq!(replay.token_id, "tok-2");
         assert_eq!(replay.current_refresh_token.as_deref(), Some("ref-2"));
+
+        // only the refresh token the latest rotation replaced is "previous"
+        assert!(!store
+            .is_previous_refresh_token("tok-1", "ref-1")
+            .await
+            .unwrap());
+        assert!(store
+            .is_previous_refresh_token("tok-2", "ref-1")
+            .await
+            .unwrap());
+        store
+            .rotate_token("tok-2", "tok-7", "ref-7", NOW + 110, NOW + 3710, None)
+            .await
+            .unwrap();
+        for (refresh, expected) in [("ref-2", true), ("ref-1", false), ("ref-7", false)] {
+            assert_eq!(
+                store
+                    .is_previous_refresh_token("tok-7", refresh)
+                    .await
+                    .unwrap(),
+                expected
+            );
+        }
+        store
+            .rotate_token("tok-7", "tok-2", "ref-8", NOW + 120, NOW + 3720, None)
+            .await
+            .unwrap();
 
         // a used refresh token cannot back a new token
         assert!(store

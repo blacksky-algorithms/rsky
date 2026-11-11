@@ -144,6 +144,7 @@ Mount a volume at `PDS_DATA_DIRECTORY` to persist data.
 | `PDS_OAUTH_TRUSTED_CLIENTS` | Comma-separated client IDs shown by name and logo on the consent page and allowed to keep their `prompt` |
 | `PDS_OAUTH_FIRST_PARTY_CLIENTS` | Comma-separated client IDs operated by this deployment; the identity-takeover warning on consent is not shown for one that is also trusted |
 | `PDS_DPOP_SECRET` | 32 hex bytes keying DPoP nonces; random per process when unset |
+| `PDS_OAUTH_REFRESH_GRACE_SECONDS` | How long after a refresh the token it replaced still returns the session's current tokens, so a client that lost the response can retry (default `60`; `0` disables) |
 
 ### Browser pages
 

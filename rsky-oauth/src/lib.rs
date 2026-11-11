@@ -39,5 +39,7 @@ pub use provider::{
     OAuthProvider, OAuthProviderConfig, ParResponse, ScopeExpandError, ScopeExpander, SessionInfo,
     SignInResult, TokenRequest, VerifiedAccess,
 };
-pub use store::{AccountInfo, DeviceAccount, DeviceData, MemoryOAuthStore, OAuthStore};
+pub use store::{
+    AccountInfo, DeviceAccount, DeviceData, MemoryOAuthStore, OAuthStore, RefreshGraceStore,
+};
 pub use types::{AuthorizationRequestParameters, ClientAuth, OAuthClientMetadata, TokenResponse};
