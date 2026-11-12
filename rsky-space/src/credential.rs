@@ -42,11 +42,46 @@ pub struct JwtHeader {
     pub kid: Option<String>,
 }
 
-/// RFC 9449 confirmation claim: the thumbprint of the key the credential is
-/// bound to.
+/// Confirmation claim: the key the credential is bound to. Exactly one of the
+/// two is set.
+///
+/// - `jkt`: the RFC 9449 thumbprint of a DPoP key, for a credential presented
+///   under the DPoP scheme.
+/// - `kid`: a P-256 `did:key`, for a credential presented under the
+///   `Atproto-Space-Credential` scheme with an HTTP Message Signature by that
+///   key (proposal §Space credential).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Confirmation {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub jkt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kid: Option<String>,
+}
+
+impl Confirmation {
+    /// Bound to the DPoP key with this thumbprint.
+    pub fn jkt(thumbprint: impl Into<String>) -> Self {
+        Self {
+            jkt: thumbprint.into(),
+            kid: None,
+        }
+    }
+
+    /// Bound to `did_key`, which must be a P-256 `did:key`: the proposal
+    /// requires the presentation signature to be `ecdsa-p256-sha256`.
+    pub fn kid(did_key: &str) -> Result<Self> {
+        let parsed = rsky_crypto::did::parse_did_key(&did_key.to_string())
+            .map_err(|error| SpaceError::InvalidClaim(format!("credential key: {error}")))?;
+        if parsed.jwt_alg != rsky_crypto::constants::P256_JWT_ALG {
+            return Err(SpaceError::InvalidClaim(
+                "credential key must be a P-256 did:key".into(),
+            ));
+        }
+        Ok(Self {
+            jkt: String::new(),
+            kid: Some(did_key.to_string()),
+        })
+    }
 }
 
 /// Claims common to delegation tokens and space credentials.
@@ -180,10 +215,11 @@ pub fn verify_delegation_token(
 /// - not expired
 /// - signature verifies against the authority's space `did:key`
 ///
-/// Returns the `cnf.jkt` the credential is bound to. A credential reads every
-/// repo in its space and is presented to each host in turn, so an unbound one
-/// is a shared secret any of those hosts could replay against the others: the
-/// binding is required, not optional (proposals#99).
+/// Returns the `cnf.jkt` the credential is bound to, refusing one bound by
+/// `cnf.kid`: for callers that accept only the DPoP presentation. A credential
+/// reads every repo in its space and is presented to each host in turn, so an
+/// unbound one is a shared secret any of those hosts could replay against the
+/// others: the binding is required, not optional (proposals#99).
 pub fn verify_space_credential(
     jwt: &str,
     space_uri: &str,
@@ -191,6 +227,28 @@ pub fn verify_space_credential(
     authority_space_key: &str,
     now: u64,
 ) -> Result<String> {
+    let binding =
+        verify_space_credential_binding(jwt, space_uri, authority_did, authority_space_key, now)?;
+    if binding.jkt.is_empty() {
+        return Err(SpaceError::InvalidClaim(
+            "credential is not DPoP-bound".into(),
+        ));
+    }
+    Ok(binding.jkt)
+}
+
+/// As [`verify_space_credential`], but returns whichever binding the
+/// credential carries: `cnf.jkt` for the DPoP presentation, or `cnf.kid` for
+/// the `Atproto-Space-Credential` one. A credential with neither, or with both,
+/// is refused, so the presentation it must be checked against is never in
+/// doubt.
+pub fn verify_space_credential_binding(
+    jwt: &str,
+    space_uri: &str,
+    authority_did: &str,
+    authority_space_key: &str,
+    now: u64,
+) -> Result<Confirmation> {
     let decoded = decode(jwt)?;
     if decoded.header.typ != CREDENTIAL_TYP {
         return Err(SpaceError::InvalidClaim("wrong typ".into()));
@@ -204,16 +262,16 @@ pub fn verify_space_credential(
     if now >= decoded.claims.exp {
         return Err(SpaceError::Expired);
     }
-    let jkt = match &decoded.claims.cnf {
-        Some(cnf) if !cnf.jkt.is_empty() => cnf.jkt.clone(),
+    let binding = match &decoded.claims.cnf {
+        Some(cnf) if cnf.jkt.is_empty() != cnf.kid.is_none() => cnf.clone(),
         _ => {
             return Err(SpaceError::InvalidClaim(
-                "credential is not DPoP-bound".into(),
+                "credential must be bound by exactly one of cnf.jkt and cnf.kid".into(),
             ))
         }
     };
     verify_signature(&decoded, authority_space_key)?;
-    Ok(jkt)
+    Ok(binding)
 }
 
 fn b64(s: &str) -> Result<Vec<u8>> {
@@ -266,9 +324,7 @@ mod tests {
             iat: 1000,
             exp: 8200,
             jti: "nonce123".to_string(),
-            cnf: Some(Confirmation {
-                jkt: "test-jkt".to_string(),
-            }),
+            cnf: Some(Confirmation::jkt("test-jkt")),
         };
         // Deterministic fake signer: 64 zero bytes.
         let jwt = encode(&header, &claims, |_| Ok(vec![0u8; 64])).unwrap();
@@ -353,9 +409,7 @@ mod tests {
             iat: 1000,
             exp: 1000 + CREDENTIAL_TTL_SECS,
             jti: "k256-nonce".to_string(),
-            cnf: Some(Confirmation {
-                jkt: "test-jkt".to_string(),
-            }),
+            cnf: Some(Confirmation::jkt("test-jkt")),
         };
         let jwt = encode(&header, &claims, |input| {
             let digest = sha2::Sha256::digest(input);
@@ -368,6 +422,88 @@ mod tests {
 
         verify_space_credential(&jwt, space, "did:plc:authority", &did_key, 1000)
             .expect("secp256k1-signed credential must verify");
+    }
+
+    #[test]
+    fn the_binding_decides_the_presentation() {
+        use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
+        let secret = SecretKey::from_slice(&[0x52u8; 32]).unwrap();
+        let did_key = rsky_crypto::utils::encode_did_key(&PublicKey::from_secret_key(
+            &Secp256k1::new(),
+            &secret,
+        ));
+        let space = "at://did:plc:authority/space/community.blacksky.feed/main";
+        let mint = |cnf: Confirmation| {
+            let header = JwtHeader {
+                typ: CREDENTIAL_TYP.to_string(),
+                alg: "ES256K".to_string(),
+                kid: Some("#atproto_space".to_string()),
+            };
+            let claims = SpaceClaims {
+                iss: "did:plc:authority".to_string(),
+                sub: space.to_string(),
+                aud: None,
+                iat: 1000,
+                exp: 1000 + CREDENTIAL_TTL_SECS,
+                jti: "binding".to_string(),
+                cnf: Some(cnf),
+            };
+            encode(&header, &claims, |input| {
+                let digest = sha2::Sha256::digest(input);
+                let msg = Message::from_digest_slice(&digest).map_err(|e| e.to_string())?;
+                let mut sig = secret.sign_ecdsa(msg);
+                sig.normalize_s();
+                Ok(sig.serialize_compact().to_vec())
+            })
+            .unwrap()
+        };
+        let p256_kid = {
+            let key = p256::ecdsa::SigningKey::from_slice(&[0x31u8; 32]).unwrap();
+            let sec1 = key
+                .verifying_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec();
+            rsky_crypto::did::format_did_key(rsky_crypto::constants::P256_JWT_ALG.to_string(), sec1)
+                .unwrap()
+        };
+
+        // A `kid` binding is returned by the binding-aware check and refused by
+        // the DPoP-only one.
+        let kid_bound = mint(Confirmation::kid(&p256_kid).unwrap());
+        let binding =
+            verify_space_credential_binding(&kid_bound, space, "did:plc:authority", &did_key, 1000)
+                .unwrap();
+        assert_eq!(binding.kid.as_deref(), Some(p256_kid.as_str()));
+        assert!(binding.jkt.is_empty());
+        assert!(
+            verify_space_credential(&kid_bound, space, "did:plc:authority", &did_key, 1000)
+                .is_err()
+        );
+
+        // Both bindings at once, or neither, is refused.
+        for cnf in [
+            Confirmation {
+                jkt: "test-jkt".to_string(),
+                kid: Some(p256_kid.clone()),
+            },
+            Confirmation {
+                jkt: String::new(),
+                kid: None,
+            },
+        ] {
+            assert!(verify_space_credential_binding(
+                &mint(cnf),
+                space,
+                "did:plc:authority",
+                &did_key,
+                1000
+            )
+            .is_err());
+        }
+
+        // `Confirmation::kid` takes only a P-256 did:key.
+        assert!(Confirmation::kid(&did_key).is_err());
     }
 
     #[test]
@@ -391,9 +527,7 @@ mod tests {
                 iat: 1000,
                 exp: 9000,
                 jti: "n".to_string(),
-                cnf: Some(Confirmation {
-                    jkt: "test-jkt".to_string(),
-                }),
+                cnf: Some(Confirmation::jkt("test-jkt")),
             };
             encode(&header, &claims, |_| Ok(vec![0u8; 64])).unwrap()
         };

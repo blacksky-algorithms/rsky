@@ -205,6 +205,28 @@ fn verify_lexicon_commit(commit: &Value, did_key: &str, space_uri: &str, author:
     .expect("served commit must verify");
 }
 
+/// A served commit in the unsigned shape (2026-10-22 spaces alpha): the five
+/// commit fields, `data` a 32-byte digest, and no signature material -- the
+/// MAC header is what vouches for it.
+fn check_space_commit(commit: &Value, space_uri: &str, author: &str) {
+    use base64::engine::general_purpose::STANDARD_NO_PAD;
+    use base64::Engine;
+    assert_eq!(commit["ver"], 1, "{commit}");
+    assert_eq!(commit["repo"], author, "{commit}");
+    assert_eq!(commit["space"], space_uri, "{commit}");
+    assert!(!commit["rev"].as_str().unwrap().is_empty(), "{commit}");
+    let data = STANDARD_NO_PAD
+        .decode(commit["data"]["$bytes"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(data.len(), 32);
+    for signed_only in ["sig", "ikm", "mac", "hash"] {
+        assert!(
+            commit.get(signed_only).is_none(),
+            "{signed_only} in {commit}"
+        );
+    }
+}
+
 struct Setup {
     _dir: TempDir,
     client: Client,
@@ -222,7 +244,7 @@ async fn setup() -> Setup {
         &client,
         "/xrpc/com.atproto.space.createSpace",
         &author_token,
-        json!({"type": SPACE_TYPE, "skey": "main", "policy": {"$type": "com.atproto.memberspace.policy"}}),
+        json!({"spaceType": SPACE_TYPE, "skey": "main", "policy": {"$type": "com.atproto.memberspace.policy"}}),
     )
     .await;
     assert_eq!(status, Status::Ok, "{body}");
@@ -298,7 +320,7 @@ async fn memberspace_management() {
         &s.client,
         "/xrpc/com.atproto.space.createSpace",
         &s.author_token,
-        json!({"type": SPACE_TYPE, "skey": "main", "policy": {"$type": "com.atproto.memberspace.policy"}}),
+        json!({"spaceType": SPACE_TYPE, "skey": "main", "policy": {"$type": "com.atproto.memberspace.policy"}}),
     )
     .await;
     assert_eq!(status, Status::BadRequest);
@@ -306,8 +328,8 @@ async fn memberspace_management() {
 
     // invalid space type / skey are rejected
     for bad in [
-        json!({"type": "notannsid"}),
-        json!({"type": SPACE_TYPE, "skey": "bad/key"}),
+        json!({"spaceType": "notannsid"}),
+        json!({"spaceType": SPACE_TYPE, "skey": "bad/key"}),
     ] {
         let (status, _) = post_json(
             &s.client,
@@ -319,7 +341,19 @@ async fn memberspace_management() {
         assert_eq!(status, Status::BadRequest);
     }
 
-    // omitted skey defaults to a TID
+    // a body that does not parse is the caller's error, not a 500
+    let (status, body) = post_json(
+        &s.client,
+        "/xrpc/com.atproto.space.createSpace",
+        &s.author_token,
+        json!({"policy": {"$type": "com.atproto.memberspace.policy"}}),
+    )
+    .await;
+    assert_eq!(status, Status::BadRequest, "{body}");
+    assert_eq!(body["error"], "InvalidRequest");
+
+    // omitted skey defaults to a TID; `type`, the name before `spaceType`,
+    // is still accepted
     let (status, body) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.createSpace",
@@ -554,6 +588,221 @@ async fn credential_mint_flow() {
     assert_eq!(body["error"], "AttestationRequired");
 }
 
+/// POST with no `Authorization` and no DPoP proof: the proposal's request.
+async fn post_unauthenticated(client: &Client, path: &str, body: Value) -> (Status, Value) {
+    let response = client
+        .post(path)
+        .header(ContentType::JSON)
+        .body(body.to_string())
+        .dispatch()
+        .await;
+    let status = response.status();
+    let body = response.into_json::<Value>().await.unwrap_or(Value::Null);
+    (status, body)
+}
+
+fn p256_did_key(seed: u8) -> String {
+    let signing_key = p256::ecdsa::SigningKey::from_slice(&[seed; 32]).unwrap();
+    let sec1 = signing_key
+        .verifying_key()
+        .to_encoded_point(false)
+        .as_bytes()
+        .to_vec();
+    rsky_crypto::did::format_did_key(rsky_crypto::constants::P256_JWT_ALG.to_string(), sec1)
+        .unwrap()
+}
+
+fn credential_claims(credential: &str) -> Value {
+    use base64::Engine;
+    let payload = credential.split('.').nth(1).unwrap();
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+async fn fresh_delegation(s: &Setup) -> String {
+    let (status, body) = get_json(
+        &s.client,
+        &format!(
+            "/xrpc/com.atproto.space.getDelegationToken?space={}",
+            s.space
+        ),
+        &s.member_token,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{body}");
+    body["token"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn body_bound_credential_flow() {
+    let s = setup().await;
+    let path = "/xrpc/com.atproto.space.getSpaceCredential";
+
+    // The proposal's request: unauthenticated, everything in the body, and the
+    // credential bound to the named key as `cnf.kid`.
+    let key = p256_did_key(0x31);
+    let (status, body) = post_unauthenticated(
+        &s.client,
+        path,
+        json!({ "space": s.space, "credentialKey": key, "delegationToken": fresh_delegation(&s).await }),
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{body}");
+    let claims = credential_claims(body["credential"].as_str().unwrap());
+    assert_eq!(claims["cnf"]["kid"], key);
+    assert!(claims["cnf"].get("jkt").is_none(), "{claims}");
+
+    // The proposal's prose names the field `credentialKid`.
+    let (status, body) = post_unauthenticated(
+        &s.client,
+        path,
+        json!({ "space": s.space, "credentialKid": key, "delegationToken": fresh_delegation(&s).await }),
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{body}");
+    assert_eq!(
+        credential_claims(body["credential"].as_str().unwrap())["cnf"]["kid"],
+        key
+    );
+
+    // A key that is not a P-256 did:key is refused before the delegation
+    // token is consumed, so the same token still works with a good key.
+    let delegation = fresh_delegation(&s).await;
+    let secp_key = encode_did_key(&actor_keypair(&s.client, MEMBER_DID).await.public_key());
+    for bad in [secp_key.as_str(), "not-a-did-key"] {
+        let (status, body) = post_unauthenticated(
+            &s.client,
+            path,
+            json!({ "space": s.space, "credentialKey": bad, "delegationToken": delegation }),
+        )
+        .await;
+        assert_eq!(status, Status::BadRequest, "{body}");
+        assert_eq!(body["error"], "InvalidRequest");
+    }
+    let (status, body) = post_unauthenticated(
+        &s.client,
+        path,
+        json!({ "space": s.space, "credentialKey": key, "delegationToken": delegation }),
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{body}");
+
+    // No key and no DPoP proof leaves nothing to bind to.
+    let (status, body) = post_unauthenticated(
+        &s.client,
+        path,
+        json!({ "space": s.space, "delegationToken": fresh_delegation(&s).await }),
+    )
+    .await;
+    assert_eq!(status, Status::BadRequest, "{body}");
+    assert!(body["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("credentialKey"));
+}
+
+/// GET with the given headers and nothing else.
+async fn get_with_headers(
+    client: &Client,
+    path: &str,
+    headers: Vec<(&str, String)>,
+) -> (Status, Value) {
+    let mut request = client.get(path.to_string());
+    for (name, value) in headers {
+        request = request.header(Header::new(name.to_string(), value));
+    }
+    let response = request.dispatch().await;
+    let status = response.status();
+    let body = response.into_json::<Value>().await.unwrap_or(Value::Null);
+    (status, body)
+}
+
+fn signed_headers(
+    credential: &str,
+    audience: &str,
+    key: &p256::ecdsa::SigningKey,
+) -> Vec<(&'static str, String)> {
+    let headers = rsky_space::http_signature::sign_credential_use(credential, audience, key);
+    vec![
+        ("authorization", headers.authorization),
+        ("atproto-space-audience", headers.audience),
+        ("signature-input", headers.signature_input),
+        ("signature", headers.signature),
+    ]
+}
+
+#[tokio::test]
+async fn signed_credential_presentation() {
+    let s = setup().await;
+    create_post(&s, "3ksigned", "hello signed").await;
+    let key = p256::ecdsa::SigningKey::from_slice(&[0x31; 32]).unwrap();
+    let (status, body) = post_unauthenticated(
+        &s.client,
+        "/xrpc/com.atproto.space.getSpaceCredential",
+        json!({ "space": s.space, "credentialKey": p256_did_key(0x31), "delegationToken": fresh_delegation(&s).await }),
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{body}");
+    let credential = body["credential"].as_str().unwrap().to_string();
+    let get_record = format!(
+        "/xrpc/com.atproto.space.getRecord?space={}&repo={AUTHOR_DID}&collection={COLLECTION}&rkey=3ksigned",
+        s.space
+    );
+    let list_repos = format!("/xrpc/com.atproto.space.listRepos?space={}", s.space);
+
+    // A repo read, signed for the repo's owner, and a space-host read, signed
+    // for the authority (the same DID here: the author owns the space).
+    let (status, body) = get_with_headers(
+        &s.client,
+        &get_record,
+        signed_headers(&credential, AUTHOR_DID, &key),
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{body}");
+    assert_eq!(body["value"]["text"], "hello signed");
+    let (status, body) = get_with_headers(
+        &s.client,
+        &list_repos,
+        signed_headers(&credential, AUTHOR_DID, &key),
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{body}");
+
+    // A refused credential answers 400 InvalidToken, as rsky answers every
+    // credential that fails verification.
+    //
+    // The signature covers `Authorization` exactly as sent, scheme case
+    // included, so re-casing it after signing breaks the signature.
+    let mut lowered = signed_headers(&credential, AUTHOR_DID, &key);
+    lowered[0].1 = format!("atproto-space-credential {credential}");
+    let (status, body) = get_with_headers(&s.client, &get_record, lowered).await;
+    assert_eq!(status, Status::BadRequest, "{body}");
+    assert_eq!(body["error"], "InvalidToken");
+
+    // An audience other than this request's, a signature by another key, and
+    // no signature at all are each refused.
+    let other_key = p256::ecdsa::SigningKey::from_slice(&[0x32; 32]).unwrap();
+    for headers in [
+        signed_headers(&credential, MEMBER_DID, &key),
+        signed_headers(&credential, AUTHOR_DID, &other_key),
+        signed_headers(&credential, AUTHOR_DID, &key)
+            .into_iter()
+            .filter(|(name, _)| *name != "signature")
+            .collect(),
+    ] {
+        let (status, body) = get_with_headers(&s.client, &get_record, headers).await;
+        assert_eq!(status, Status::BadRequest, "{body}");
+        assert_eq!(body["error"], "InvalidToken");
+    }
+
+    // A cnf.kid credential is not accepted under the DPoP scheme.
+    let (status, body) = get_json(&s.client, &get_record, &credential).await;
+    assert_eq!(status, Status::BadRequest, "{body}");
+    assert_eq!(body["error"], "InvalidToken");
+}
+
 #[tokio::test]
 async fn record_write_and_read_flow() {
     let s = setup().await;
@@ -679,7 +928,7 @@ async fn record_write_and_read_flow() {
     // the deleted record's create is stale: no value inlined
     assert!(ops[1].get("value").is_none());
     assert!(ops[2].get("cid").is_none());
-    verify_lexicon_commit(&body["commit"], &author_key, &s.space, AUTHOR_DID);
+    check_space_commit(&body["commit"], &s.space, AUTHOR_DID);
 
     // pagination: non-terminal pages omit the commit
     let (status, body) = get_json(
@@ -704,7 +953,7 @@ async fn record_write_and_read_flow() {
     )
     .await;
     assert_eq!(status, Status::Ok);
-    verify_lexicon_commit(&body["commit"], &author_key, &s.space, AUTHOR_DID);
+    check_space_commit(&body["commit"], &s.space, AUTHOR_DID);
     // a malformed cursor is rejected
     let (status, _) = get_json(
         &s.client,
@@ -717,7 +966,7 @@ async fn record_write_and_read_flow() {
     .await;
     assert_eq!(status, Status::BadRequest);
 
-    // getLatestCommit verifies
+    // getLatestCommit serves the unsigned commit
     let (status, body) = get_json(
         &s.client,
         &format!(
@@ -728,9 +977,9 @@ async fn record_write_and_read_flow() {
     )
     .await;
     assert_eq!(status, Status::Ok);
-    verify_lexicon_commit(&body["commit"], &author_key, &s.space, AUTHOR_DID);
+    check_space_commit(&body["commit"], &s.space, AUTHOR_DID);
 
-    // getRepoState is the same answer under the older name
+    // getRepoState, retired, still serves the signed commit for the same rev
     let (status, alias) = get_json(
         &s.client,
         &format!(
@@ -809,7 +1058,11 @@ async fn car_export_validates() {
         "/xrpc/com.atproto.space.getRepo?space={}&repo={AUTHOR_DID}",
         s.space
     );
-    let mut request = s.client.get(&path);
+    // The CAR is served only to a client that asks for it; STAR is the default.
+    let mut request = s
+        .client
+        .get(&path)
+        .header(Header::new("accept", "application/vnd.ipld.car"));
     for header in auth_headers(&s.client, "GET", &path, &credential) {
         request = request.header(header);
     }
@@ -837,8 +1090,9 @@ async fn car_export_validates() {
     assert_eq!(records.len(), 2);
     assert_eq!(records[0].0, format!("{COLLECTION}/3kfirst"));
 
-    // a repo that does not exist in the space 404s
-    let (status, _) = get_json(
+    // A member who has not written has no repo in the space: `RepoNotFound`,
+    // the error the lexicon declares, which clients read as an empty repo.
+    let (status, body) = get_json(
         &s.client,
         &format!(
             "/xrpc/com.atproto.space.getRepo?space={}&repo={MEMBER_DID}",
@@ -847,7 +1101,70 @@ async fn car_export_validates() {
         &credential,
     )
     .await;
-    assert_ne!(status, Status::Ok);
+    assert_eq!(status, Status::BadRequest, "{body}");
+    assert_eq!(body["error"], "RepoNotFound", "{body}");
+}
+
+#[tokio::test]
+async fn star_export_carries_the_commit_and_records() {
+    use rsky_space::star::{decode_star, Drisl};
+    let s = setup().await;
+    let credential = mint_credential(&s).await;
+    create_post(&s, "3ksecond", "more").await;
+    let last = create_post(&s, "3kfirst", "hello space").await;
+
+    let path = format!(
+        "/xrpc/com.atproto.space.getRepo?space={}&repo={AUTHOR_DID}",
+        s.space
+    );
+    let mut request = s.client.get(&path);
+    for header in auth_headers(&s.client, "GET", &path, &credential) {
+        request = request.header(header);
+    }
+    let response = request.dispatch().await;
+    assert_eq!(response.status(), Status::Ok);
+    assert_eq!(
+        response.headers().get_one("content-type"),
+        Some("application/octet-stream")
+    );
+    assert!(response
+        .headers()
+        .get_one("vary")
+        .unwrap_or_default()
+        .contains("Accept"));
+    let archive = decode_star(&response.into_bytes().await.unwrap()).unwrap();
+
+    // The metadata is the unsigned commit as of the last write.
+    let meta = &archive.metadata;
+    assert_eq!(
+        meta.get("$type"),
+        Some(&Drisl::Str("atproto-space-repo".to_string()))
+    );
+    assert_eq!(meta.get("ver"), Some(&Drisl::Int(1)));
+    assert_eq!(meta.get("repo"), Some(&Drisl::Str(AUTHOR_DID.to_string())));
+    assert_eq!(meta.get("space"), Some(&Drisl::Str(s.space.clone())));
+    assert_eq!(
+        meta.get("rev"),
+        Some(&Drisl::Str(
+            last["commit"]["rev"].as_str().unwrap().to_string()
+        ))
+    );
+    assert_eq!(
+        meta.get("data"),
+        Some(&Drisl::Bytes(
+            hex::decode(last["commit"]["hash"].as_str().unwrap()).unwrap()
+        ))
+    );
+
+    // Every record, in path order whatever order they were written in.
+    let keys: Vec<String> = archive.pairs.iter().map(|(key, _)| key.clone()).collect();
+    assert_eq!(
+        keys,
+        vec![
+            format!("{COLLECTION}/3kfirst"),
+            format!("{COLLECTION}/3ksecond")
+        ]
+    );
 }
 
 #[tokio::test]
@@ -999,6 +1316,10 @@ async fn host_methods_and_notifications() {
     .await;
     assert_eq!(status, Status::Ok, "{body}");
     assert_eq!(body["policy"]["$type"], "com.atproto.memberspace.policy");
+    // `space`, and `uri` with the same value for clients of the spaces
+    // specification before the field was renamed
+    assert_eq!(body["space"], s.space.as_str());
+    assert_eq!(body["uri"], body["space"]);
     // an OAuth read_self session is also accepted (spec §XRPC API)
     let (status, _) = get_json(
         &s.client,
@@ -1051,7 +1372,23 @@ async fn host_methods_and_notifications() {
     let repos = body["repos"].as_array().unwrap();
     assert_eq!(repos.len(), 1);
     assert_eq!(repos[0]["did"], AUTHOR_DID);
-    assert!(!repos[0]["rev"].as_str().unwrap().is_empty());
+    assert!(!repos[0]["repoRev"].as_str().unwrap().is_empty());
+    assert!(repos[0]["data"]["$bytes"].as_str().is_some());
+    let space_rev = repos[0]["spaceRev"].as_str().unwrap().to_string();
+    // the cursor is the last entry's spaceRev, and past it the feed is empty
+    assert_eq!(body["cursor"], space_rev.as_str());
+    let (status, caught_up) = get_json(
+        &s.client,
+        &format!(
+            "/xrpc/com.atproto.space.listRepos?space={}&cursor={space_rev}",
+            s.space
+        ),
+        &credential,
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    assert!(caught_up["repos"].as_array().unwrap().is_empty());
+    assert!(caught_up.get("cursor").is_none());
 
     // registerNotify: repo-level and space-level
     let (status, body) = post_json(
@@ -1137,6 +1474,48 @@ async fn host_methods_and_notifications() {
     .await;
     assert_eq!(body["repos"].as_array().unwrap().len(), 2);
 
+    // The current shape, `repoRev` and `data`, advances the member, and the
+    // notified digest is what listRepos reports; a notice that does not advance
+    // the member is accepted and ignored.
+    let member_entry = |body: &Value| {
+        body["repos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|repo| repo["did"] == MEMBER_DID)
+            .cloned()
+            .unwrap()
+    };
+    for (rev, advances) in [("3kmemberrew", true), ("3kmemberreu", false)] {
+        let token = mint_space_service_token(
+            &member_keypair,
+            MEMBER_DID,
+            &format!("{AUTHOR_DID}#atproto_pds"),
+            NOTIFY_WRITE_LXM,
+        )
+        .unwrap();
+        let (status, body) = post_json(
+            &s.client,
+            "/xrpc/com.atproto.space.notifyWrite",
+            &token,
+            json!({"space": s.space, "repo": MEMBER_DID, "repoRev": rev, "data": {"$bytes": "AQID"}}),
+        )
+        .await;
+        assert_eq!(status, Status::Ok, "{body}");
+        let (_, body) = get_json(
+            &s.client,
+            &format!("/xrpc/com.atproto.space.listRepos?space={}", s.space),
+            &credential,
+        )
+        .await;
+        let member = member_entry(&body);
+        assert_eq!(
+            member["repoRev"], "3kmemberrew",
+            "{rev} advances: {advances}"
+        );
+        assert_eq!(member["data"]["$bytes"], "AQID");
+    }
+
     // an iss/did mismatch is rejected
     let bad_token =
         mint_space_service_token(&member_keypair, MEMBER_DID, AUTHOR_DID, NOTIFY_WRITE_LXM)
@@ -1183,6 +1562,34 @@ async fn delete_space_flow() {
     )
     .await;
     assert_eq!(status, Status::Ok);
+    // The syncer's registration, read straight from the authority's store.
+    let author_db = s
+        .client
+        .rocket()
+        .state::<ActorStore>()
+        .unwrap()
+        .get_location(AUTHOR_DID)
+        .unwrap()
+        .db_location;
+    let host_registrations = || -> i64 {
+        rusqlite::Connection::open(&author_db)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM space_host_reg WHERE space_uri = ?1",
+                [&s.space],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(host_registrations(), 1);
+    // The member was enrolled by putMember, so the space is in their list.
+    let (_, body) = get_json(
+        &s.client,
+        "/xrpc/com.atproto.space.listSpaces",
+        &s.member_token,
+    )
+    .await;
+    assert_eq!(body["spaces"][0]["uri"], s.space, "{body}");
 
     // only the authority can delete
     let (status, _) = post_json(
@@ -1202,6 +1609,8 @@ async fn delete_space_flow() {
     )
     .await;
     assert_eq!(status, Status::Ok);
+    // Deletion ends the space's notify registrations.
+    assert_eq!(host_registrations(), 0);
 
     // the space no longer answers, and no new credentials are minted
     let (status, body) = get_json(
@@ -1266,6 +1675,14 @@ async fn delete_space_flow() {
     )
     .await;
     assert_eq!(body["spaces"], json!([]));
+    // ...nor the member's: their enrollment went with the space
+    let (_, body) = get_json(
+        &s.client,
+        "/xrpc/com.atproto.space.listSpaces",
+        &s.member_token,
+    )
+    .await;
+    assert_eq!(body["spaces"], json!([]), "{body}");
     // deleting twice fails cleanly
     let (status, _) = post_json(
         &s.client,
@@ -1576,9 +1993,9 @@ fn craft_credential_jwt(iss: &str, sub: &str, keypair: Option<&secp256k1::Keypai
         iat: now,
         exp: now + 3600,
         jti: "crafted".to_string(),
-        cnf: Some(rsky_space::credential::Confirmation {
-            jkt: dpop_key().thumbprint(),
-        }),
+        cnf: Some(rsky_space::credential::Confirmation::jkt(
+            dpop_key().thumbprint(),
+        )),
     };
     encode(&header, &claims, |input| match keypair {
         Some(keypair) => rsky_pds::space_auth::sign_with_keypair(keypair, input),
@@ -2009,23 +2426,47 @@ async fn missing_key_material_is_an_internal_error() {
     std::fs::remove_file(key_location).unwrap();
 
     // serve-time signing paths surface a 500, never a bogus commit
-    for path in [
-        format!(
-            "/xrpc/com.atproto.space.getLatestCommit?space={}&repo={AUTHOR_DID}",
-            s.space
-        ),
-        format!(
-            "/xrpc/com.atproto.space.getRepo?space={}&repo={AUTHOR_DID}",
-            s.space
-        ),
-        format!(
+    let (status, _) = get_json(
+        &s.client,
+        &format!(
             "/xrpc/com.atproto.space.getDelegationToken?space={}",
             s.space
         ),
-    ] {
-        let (status, _) = get_json(&s.client, &path, &s.author_token).await;
-        assert_eq!(status, Status::InternalServerError, "{path}");
+        &s.author_token,
+    )
+    .await;
+    assert_eq!(status, Status::InternalServerError);
+    // getLatestCommit serves the unsigned commit, which needs no signing key.
+    let (status, _) = get_json(
+        &s.client,
+        &format!(
+            "/xrpc/com.atproto.space.getLatestCommit?space={}&repo={AUTHOR_DID}",
+            s.space
+        ),
+        &s.author_token,
+    )
+    .await;
+    assert_eq!(status, Status::Ok);
+    // The CAR form of getRepo carries a signed commit, so it cannot be served
+    // without the key. The STAR form carries the unsigned commit, which the MAC
+    // header vouches for, so it needs no signing key at all.
+    let get_repo = format!(
+        "/xrpc/com.atproto.space.getRepo?space={}&repo={AUTHOR_DID}",
+        s.space
+    );
+    let mut request = s
+        .client
+        .get(&get_repo)
+        .header(Header::new("accept", "application/vnd.ipld.car"));
+    for header in auth_headers(&s.client, "GET", &get_repo, &s.author_token) {
+        request = request.header(header);
     }
+    assert_eq!(
+        request.dispatch().await.status(),
+        Status::InternalServerError
+    );
+    let (status, _) = get_json(&s.client, &get_repo, &s.author_token).await;
+    assert_eq!(status, Status::Ok);
     // the host role cannot answer without its keypair either
     let (status, _) = post_json(
         &s.client,

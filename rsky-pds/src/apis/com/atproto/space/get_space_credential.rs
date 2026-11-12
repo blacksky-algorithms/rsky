@@ -15,27 +15,30 @@ use rocket::serde::json::Json;
 use rocket::State;
 use rsky_common::get_random_str;
 use rsky_lexicon::com::atproto::space::{GetSpaceCredentialInput, GetSpaceCredentialOutput};
-use rsky_space::credential::decode;
+use rsky_space::credential::{decode, Confirmation};
 use rsky_space_host::attestation::HttpMetadataFetcher;
 use rsky_space_host::authority::Authority;
 use rsky_space_host::error::HostError;
 use rsky_space_host::signing::Signer;
 use secp256k1::SecretKey;
 
-/// The delegation token, presented as this request's bearer credential, and
-/// the thumbprint of the DPoP key the minted credential binds to.
+/// The delegation token, when presented as this request's bearer credential,
+/// and the thumbprint of the DPoP key, when the request carries a proof.
 ///
-/// The thumbprint comes from the verified proof's own `jwk`, never from a
-/// request field: a field would be an assertion anyone holding a delegation
-/// token could make about a key someone else controls. The proof carries no
-/// `ath` -- a delegation token is a grant, not a bound token -- and is checked
-/// before the grant is consumed, so a caller with a bad proof does not burn
-/// its single-use token finding out.
+/// Two bindings are accepted. The proposal's is unauthenticated: the body names
+/// a P-256 `did:key` (`credentialKey`, or `credentialKid` in the proposal's
+/// prose) and the credential binds to it as `cnf.kid`. The earlier one binds to
+/// the DPoP key as `cnf.jkt`, and that thumbprint comes from the verified
+/// proof's own `jwk`, never from a request field. A proof, when sent, carries
+/// no `ath` -- a delegation token is a grant, not a bound token -- and is
+/// checked before the grant is consumed, so a caller with a bad proof does not
+/// burn its single-use token finding out.
 pub struct Issuance {
     /// Absent under a policy that requires no user assertion (e.g. a
     /// `memberspace` with `publicRead`).
     pub delegation_token: Option<String>,
-    pub dpop_jkt: String,
+    /// Absent when the request carries no DPoP proof.
+    pub dpop_jkt: Option<String>,
 }
 
 #[rocket::async_trait]
@@ -43,8 +46,15 @@ impl<'r> FromRequest<'r> for Issuance {
     type Error = ApiError;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        if req.headers().get_one("dpop").is_none() {
+            // The proposal's unauthenticated request: everything is in the body.
+            return Outcome::Success(Issuance {
+                delegation_token: None,
+                dpop_jkt: None,
+            });
+        }
         let dpop_jkt = match verify_issuance_proof(req).await {
-            Ok(jkt) => jkt,
+            Ok(jkt) => Some(jkt),
             Err(error) => {
                 tracing::debug!(%error, "credential issuance proof rejected");
                 let error = ApiError::AuthRequiredError(format!("InvalidDpopProof: {error}"));
@@ -80,6 +90,7 @@ pub async fn space_get_space_credential(
 ) -> Result<Json<GetSpaceCredentialOutput>, ApiError> {
     let GetSpaceCredentialInput {
         space,
+        credential_key,
         delegation_token: body_token,
         client_attestation,
     } = body.into_inner();
@@ -87,6 +98,20 @@ pub async fn space_get_space_credential(
         delegation_token: bearer_token,
         dpop_jkt,
     } = issuance;
+    // Settled before the delegation token is consumed, so a request that
+    // names no usable key does not burn its single-use grant finding out. A
+    // body key wins over a DPoP proof sent beside it.
+    let binding = match (credential_key, dpop_jkt) {
+        (Some(key), _) => {
+            Confirmation::kid(&key).map_err(|error| ApiError::InvalidRequest(error.to_string()))?
+        }
+        (None, Some(jkt)) => Confirmation::jkt(jkt),
+        (None, None) => {
+            return Err(ApiError::InvalidRequest(
+                "credentialKey is required without a DPoP proof".to_string(),
+            ))
+        }
+    };
     let space_id = parse_space_uri(&space)?;
     let (def, space_store, keypair) =
         local_space_def(actor_store, blobstore_factory, &space_id).await?;
@@ -147,7 +172,7 @@ pub async fn space_get_space_credential(
             &ActorJtiStore(space_store),
             now_secs(),
             get_random_str(),
-            &dpop_jkt,
+            &binding,
         )
         .await
         .map_err(|error| match error {

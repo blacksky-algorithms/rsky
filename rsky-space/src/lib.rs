@@ -27,8 +27,10 @@ pub mod car;
 pub mod commit;
 pub mod credential;
 pub mod error;
+pub mod http_signature;
 pub mod jwk;
 pub mod lthash;
+pub mod response_mac;
 pub mod space_id;
 pub mod star;
 pub mod types;
@@ -37,5 +39,9 @@ pub use car::{repo_car_bytes, write_repo_car, RepoCarValidator};
 pub use error::{Result, SpaceError};
 pub use jwk::{verify_es256, EcJwk, JwkSet};
 pub use lthash::LtHash;
+pub use response_mac::{
+    build_response_commit_ctx, build_response_record_ctx, compute_response_commit_mac,
+    compute_response_record_mac, verify_response_mac, RESPONSE_COMMIT_TAG, RESPONSE_RECORD_TAG,
+};
 pub use space_id::{is_space_uri, RecordId, SpaceId};
 pub use types::{RepoOp, RepoRef, SignedCommit};

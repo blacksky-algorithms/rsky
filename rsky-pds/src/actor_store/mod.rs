@@ -274,6 +274,16 @@ async fn load_key(location: &Path) -> Result<Option<Keypair>> {
     }
 }
 
+async fn read_kem_key(location: &Path) -> Result<Option<p256::SecretKey>> {
+    match tokio::fs::read(location).await {
+        Ok(bytes) => Ok(Some(
+            p256::SecretKey::from_slice(&bytes).map_err(|_| anyhow!("malformed KEM key"))?,
+        )),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
 /// A truncating in-place rewrite of a key file destroys an unrecoverable
 /// secret if the process dies mid-write, so stage and rename instead.
 pub(crate) async fn atomic_write_key(location: &Path, bytes: &[u8]) -> Result<()> {
@@ -301,6 +311,10 @@ pub struct ActorLocation {
     pub directory: PathBuf,
     pub db_location: PathBuf,
     pub key_location: PathBuf,
+    /// The `#atproto_kem` private key: a raw 32-byte P-256 scalar.
+    pub kem_key_location: PathBuf,
+    /// The KEM `did:key` last confirmed in the account's DID document.
+    pub kem_published_location: PathBuf,
 }
 
 /// Service managing per-actor sqlite stores under a root directory.
@@ -487,10 +501,14 @@ impl ActorStore {
         let directory = self.directory.join(&did_hash[0..2]).join(did);
         let db_location = directory.join("store.sqlite");
         let key_location = directory.join("key");
+        let kem_key_location = directory.join("kem_key");
+        let kem_published_location = directory.join("kem_published");
         Ok(ActorLocation {
             directory,
             db_location,
             key_location,
+            kem_key_location,
+            kem_published_location,
         })
     }
 
@@ -505,6 +523,66 @@ impl ActorStore {
             Some(keypair) => Ok(keypair),
             None => bail!("Keypair not found for {did}"),
         }
+    }
+
+    /// The account's `#atproto_kem` private key, if it has one. A P-256 key,
+    /// distinct from the secp256k1 signing key (proposal §KEM key).
+    pub async fn kem_key(&self, did: &str) -> Result<Option<p256::SecretKey>> {
+        let location = self.get_location(did)?;
+        read_kem_key(&location.kem_key_location).await
+    }
+
+    /// The account's `#atproto_kem` private key, generated on first use.
+    ///
+    /// Two requests can race to generate one, so the new key is staged and
+    /// hard-linked into place, which fails rather than overwrites: the loser
+    /// discards its key and reads the winner's. Only one key is ever used.
+    pub async fn ensure_kem_key(&self, did: &str) -> Result<p256::SecretKey> {
+        let location = self.get_location(did)?;
+        if let Some(key) = read_kem_key(&location.kem_key_location).await? {
+            return Ok(key);
+        }
+        let key = p256::SecretKey::random(&mut rand::thread_rng());
+        let mut tmp_location = location.kem_key_location.clone().into_os_string();
+        tmp_location.push(format!(".{}.tmp", rsky_common::get_random_str()));
+        let tmp_location = PathBuf::from(tmp_location);
+        {
+            let mut file = tokio::fs::File::create(&tmp_location).await?;
+            file.write_all(&key.to_bytes()).await?;
+            file.sync_all().await?;
+        }
+        let linked = tokio::fs::hard_link(&tmp_location, &location.kem_key_location).await;
+        tokio::fs::remove_file(&tmp_location).await?;
+        match linked {
+            Ok(()) => {
+                tokio::fs::File::open(&location.directory)
+                    .await?
+                    .sync_all()
+                    .await?;
+                Ok(key)
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                read_kem_key(&location.kem_key_location)
+                    .await?
+                    .ok_or_else(|| anyhow!("KEM key for {did} vanished while being read"))
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    /// The KEM `did:key` last confirmed in the account's DID document.
+    pub async fn kem_published(&self, did: &str) -> Result<Option<String>> {
+        let location = self.get_location(did)?;
+        match tokio::fs::read_to_string(&location.kem_published_location).await {
+            Ok(did_key) => Ok(Some(did_key.trim().to_string())),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub async fn set_kem_published(&self, did: &str, did_key: &str) -> Result<()> {
+        let location = self.get_location(did)?;
+        atomic_write_key(&location.kem_published_location, did_key.as_bytes()).await
     }
 
     fn did_lock(&self, did: &str) -> Arc<tokio::sync::Mutex<()>> {

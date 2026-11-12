@@ -6,7 +6,7 @@ use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::space::commit::{sign_commit, to_lexicon};
 use crate::actor_store::space::{
     blob_refs_in_record, oplog_window, SpaceCommitResult, SpaceStore, SpaceStoreError, SpaceWrite,
-    Subscriber,
+    Subscriber, WriterAdvance,
 };
 use crate::actor_store::{ActorStore, ActorStoreReader};
 use crate::apis::com::atproto::repo::assert_repo_availability;
@@ -40,6 +40,7 @@ pub mod get_space_credential;
 pub mod host;
 pub mod import_repo;
 pub mod import_space_meta;
+pub mod kem;
 pub mod list_blobs;
 pub mod list_records;
 pub mod list_repo_ops;
@@ -260,6 +261,15 @@ pub async fn apply_space_writes(
     space: &SpaceId,
     writes: Vec<SpaceWrite>,
 ) -> Result<SpaceCommitResult, ApiError> {
+    // A space repo's author publishes its `#atproto_kem` key (proposal §KEM
+    // key). Before the transaction, so the directory trip holds no lock.
+    kem::ensure_kem_key_published(
+        actor_store,
+        &server_config.identity.plc_url,
+        &crate::apis::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR.secret_key(),
+        did,
+    )
+    .await;
     let transactor = actor_store
         .transact(
             did.to_string(),
@@ -335,6 +345,9 @@ pub async fn notify_after_write(
     let mut host_subscribers: Vec<Subscriber> = Vec::new();
     let mut repo_subscribers: Vec<Subscriber> = Vec::new();
     let mut authority_keypair: Option<Keypair> = None;
+    // Where the update sits in the space's sequence, when the authority is
+    // hosted here and so assigns it; leg 2 carries it to syncers.
+    let mut advance: Option<WriterAdvance> = None;
     let now = rsky_common::now();
     // The authority's view of the space: writer set + registered syncers.
     if actor_store.exists(&space.authority).await.unwrap_or(false) {
@@ -346,7 +359,7 @@ pub async fn notify_after_write(
             .await
         {
             Ok(authority_reader) => {
-                if let Err(error) = authority_reader
+                match authority_reader
                     .space
                     .upsert_writer(
                         &space.uri(),
@@ -356,7 +369,8 @@ pub async fn notify_after_write(
                     )
                     .await
                 {
-                    tracing::warn!(%error, "failed to update writer set");
+                    Ok(update) => advance = update,
+                    Err(error) => tracing::warn!(%error, "failed to update writer set"),
                 }
                 match authority_reader
                     .space
@@ -396,6 +410,8 @@ pub async fn notify_after_write(
         did: did.to_string(),
         space: space.clone(),
         rev: commit.rev.clone(),
+        data: commit.hash.to_vec(),
+        advance,
         host_subscribers,
         repo_subscribers,
         plc_url: server_config.identity.plc_url.clone(),
@@ -413,6 +429,9 @@ struct NotifyWriteTask {
     did: String,
     space: SpaceId,
     rev: String,
+    /// The commit `data` after the write: `sha256` of the LtHash state.
+    data: Vec<u8>,
+    advance: Option<WriterAdvance>,
     host_subscribers: Vec<Subscriber>,
     repo_subscribers: Vec<Subscriber>,
     plc_url: String,
@@ -453,13 +472,16 @@ impl NotifyWriteTask {
             }
         }
         // Serialize the typed input rather than hand-building the JSON, so the
-        // wire field names cannot drift from the lexicon (the field is `repo`).
-        let body = serde_json::to_value(rsky_lexicon::com::atproto::space::NotifyWriteInput {
+        // wire field names cannot drift from the lexicon (`repo`, `repoRev`,
+        // `data`).
+        let notice = rsky_lexicon::com::atproto::space::NotifyWriteInput {
             space: self.space.uri(),
             repo: self.did.clone(),
             rev: self.rev.clone(),
-        })
-        .expect("NotifyWriteInput serializes");
+            data: Some(self.data.clone()),
+            ..Default::default()
+        };
+        let body = serde_json::to_value(&notice).expect("NotifyWriteInput serializes");
         // Leg 1: the writing repo's host tells the space host the repo
         // advanced, issued by the writer.
         deliver_notifications(
@@ -472,16 +494,24 @@ impl NotifyWriteTask {
         )
         .await;
         // Leg 2: the space host forwards to registered syncers, issued by the
-        // authority. Only populated when the authority is hosted here.
+        // authority. Only populated when the authority is hosted here. It also
+        // carries the space's sequence, so a syncer can tell when it missed a
+        // notice.
         if !self.host_subscribers.is_empty() {
             if let Some(authority_keypair) = &self.authority_keypair {
+                let forward = rsky_lexicon::com::atproto::space::NotifyWriteInput {
+                    space_rev: self.advance.as_ref().map(|a| a.space_rev.clone()),
+                    prev_space_rev: self.advance.as_ref().and_then(|a| a.prev_space_rev.clone()),
+                    ..notice
+                };
+                let forward = serde_json::to_value(&forward).expect("NotifyWriteInput serializes");
                 deliver_notifications(
                     authority_keypair,
                     &self.space.authority,
                     &self.space.authority,
                     NOTIFY_WRITE_LXM,
                     &self.host_subscribers,
-                    &body,
+                    &forward,
                 )
                 .await;
             } else {

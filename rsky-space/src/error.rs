@@ -37,6 +37,8 @@ pub enum SpaceError {
     Decode(String),
     #[error("invalid jwk: {0}")]
     InvalidJwk(String),
+    #[error("credential-use signature rejected: {0}")]
+    BadHttpSignature(String),
     #[error("crypto error: {0}")]
     Crypto(String),
     #[error(transparent)]

@@ -198,6 +198,18 @@ pub struct SpaceWriterRow {
     pub did: String,
     pub rev: String,
     pub hash: Option<String>,
+    /// The space revision of this writer's latest accepted update: a TID,
+    /// strictly increasing across the space's writer set.
+    pub space_rev: String,
+}
+
+/// Where an accepted writer-set update sits in the space's sequence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriterAdvance {
+    /// The space revision it was assigned.
+    pub space_rev: String,
+    /// The space's latest revision before it; `None` on the first update.
+    pub prev_space_rev: Option<String>,
 }
 
 /// Encode a record's JSON value to the DAG-CBOR bytes stored and served for it,
@@ -659,6 +671,31 @@ impl SpaceStore {
                     params![space_uri, endpoint],
                 )?;
                 Ok(())
+            })
+            .await
+    }
+
+    /// Drop every write-notification registration this store holds for a
+    /// space: syncers registered with it as the space's host, and subscribers
+    /// registered on its repo there. Returns how many were removed.
+    ///
+    /// For a deleted space, whose notifications have all been sent: nothing
+    /// will be written there again, and `registerNotify` refuses a deleted
+    /// space, so a registration left behind would only sit until it expired.
+    /// The deletion notice reads its recipients before this runs.
+    pub async fn clear_notify_registrations(&self, space_uri: &str) -> Result<usize> {
+        let space_uri = space_uri.to_string();
+        self.db
+            .run(move |conn| {
+                let host = conn.execute(
+                    "DELETE FROM space_host_reg WHERE space_uri = ?1",
+                    params![space_uri],
+                )?;
+                let repo = conn.execute(
+                    "DELETE FROM space_repo_notify WHERE space_uri = ?1",
+                    params![space_uri],
+                )?;
+                Ok(host + repo)
             })
             .await
     }
@@ -1169,38 +1206,104 @@ impl SpaceStore {
             .await
     }
 
+    /// Bring the writer set's schema up to the sequenced one (migration 008)
+    /// if this store predates it.
+    ///
+    /// The writer set is maintained and read through the authority's store
+    /// opened for reading, and a store migrates only when opened for writing.
+    /// So an authority that has not written since an upgrade would otherwise
+    /// serve a writer set its schema cannot express. `space_writer` is an
+    /// rsky-only table, which no other implementation reads; the migration runs
+    /// through the ordinary migrator, so it is recorded as on any write.
+    async fn ensure_sequenced_writer_set(&self) -> Result<()> {
+        let sequenced = self
+            .db
+            .run(|conn| {
+                let mut stmt =
+                    conn.prepare("SELECT name FROM pragma_table_info('space_writer')")?;
+                let has = stmt
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<String>, rusqlite::Error>>()?
+                    .iter()
+                    .any(|name| name == "space_rev");
+                Ok(has)
+            })
+            .await?;
+        if !sequenced {
+            crate::db::migrator::migrate_to_latest(
+                &self.db,
+                crate::actor_store::db::ACTOR_DB_MIGRATION_SET,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Record that `did`'s repo advanced to `rev` (with commit digest `hash`,
+    /// hex) in the space's writer set.
+    ///
+    /// An update that does not move the writer forward is ignored, as the
+    /// proposal asks of write notifications ("updates with a lower or equal
+    /// revision should be ignored"). The one exception is the same revision
+    /// arriving with a digest the row lacked, which fills it in. Returns the
+    /// space revisions an accepted update was assigned, for a forward to
+    /// syncers; `None` when it was ignored.
     pub async fn upsert_writer(
         &self,
         space_uri: &str,
         did: &str,
         rev: &str,
         hash: Option<String>,
-    ) -> Result<()> {
+    ) -> Result<Option<WriterAdvance>> {
+        self.ensure_sequenced_writer_set().await?;
         let (space_uri, did, rev) = (space_uri.to_string(), did.to_string(), rev.to_string());
         self.db
             .run(move |conn| {
-                conn.execute(
-                    "INSERT INTO space_writer (space_uri, did, rev, hash) VALUES (?1, ?2, ?3, ?4) \
-                     ON CONFLICT (space_uri, did) DO UPDATE SET rev = excluded.rev, hash = excluded.hash",
-                    params![space_uri, did, rev, hash],
+                // Each accepted update takes the next space revision: a TID
+                // after the space's latest, so the writer set reads as a feed.
+                let latest: Option<String> = conn.query_row(
+                    "SELECT MAX(space_rev) FROM space_writer WHERE space_uri = ?1",
+                    params![space_uri],
+                    |row| row.get(0),
                 )?;
-                Ok(())
+                let latest = latest.filter(|latest| !latest.is_empty());
+                let space_rev = latest
+                    .clone()
+                    .and_then(|latest| rsky_common::tid::TID::next_str(Some(latest)).ok())
+                    .map_or_else(|| rsky_common::tid::TID::next_str(None), Ok)?;
+                let changed = conn.execute(
+                    "INSERT INTO space_writer (space_uri, did, rev, hash, space_rev) \
+                     VALUES (?1, ?2, ?3, ?4, ?5) \
+                     ON CONFLICT (space_uri, did) DO UPDATE \
+                     SET rev = excluded.rev, hash = excluded.hash, space_rev = excluded.space_rev \
+                     WHERE excluded.rev > space_writer.rev \
+                        OR (excluded.rev = space_writer.rev \
+                            AND space_writer.hash IS NULL AND excluded.hash IS NOT NULL)",
+                    params![space_uri, did, rev, hash, space_rev],
+                )?;
+                Ok((changed > 0).then_some(WriterAdvance {
+                    space_rev,
+                    prev_space_rev: latest,
+                }))
             })
             .await
     }
 
+    /// The writer set in ascending space revision, after `cursor` (a space
+    /// revision, exclusive).
     pub async fn list_writers(
         &self,
         space_uri: &str,
         limit: usize,
         cursor: Option<String>,
     ) -> Result<Vec<SpaceWriterRow>> {
+        self.ensure_sequenced_writer_set().await?;
         let space_uri = space_uri.to_string();
         self.db
             .run(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT did, rev, hash FROM space_writer WHERE space_uri = ?1 \
-                     AND (?2 IS NULL OR did > ?2) ORDER BY did LIMIT ?3",
+                    "SELECT did, rev, hash, space_rev FROM space_writer WHERE space_uri = ?1 \
+                     AND (?2 IS NULL OR space_rev > ?2) ORDER BY space_rev, did LIMIT ?3",
                 )?;
                 let rows = stmt
                     .query_map(params![space_uri, cursor, limit as i64], |row| {
@@ -1208,6 +1311,7 @@ impl SpaceStore {
                             did: row.get(0)?,
                             rev: row.get(1)?,
                             hash: row.get(2)?,
+                            space_rev: row.get(3)?,
                         })
                     })?
                     .collect::<Result<Vec<SpaceWriterRow>, rusqlite::Error>>()?;

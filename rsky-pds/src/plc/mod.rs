@@ -1,4 +1,4 @@
-use crate::plc::operations::{update_atproto_key_op, update_handle_op};
+use crate::plc::operations::{update_atproto_key_op, update_handle_op, update_kem_key_op};
 use crate::plc::types::{CompatibleOp, OpOrTombstone};
 use crate::APP_USER_AGENT;
 use anyhow::{bail, Result};
@@ -141,6 +141,37 @@ impl Client {
         let op = update_atproto_key_op(last_op, signer, signing_key.to_owned()).await?;
         self.send_operation(did, &OpOrTombstone::Operation(op))
             .await
+    }
+
+    /// Publish `kem_key` as the DID's `atproto_kem` verification method.
+    /// Returns `false`, sending nothing, when the directory already has it.
+    pub async fn update_kem_key(
+        &self,
+        did: &String,
+        signer: &SecretKey,
+        kem_key: &str,
+    ) -> Result<bool> {
+        let last_op: CompatibleOp = match self.ensure_last_op(did).await? {
+            CompatibleOpOrTombstone::CreateOpV1(last_op) => CompatibleOp::CreateOpV1(last_op),
+            CompatibleOpOrTombstone::Operation(last_op) => {
+                if last_op
+                    .verification_methods
+                    .get("atproto_kem")
+                    .map(String::as_str)
+                    == Some(kem_key)
+                {
+                    return Ok(false);
+                }
+                CompatibleOp::Operation(last_op)
+            }
+            CompatibleOpOrTombstone::Tombstone(_) => {
+                panic!("ensure_last_op() didn't prevent tombstone")
+            }
+        };
+        let op = update_kem_key_op(last_op, signer, kem_key.to_owned()).await?;
+        self.send_operation(did, &OpOrTombstone::Operation(op))
+            .await?;
+        Ok(true)
     }
 }
 

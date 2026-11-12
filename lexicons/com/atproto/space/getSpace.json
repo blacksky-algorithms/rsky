@@ -25,6 +25,10 @@
               "type": "string",
               "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
             },
+            "uri": {
+              "type": "string",
+              "description": "Deprecated; backwards compatibility only. The same value as space, under the name an older version of the atproto spaces specification used for this field (renamed to space on 2026-11-04). Sent for clients written against that version; current clients should read space."
+            },
             "policy": {
               "type": "union",
               "refs": [

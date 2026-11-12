@@ -9,9 +9,9 @@
         "encoding": "application/json",
         "schema": {
           "type": "object",
-          "required": ["type", "policy"],
+          "required": ["spaceType", "policy"],
           "properties": {
-            "type": {
+            "spaceType": {
               "type": "string",
               "format": "nsid",
               "description": "The space type NSID, which resolves to a space type declaration."

@@ -2,19 +2,22 @@ use crate::account_manager::AccountManager;
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::space::decode_record;
 use crate::actor_store::ActorStore;
+use crate::apis::com::atproto::space::get_latest_commit::space_commit;
+use crate::apis::com::atproto::space::kem::ActorKemKeys;
 use crate::apis::com::atproto::space::{
-    internal_error, open_local_repo, parse_space_uri, serve_commit, space_error,
+    internal_error, open_local_repo, parse_space_uri, space_error,
 };
 use crate::apis::ApiError;
 use crate::space_auth::{authorize_space_read, SpaceReadAuth};
+use crate::space_mac::{compute_response_mac, MacResponse, MacType, WantMacHeader};
 use crate::space_scope::SpaceRequest;
 use rocket::serde::json::Json;
 use rocket::State;
-use rsky_lexicon::com::atproto::space::{ListRepoOpsOutput, RepoOp};
+use rsky_lexicon::com::atproto::space::{RepoOp, SpaceRepoOpsOutput};
 
 /// A repo's operation log since a revision, inlining current record values by
-/// default. The terminal page carries the current signed commit
-/// (spec §Incremental sync).
+/// default. The terminal page carries the current commit, unsigned and vouched
+/// for by the MAC (spec §Incremental sync).
 #[tracing::instrument(skip_all)]
 #[rocket::get(
     "/xrpc/com.atproto.space.listRepoOps?<space>&<repo>&<since>&<cursor>&<limit>&<excludeValues>"
@@ -28,10 +31,11 @@ pub async fn space_list_repo_ops(
     limit: Option<i64>,
     excludeValues: Option<bool>,
     auth: SpaceReadAuth,
+    want_mac: WantMacHeader,
     actor_store: &State<ActorStore>,
     blobstore_factory: &State<BlobstoreFactory>,
     account_manager: AccountManager,
-) -> Result<Json<ListRepoOpsOutput>, ApiError> {
+) -> Result<MacResponse<Json<SpaceRepoOpsOutput>>, ApiError> {
     let space_id = parse_space_uri(&space)?;
     authorize_space_read(
         &auth,
@@ -88,14 +92,63 @@ pub async fn space_list_repo_ops(
             })
         })
         .collect::<Result<Vec<RepoOp>, ApiError>>()?;
-    let commit = if has_more {
-        None
+
+    // Final page includes the commit, unsigned and vouched for by the MAC;
+    // intermediate pages do not
+    let (commit, mac_data) = if has_more {
+        (None, None)
     } else {
-        Some(serve_commit(&reader, &space_id.uri()).await?)
+        let state = reader
+            .space
+            .live_repo_state(&space_id.uri())
+            .await
+            .map_err(space_error)?;
+        let hash = state.hash();
+        let rev = state.rev.clone();
+        let commit = space_commit(&space_id.uri(), &reader.did, &rev, &hash);
+        (Some(commit), Some((rev, hash)))
     };
-    Ok(Json(ListRepoOpsOutput {
-        cursor: next_cursor,
-        ops,
-        commit,
-    }))
+
+    // Compute MAC only on final page (when commit is present)
+    let mac = if let (Some(ref want), Some((ref rev, ref hash))) = (&want_mac.0, &mac_data) {
+        // Validate MAC type matches method
+        if want.mac_type != MacType::Commit {
+            return Err(ApiError::BadRequest(
+                "MacTypeMismatch".to_string(),
+                format!(
+                    "listRepoOps requires type=\"atproto-space-repo\", got {:?}",
+                    want.mac_type
+                ),
+            ));
+        }
+
+        // MAC under the author's `#atproto_kem` key; an account that has none
+        // yet answers without a MAC.
+        let kem_provider = ActorKemKeys(actor_store);
+        compute_response_mac(
+            &kem_provider,
+            want,
+            &repo,
+            &space,
+            &repo,
+            Some(rev),
+            Some(hash),
+            None,
+            None,
+        )
+        .await
+        .ok() // Gracefully handle missing KEM key
+    } else {
+        None
+    };
+
+    Ok(MacResponse::new(
+        Json(SpaceRepoOpsOutput {
+            cursor: next_cursor,
+            ops,
+            commit,
+        }),
+        mac,
+        &want_mac,
+    ))
 }

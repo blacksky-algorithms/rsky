@@ -45,13 +45,14 @@ impl Authority {
     }
 
     /// Mint a space credential for an already-authorized requester (10min, no
-    /// `aud`, signed by the authority's space key), bound to `dpop_jkt`.
+    /// `aud`, signed by the authority's space key), bound to `binding`.
     /// `jti` is caller-provided so the method stays deterministic/testable.
     ///
-    /// `dpop_jkt` must come from a DPoP proof this server verified, never from
-    /// a request field: a field is an assertion anyone holding a delegation
-    /// token can make about a key someone else controls.
-    pub fn mint_credential(&self, now: u64, jti: String, dpop_jkt: &str) -> Result<String> {
+    /// A `jkt` binding must come from a DPoP proof this server verified. A
+    /// `kid` binding comes from the request body, as the proposal specifies:
+    /// naming a key you do not hold earns a credential you cannot present,
+    /// since every presentation is signed by that key.
+    pub fn mint_credential(&self, now: u64, jti: String, binding: &Confirmation) -> Result<String> {
         let header = JwtHeader {
             typ: CREDENTIAL_TYP.to_string(),
             alg: rsky_crypto::constants::SECP256K1_JWT_ALG.to_string(),
@@ -64,9 +65,7 @@ impl Authority {
             iat: now,
             exp: now + CREDENTIAL_TTL_SECS,
             jti,
-            cnf: Some(Confirmation {
-                jkt: dpop_jkt.to_string(),
-            }),
+            cnf: Some(binding.clone()),
         };
         let jwt = credential::encode(&header, &claims, |input| self.signer.sign(input))?;
         Ok(jwt)
@@ -90,7 +89,7 @@ impl Authority {
         jti_store: &dyn JtiStore,
         now: u64,
         jti: String,
-        dpop_jkt: &str,
+        binding: &Confirmation,
     ) -> Result<String> {
         // App axis: the attested client_id is only trustworthy after the
         // attestation's signature has been verified against the client's
@@ -142,7 +141,7 @@ impl Authority {
         {
             return Err(HostError::NotAuthorized);
         }
-        self.mint_credential(now, jti, dpop_jkt)
+        self.mint_credential(now, jti, binding)
     }
 }
 
@@ -257,7 +256,7 @@ mod tests {
         // iss/sub/typ and signature all validate against the space key.
         let space_uri = auth.space_uri();
         let jwt = auth
-            .mint_credential(1000, "jti-1".to_string(), "test-jkt")
+            .mint_credential(1000, "jti-1".to_string(), &Confirmation::jkt("test-jkt"))
             .unwrap();
         let did_key = auth.signer.did_key();
         // A syncer verifies the credential against the authority's space key.
@@ -331,7 +330,7 @@ mod tests {
                 &InMemoryJtiStore::default(),
                 1000,
                 "jti".into(),
-                "test-jkt",
+                &Confirmation::jkt("test-jkt"),
             )
             .await;
         assert!(matches!(res, Err(HostError::Membership(_))));
@@ -354,7 +353,7 @@ mod tests {
                 &InMemoryJtiStore::default(),
                 1000,
                 "jti".into(),
-                "test-jkt",
+                &Confirmation::jkt("test-jkt"),
             )
             .await
             .expect("member with valid delegation gets a credential");
@@ -383,7 +382,7 @@ mod tests {
                 &InMemoryJtiStore::default(),
                 1000,
                 "jti".into(),
-                "test-jkt",
+                &Confirmation::jkt("test-jkt"),
             )
             .await;
         assert!(matches!(res, Err(HostError::NotAuthorized)));
@@ -405,7 +404,7 @@ mod tests {
                 &InMemoryJtiStore::default(),
                 5000,
                 "jti".into(),
-                "test-jkt",
+                &Confirmation::jkt("test-jkt"),
             )
             .await;
         assert!(matches!(res, Err(HostError::Delegation(_))));
@@ -420,7 +419,7 @@ mod tests {
                 &InMemoryJtiStore::default(),
                 1000,
                 "jti".into(),
-                "test-jkt",
+                &Confirmation::jkt("test-jkt"),
             )
             .await;
         assert!(matches!(res, Err(HostError::Delegation(_))));
@@ -489,7 +488,7 @@ mod tests {
                 &InMemoryJtiStore::default(),
                 1000,
                 "jti".into(),
-                "test-jkt",
+                &Confirmation::jkt("test-jkt"),
             )
             .await;
         assert!(matches!(res, Err(HostError::AttestationRequired)));
@@ -515,7 +514,7 @@ mod tests {
                 &InMemoryJtiStore::default(),
                 1000,
                 "jti".into(),
-                "test-jkt",
+                &Confirmation::jkt("test-jkt"),
             )
             .await;
         assert!(matches!(res, Err(HostError::ClientNotAuthorized)));
@@ -538,7 +537,7 @@ mod tests {
                 &InMemoryJtiStore::default(),
                 1000,
                 "jti".into(),
-                "test-jkt",
+                &Confirmation::jkt("test-jkt"),
             )
             .await
             .expect("attested, allow-listed client mints for a member");
@@ -578,7 +577,7 @@ mod tests {
                 &InMemoryJtiStore::default(),
                 1000,
                 "jti".into(),
-                "test-jkt",
+                &Confirmation::jkt("test-jkt"),
             )
             .await;
         assert!(matches!(res, Err(HostError::Attestation(_))));

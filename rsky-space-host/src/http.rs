@@ -278,10 +278,12 @@ async fn get_space(
 ) -> Result<Json<GetSpaceOutput>, ApiError> {
     require_space_credential(&state, &headers, "GET", "com.atproto.space.getSpace").await?;
     require_this_space(&state, &params.space)?;
-    Ok(Json(GetSpaceOutput {
-        space: state.authority.space_uri(),
-        policy: state.authority.space_policy(&state.policy),
-    }))
+    // `new` also sets `uri`, for clients of the spaces specification before
+    // the field was renamed `space`; see `GetSpaceOutput::uri`.
+    Ok(Json(GetSpaceOutput::new(
+        state.authority.space_uri(),
+        state.authority.space_policy(&state.policy),
+    )))
 }
 
 async fn get_space_credential(
@@ -317,7 +319,7 @@ async fn get_space_credential(
             state.jti_store.as_ref(),
             (state.now)(),
             (state.jti)(),
-            &proof.jkt,
+            &credential::Confirmation::jkt(proof.jkt.clone()),
         )
         .await?;
     Ok(Json(GetSpaceCredentialOutput { credential }))
@@ -622,7 +624,11 @@ mod tests {
     fn credential_for(state: &AppState) -> String {
         state
             .authority
-            .mint_credential(NOW, "cred-jti".to_string(), &dpop_key().thumbprint())
+            .mint_credential(
+                NOW,
+                "cred-jti".to_string(),
+                &credential::Confirmation::jkt(dpop_key().thumbprint()),
+            )
             .unwrap()
     }
 
@@ -751,7 +757,11 @@ mod tests {
         let other_binding = f
             .state
             .authority
-            .mint_credential(NOW, "other-jti".to_string(), "some-other-thumbprint")
+            .mint_credential(
+                NOW,
+                "other-jti".to_string(),
+                &credential::Confirmation::jkt("some-other-thumbprint"),
+            )
             .unwrap();
         let (status, body) = send(&f.state, get_req(&path, Some(&other_binding))).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);

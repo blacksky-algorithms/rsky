@@ -78,6 +78,23 @@ pub async fn update_atproto_key_op(
     .await
 }
 
+/// Publish `kem_key`, a P-256 `did:key`, as the `atproto_kem` verification
+/// method (proposal §KEM key), leaving every other field as it was.
+pub async fn update_kem_key_op(
+    last_op: CompatibleOp,
+    signer: &SecretKey,
+    kem_key: String,
+) -> Result<Operation> {
+    create_update_op(last_op, signer, |normalized: Operation| -> Operation {
+        let mut updated = normalized;
+        _ = updated
+            .verification_methods
+            .insert("atproto_kem".to_string(), kem_key.clone());
+        updated
+    })
+    .await
+}
+
 pub async fn update_handle_op(
     last_op: CompatibleOp,
     signer: &SecretKey,

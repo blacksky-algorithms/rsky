@@ -9,18 +9,22 @@ use rocket::State;
 use rsky_lexicon::com::atproto::space::{ListSpacesOutput, SpaceInfo};
 use rsky_space::space_id::SpaceId;
 
-/// `listSpaces` query. The type filter's wire name is `type`, a Rust keyword,
-/// so it is bound through a form field rename rather than a path parameter.
+/// `listSpaces` query. The filters' wire names are `spaceType` and `spaceDid`;
+/// `type` and `did`, their names before the 2026-10-01 spaces alpha, are still
+/// accepted. A field with more than one `name` matches any of them.
 #[derive(FromForm)]
 pub struct ListSpacesQuery {
+    #[field(name = "spaceType")]
     #[field(name = "type")]
     pub space_type: Option<String>,
+    #[field(name = "spaceDid")]
+    #[field(name = "did")]
     pub did: Option<String>,
     pub limit: Option<i64>,
     pub cursor: Option<String>,
 }
 
-/// The spaces the caller holds a repo in. `type` narrows to one space type;
+/// The spaces the caller holds a repo in. `spaceType` narrows to one space type;
 /// each entry carries the viewer's relationship to the space, as clients that
 /// do not follow up with `getSpace` need.
 #[tracing::instrument(skip_all)]

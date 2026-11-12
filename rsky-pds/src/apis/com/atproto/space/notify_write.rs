@@ -50,7 +50,15 @@ pub async fn space_notify_write(
     id_resolver: &State<SharedIdResolver>,
     server_config: &State<ServerConfig>,
 ) -> Result<(), ApiError> {
-    let NotifyWriteInput { space, repo, rev } = body.into_inner();
+    // A space host ignores any sequence fields a repo host sends; it assigns
+    // its own below.
+    let NotifyWriteInput {
+        space,
+        repo,
+        rev,
+        data,
+        ..
+    } = body.into_inner();
     let space_id = parse_space_uri(&space)?;
     let claims = verify_space_service_token(
         actor_store,
@@ -113,17 +121,39 @@ pub async fn space_notify_write(
             "repo {repo} is not authorized to write in this space"
         )));
     }
-    space_store
-        .upsert_writer(&space_id.uri(), &repo, &rev, None)
+    // The notified `data` is kept so `listRepos` reports the writer's real
+    // digest. An update that does not advance the writer is ignored, and so
+    // not forwarded.
+    let Some(advance) = space_store
+        .upsert_writer(
+            &space_id.uri(),
+            &repo,
+            &rev,
+            data.as_deref().map(hex::encode),
+        )
         .await
-        .map_err(space_error)?;
+        .map_err(space_error)?
+    else {
+        tracing::debug!(space = %space, %repo, %rev, "write notice does not advance the writer; ignored");
+        return Ok(());
+    };
     let endpoints = space_store
         .host_notify_endpoints(&space_id.uri(), &rsky_common::now())
         .await
         .map_err(space_error)?;
     if !endpoints.is_empty() {
         let authority = space_id.authority.clone();
-        let body = serde_json::json!({ "space": space_id.uri(), "repo": repo, "rev": rev });
+        // Leg 2 carries the space's sequence, so a syncer can tell when it
+        // missed a notice.
+        let body = serde_json::to_value(NotifyWriteInput {
+            space: space_id.uri(),
+            repo,
+            rev,
+            data,
+            space_rev: Some(advance.space_rev),
+            prev_space_rev: advance.prev_space_rev,
+        })
+        .expect("NotifyWriteInput serializes");
         actor_store.background_queue.add(async move {
             deliver_notifications(
                 &keypair,

@@ -724,6 +724,50 @@ async fn space_def_crud_and_members() {
 }
 
 #[tokio::test]
+async fn a_store_from_before_the_sequenced_writer_set_is_migrated_on_use() {
+    use crate::actor_store::db::{get_db, ACTOR_DB_MIGRATIONS};
+    use crate::db::migrator::{migrate_to_latest, MigrationSet};
+    let dir = tempfile::tempdir().unwrap();
+    let db = get_db(dir.path().join("store.sqlite")).unwrap();
+    // The schema an account had before the upgrade: every migration up to 007.
+    migrate_to_latest(
+        &db,
+        MigrationSet {
+            shared: &ACTOR_DB_MIGRATIONS[..1],
+            local: &ACTOR_DB_MIGRATIONS[1..7],
+            legacy: None,
+        },
+    )
+    .await
+    .unwrap();
+    let uri = space().uri();
+    let insert_uri = uri.clone();
+    db.run(move |conn| {
+        conn.execute(
+            "INSERT INTO space_writer (space_uri, did, rev, hash) VALUES (?1, 'did:plc:w0', '3kold', 'aa')",
+            params![insert_uri],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    // Reading the writer set through such a store migrates it first, and the
+    // existing writer takes its rev as its space revision.
+    let store = SpaceStore::new(DID.to_string(), db);
+    let writers = store.list_writers(&uri, 10, None).await.unwrap();
+    assert_eq!(writers.len(), 1);
+    assert_eq!(writers[0].space_rev, "3kold");
+    store
+        .upsert_writer(&uri, "did:plc:w1", "3knew", None)
+        .await
+        .unwrap();
+    let writers = store.list_writers(&uri, 10, None).await.unwrap();
+    assert_eq!(writers[1].did, "did:plc:w1");
+    assert!(writers[1].space_rev > writers[0].space_rev);
+}
+
+#[tokio::test]
 async fn writers_notify_registrations_and_jti() {
     let (_dir, store) = store().await;
     let uri = space().uri();
@@ -740,17 +784,78 @@ async fn writers_notify_registrations_and_jti() {
         .upsert_writer(&uri, "did:plc:w0", "3kc", None)
         .await
         .unwrap();
+    // The writer set is a feed in space-revision order: w1's update to 3kb
+    // came before w0's first, so w1 is first.
     let writers = store.list_writers(&uri, 10, None).await.unwrap();
     assert_eq!(writers.len(), 2);
-    assert_eq!(writers[0].did, "did:plc:w0");
-    assert_eq!(writers[1].rev, "3kb");
-    assert!(writers[1].hash.is_none());
+    assert_eq!(writers[0].did, "did:plc:w1");
+    assert_eq!(writers[0].rev, "3kb");
+    assert!(writers[0].hash.is_none());
+    assert_eq!(writers[1].did, "did:plc:w0");
+    assert!(writers[0].space_rev < writers[1].space_rev);
     let page = store.list_writers(&uri, 1, None).await.unwrap();
     let rest = store
-        .list_writers(&uri, 10, Some(page[0].did.clone()))
+        .list_writers(&uri, 10, Some(page[0].space_rev.clone()))
         .await
         .unwrap();
     assert_eq!(rest.len(), 1);
+    assert_eq!(rest[0].did, "did:plc:w0");
+
+    // A repeated update changes nothing, its space revision included; a new
+    // one moves the writer to the end of the feed.
+    store
+        .upsert_writer(&uri, "did:plc:w1", "3kb", None)
+        .await
+        .unwrap();
+    assert_eq!(store.list_writers(&uri, 10, None).await.unwrap(), writers);
+    store
+        .upsert_writer(&uri, "did:plc:w1", "3kd", Some("bb".to_string()))
+        .await
+        .unwrap();
+    let moved = store.list_writers(&uri, 10, None).await.unwrap();
+    assert_eq!(moved[1].did, "did:plc:w1");
+    assert!(moved[1].space_rev > writers[1].space_rev);
+    let caught_up = store
+        .list_writers(&uri, 10, Some(moved[1].space_rev.clone()))
+        .await
+        .unwrap();
+    assert!(caught_up.is_empty());
+
+    // An update that does not advance the writer is ignored and reports no
+    // advance: a lower revision, or the same one again.
+    assert_eq!(
+        store
+            .upsert_writer(&uri, "did:plc:w1", "3kc", Some("cc".to_string()))
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        store
+            .upsert_writer(&uri, "did:plc:w1", "3kd", Some("dd".to_string()))
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(store.list_writers(&uri, 10, None).await.unwrap(), moved);
+    // The same revision may fill in a digest the row lacked.
+    let w0_rev = moved[0].rev.clone();
+    assert!(moved[0].hash.is_none());
+    let filled = store
+        .upsert_writer(&uri, "did:plc:w0", &w0_rev, Some("ee".to_string()))
+        .await
+        .unwrap()
+        .expect("filling a missing digest is an update");
+    // An accepted update reports the space revision it was assigned and the
+    // space's latest before it.
+    assert_eq!(
+        filled.prev_space_rev.as_deref(),
+        Some(moved[1].space_rev.as_str())
+    );
+    let after = store.list_writers(&uri, 10, None).await.unwrap();
+    assert_eq!(after[1].did, "did:plc:w0");
+    assert_eq!(after[1].hash.as_deref(), Some("ee"));
+    assert_eq!(after[1].space_rev, filled.space_rev);
 
     // repo + host notify registrations honor expiry and upsert
     let subscriber = |endpoint: &str, service: Option<&str>| Subscriber {
@@ -816,6 +921,35 @@ async fn writers_notify_registrations_and_jti() {
             .unwrap(),
         vec![subscriber("https://sync.example", None)]
     );
+
+    // Clearing a space's registrations removes both kinds, expired ones
+    // included, and leaves another space's alone.
+    let other = SpaceId::new(AUTHORITY, SPACE_TYPE, "other").uri();
+    store
+        .register_host_notify(
+            &other,
+            &subscriber("https://sync.example", None),
+            "2999-01-01T00:00:00.000Z",
+        )
+        .await
+        .unwrap();
+    assert_eq!(store.clear_notify_registrations(&uri).await.unwrap(), 4);
+    let now = rsky_common::now();
+    assert!(store
+        .repo_notify_endpoints(&uri, &now)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .host_notify_endpoints(&uri, &now)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store.host_notify_endpoints(&other, &now).await.unwrap(),
+        vec![subscriber("https://sync.example", None)]
+    );
+    assert_eq!(store.clear_notify_registrations(&uri).await.unwrap(), 0);
 
     // jti: single-use, expired entries purged
     assert!(store.consume_jti("n1", 2000, 1000).await.unwrap());

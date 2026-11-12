@@ -291,6 +291,46 @@ pub fn encode_star(metadata: &Drisl, pairs: &[(String, Vec<u8>)]) -> Vec<u8> {
     out
 }
 
+/// Serialize a space repo with the `atproto-space-repo` profile (spec §Repo
+/// serialization), as `getRepo` serves it.
+///
+/// The metadata is the unsigned commit -- `ver`, `repo`, `space`, `rev`, and
+/// `data`, the 32-byte digest of the LtHash state -- plus `$type`. It carries
+/// no MAC or signature: the MAC is per request, in the `Atproto-Space-Mac`
+/// response header. Each record is keyed by `{collection}/{rkey}` with its
+/// DRISL bytes as the value.
+///
+/// `records` are sorted here: the profile requires strict byte order of the
+/// keys, and a reader rejects the whole archive otherwise. A duplicate key is
+/// an error rather than something to choose between.
+pub fn encode_repo_star(
+    space: &str,
+    repo: &str,
+    rev: &str,
+    data: &[u8; 32],
+    mut records: Vec<(String, Vec<u8>)>,
+) -> Result<Vec<u8>, SpaceError> {
+    records.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    if records.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(err("duplicate record path in repo archive"));
+    }
+    let metadata = Drisl::Map(vec![
+        (
+            "$type".to_string(),
+            Drisl::Str(PROFILE_SPACE_REPO.to_string()),
+        ),
+        ("ver".to_string(), Drisl::Int(REPO_COMMIT_VERSION)),
+        ("repo".to_string(), Drisl::Str(repo.to_string())),
+        ("space".to_string(), Drisl::Str(space.to_string())),
+        ("rev".to_string(), Drisl::Str(rev.to_string())),
+        ("data".to_string(), Drisl::Bytes(data.to_vec())),
+    ]);
+    Ok(encode_star(&metadata, &records))
+}
+
+/// The commit format version a repo archive's metadata carries.
+pub const REPO_COMMIT_VERSION: i64 = 1;
+
 /// Parse a STAR archive. Errors on a bad magic, malformed item, non-text
 /// metadata, duplicate or out-of-order key, or trailing bytes.
 pub fn decode_star(bytes: &[u8]) -> Result<StarArchive, SpaceError> {
@@ -385,5 +425,63 @@ mod tests {
         assert!(decode_star(&encode_star(&Drisl::Null, &pairs)).is_err());
         assert!(decode_star(b"\x2a\x6c\x01").is_err());
         assert!(decode_star(&encode_star(&Drisl::Null, &pairs)[..5]).is_err());
+    }
+
+    #[test]
+    fn a_repo_archive_carries_the_commit_and_sorted_records() {
+        let space = "at://did:plc:a/space/com.example.f/x";
+        let data = [7u8; 32];
+        let records = vec![
+            ("com.example.post/3kb".to_string(), vec![0xa0]),
+            ("com.example.post/3ka".to_string(), vec![0xf6]),
+        ];
+        let bytes = encode_repo_star(space, "did:plc:b", "3kabc", &data, records).unwrap();
+        assert_eq!(&bytes[..4], &STAR_MAGIC);
+        let archive = decode_star(&bytes).unwrap();
+        assert_eq!(
+            archive.metadata.get("$type"),
+            Some(&Drisl::Str("atproto-space-repo".to_string()))
+        );
+        assert_eq!(archive.metadata.get("ver"), Some(&Drisl::Int(1)));
+        assert_eq!(
+            archive.metadata.get("repo"),
+            Some(&Drisl::Str("did:plc:b".to_string()))
+        );
+        assert_eq!(
+            archive.metadata.get("space"),
+            Some(&Drisl::Str(space.to_string()))
+        );
+        assert_eq!(
+            archive.metadata.get("rev"),
+            Some(&Drisl::Str("3kabc".to_string()))
+        );
+        assert_eq!(
+            archive.metadata.get("data"),
+            Some(&Drisl::Bytes(data.to_vec()))
+        );
+        // Sorted by key bytes, whatever order they arrived in.
+        assert_eq!(
+            archive.pairs,
+            vec![
+                ("com.example.post/3ka".to_string(), vec![0xf6]),
+                ("com.example.post/3kb".to_string(), vec![0xa0]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_repo_archive_refuses_a_duplicate_path() {
+        let records = vec![
+            ("com.example.post/3ka".to_string(), vec![0xa0]),
+            ("com.example.post/3ka".to_string(), vec![0xf6]),
+        ];
+        assert!(encode_repo_star(
+            "at://did:plc:a/space/c.e.f/x",
+            "did:plc:b",
+            "3k",
+            &[0; 32],
+            records
+        )
+        .is_err());
     }
 }

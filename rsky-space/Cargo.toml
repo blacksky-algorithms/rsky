@@ -29,7 +29,10 @@ hmac = "0.12"
 subtle = "2"
 base64 = "0.22"
 hex = "0.4"
+# Credential-use signatures (http_signature): ecdsa-p256-sha256 over an
+# RFC 9421 signature base whose parameters are RFC 8941 structured fields.
+p256 = { version = "0.13.2", features = ["ecdsa"] }
+sfv = "0.15"
 
 [dev-dependencies]
-p256 = { version = "0.13.2", features = ["ecdsa"] }
 secp256k1 = { workspace = true }

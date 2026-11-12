@@ -18,7 +18,7 @@
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::auth_verifier::{
-    bearer_token_from_req, dpop_token_from_req, validate_access_token, AuthScope, Credentials,
+    access_check, bearer_token_from_req, dpop_token_from_req, AuthScope, Credentials,
 };
 use crate::space_scope::{self, SpaceRequest, SpaceScope};
 use crate::SharedIdResolver;
@@ -36,6 +36,7 @@ use rsky_oauth::dpop::{DpopManager, InMemoryReplayStore};
 use rsky_space::credential::{
     self, JwtHeader, SpaceClaims, CREDENTIAL_TYP, DELEGATION_TTL_SECS, DELEGATION_TYP,
 };
+use rsky_space::http_signature;
 use rsky_space::space_id::SpaceId;
 use secp256k1::{Keypair, Message};
 use serde::{Deserialize, Serialize};
@@ -191,15 +192,71 @@ pub struct SpaceCredentialAuth {
     pub jti: String,
 }
 
+/// The credential in a request's `Authorization`, when it is presented under
+/// the `Atproto-Space-Credential` scheme (recognised in any case). `None` when
+/// the scheme is another, or when `Authorization` arrived more than once: the
+/// signature covers one value, and two leave open which.
+fn signed_space_credential_from_req(req: &Request<'_>) -> Option<String> {
+    let mut values = req.headers().get("authorization");
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    http_signature::credential_from_authorization(value).map(str::to_string)
+}
+
+/// Check the HTTP Message Signature beside a credential bound by `cnf.kid`,
+/// and that its audience is the one this request is addressed to: the repo's
+/// owner for a repo operation, which names it as `repo`, and otherwise the
+/// space authority (proposal §Presenting a space credential).
+fn verify_signed_presentation(req: &Request<'_>, cnf_kid: &str, authority: &str) -> Result<()> {
+    let headers = req.headers();
+    let mut authorization = headers.get("authorization");
+    let mut audience = headers.get(http_signature::AUDIENCE_HEADER);
+    let (Some(authorization_value), None) = (authorization.next(), authorization.next()) else {
+        bail!("exactly one authorization header is required");
+    };
+    let (Some(audience_value), None) = (audience.next(), audience.next()) else {
+        bail!("exactly one atproto-space-audience header is required");
+    };
+    let signature_input: Vec<&str> = headers
+        .get(http_signature::SIGNATURE_INPUT_HEADER)
+        .collect();
+    let signature: Vec<&str> = headers.get(http_signature::SIGNATURE_HEADER).collect();
+    http_signature::verify_credential_use(
+        &http_signature::SignedRequest {
+            authorization: authorization_value,
+            audience: audience_value,
+            signature_input: &signature_input.join(", "),
+            signature: &signature.join(", "),
+        },
+        cnf_kid,
+    )
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let expected = match req.query_value::<String>("repo") {
+        Some(Ok(repo)) => repo,
+        _ => authority.to_string(),
+    };
+    if audience_value.trim() != expected {
+        bail!("atproto-space-audience does not name this request's audience");
+    }
+    Ok(())
+}
+
 async fn verify_space_credential_token(
     req: &Request<'_>,
     token: &str,
 ) -> Result<SpaceCredentialAuth> {
     // Scheme discipline: a credential reads every repo in its space, so
     // presenting one as a bearer token makes it a shared secret. `Bearer` is
-    // refused even with a valid proof beside it.
-    if dpop_token_from_req(req).as_deref() != Some(token) {
-        bail!("space credentials must be presented under the DPoP scheme");
+    // refused even with a valid proof beside it; a credential arrives under the
+    // DPoP scheme or the `Atproto-Space-Credential` one, and its binding below
+    // decides which it must have been.
+    let signed = signed_space_credential_from_req(req).as_deref() == Some(token);
+    if !signed && dpop_token_from_req(req).as_deref() != Some(token) {
+        bail!(
+            "space credentials must be presented under the DPoP or Atproto-Space-Credential scheme"
+        );
     }
     let decoded = credential::decode(token).map_err(|e| anyhow::anyhow!(e.to_string()))?;
     if decoded.header.typ != CREDENTIAL_TYP {
@@ -221,9 +278,14 @@ async fn verify_space_credential_token(
         .expect("SharedIdResolver managed");
     let did_key =
         resolve_signing_did_key(actor_store, id_resolver, &authority, SPACE_KEY_IDS).await?;
-    let bound_jkt =
-        credential::verify_space_credential(token, &space_uri, &authority, &did_key, now_secs())
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let binding = credential::verify_space_credential_binding(
+        token,
+        &space_uri,
+        &authority,
+        &did_key,
+        now_secs(),
+    )
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let jti = decoded.claims.jti.clone();
     if actor_store.exists(&authority).await.unwrap_or(false) {
         let blob_factory = req
@@ -244,7 +306,14 @@ async fn verify_space_credential_token(
             }
         }
     }
-    verify_bound_proof(req, token, &bound_jkt).await?;
+    match (&binding.kid, signed) {
+        (Some(cnf_kid), true) => verify_signed_presentation(req, cnf_kid, &authority)?,
+        (None, false) => verify_bound_proof(req, token, &binding.jkt).await?,
+        (Some(_), false) => {
+            bail!("a cnf.kid credential must be presented as Atproto-Space-Credential")
+        }
+        (None, true) => bail!("a cnf.jkt credential must be presented under the DPoP scheme"),
+    }
     Ok(SpaceCredentialAuth {
         space_uri,
         authority,
@@ -257,7 +326,8 @@ impl<'r> FromRequest<'r> for SpaceCredentialAuth {
     type Error = ApiError;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let token = match dpop_token_from_req(req) {
+        let token = match signed_space_credential_from_req(req).or_else(|| dpop_token_from_req(req))
+        {
             Some(token) => token,
             None => {
                 let error = ApiError::AuthRequiredError("space credential required".to_string());
@@ -292,7 +362,10 @@ impl<'r> FromRequest<'r> for SpaceReadAuth {
     type Error = ApiError;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let token = match dpop_token_from_req(req).or(bearer_token_from_req(req).ok().flatten()) {
+        let token = match signed_space_credential_from_req(req)
+            .or_else(|| dpop_token_from_req(req))
+            .or(bearer_token_from_req(req).ok().flatten())
+        {
             Some(token) => token,
             None => {
                 let error = ApiError::AuthRequiredError("authentication required".to_string());
@@ -311,7 +384,11 @@ impl<'r> FromRequest<'r> for SpaceReadAuth {
                 }
             };
         }
-        match validate_access_token(
+        // The same verification, and the same statuses, as `AccessSpace`: a
+        // DPoP nonce challenge is 401 with `WWW-Authenticate: DPoP
+        // error="use_dpop_nonce"` (RFC 9449 §9), not a 400, and an expired
+        // session stays 400 `ExpiredToken` so clients know to refresh.
+        match access_check(
             req,
             vec![
                 AuthScope::Access,
@@ -322,16 +399,17 @@ impl<'r> FromRequest<'r> for SpaceReadAuth {
         )
         .await
         {
-            Ok(access) => {
+            Outcome::Success(access) => {
                 let credentials = access.credentials.expect("credentials populated");
                 let did = credentials.did.clone().expect("did populated");
                 Outcome::Success(SpaceReadAuth::Session { did, credentials })
             }
-            Err(error) => {
-                let error = ApiError::InvalidRequest(error.to_string());
+            Outcome::Error((status, error)) => {
+                let error = ApiError::from(&error);
                 req.local_cache(|| Some(error.clone()));
-                Outcome::Error((Status::BadRequest, error))
+                Outcome::Error((status, error))
             }
+            Outcome::Forward(status) => Outcome::Forward(status),
         }
     }
 }

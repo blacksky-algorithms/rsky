@@ -52,6 +52,7 @@ pub mod repo;
 pub mod rotate_keys;
 pub mod sequencer;
 pub mod space_auth;
+pub mod space_mac;
 pub mod space_scope;
 pub mod spool;
 pub mod telemetry;
@@ -431,6 +432,12 @@ async fn default_catcher(status: Status, request: &Request<'_>) -> ApiError {
     match api_error {
         Some(error) => error.clone(),
         None if status == Status::NotFound => ApiError::NotFound,
+        // A body or query that failed to parse (Rocket's 422, or a bare 400) is
+        // the caller's error, not the server's. Answering it as `RuntimeError`
+        // made a misnamed field indistinguishable from a crash.
+        None if status == Status::UnprocessableEntity || status == Status::BadRequest => {
+            ApiError::InvalidRequest("Input could not be parsed".to_string())
+        }
         None => ApiError::RuntimeError,
     }
 }

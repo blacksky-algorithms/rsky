@@ -8,12 +8,12 @@
       "parameters": {
         "type": "params",
         "properties": {
-          "type": {
+          "spaceType": {
             "type": "string",
             "format": "nsid",
             "description": "Filter to spaces of this type."
           },
-          "did": {
+          "spaceDid": {
             "type": "string",
             "format": "did",
             "description": "Filter to spaces anchored by this authority DID."

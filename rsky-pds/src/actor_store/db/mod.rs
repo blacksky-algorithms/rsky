@@ -259,6 +259,17 @@ pub const ACTOR_DB_MIGRATIONS: &[Migration] = &[
         PRIMARY KEY (space_uri, jti)\
     );",
     },
+    // A sequenced writer set (2026-10-01 spaces alpha): each writer carries
+    // the space revision of its latest accepted update, and listRepos pages in
+    // that order. Existing rows take their repo rev, also a TID, so they sort
+    // before anything stamped after the upgrade.
+    Migration {
+        name: "008",
+        sql: "\
+    ALTER TABLE space_writer ADD COLUMN space_rev TEXT NOT NULL DEFAULT '';\
+    UPDATE space_writer SET space_rev = rev WHERE space_rev = '';\
+    CREATE INDEX space_writer_space_rev_idx ON space_writer (space_uri, space_rev);",
+    },
 ];
 
 /// The first migration is the reference actor-store schema; the rest are

@@ -51,6 +51,9 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = [
 ] }
 opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
 tracing-opentelemetry = "0.33"
+p256 = { version = "0.13.2", features = ["ecdh"] }
+hkdf = "0.12"
+bs58 = "0.5"
 rand = { workspace = true }
 rsky-oauth = { path = "../rsky-oauth", version = "1.0.0" }
 rand_core = { workspace = true }

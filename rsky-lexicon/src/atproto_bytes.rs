@@ -69,6 +69,30 @@ impl<'de> Visitor<'de> for BytesVisitor {
     }
 }
 
+/// An optional bytes field in the same encoding. Use with
+/// `#[serde(default, skip_serializing_if = "Option::is_none")]`, so an absent
+/// field reads as `None` and `None` is left out.
+pub mod option {
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match bytes {
+            Some(bytes) => super::serialize(bytes, serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        super::deserialize(deserializer).map(Some)
+    }
+}
+
 const BASE64_PADDING_OPTIONAL: GeneralPurpose = GeneralPurpose::new(
     &alphabet::STANDARD,
     GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),

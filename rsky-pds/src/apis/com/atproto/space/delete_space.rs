@@ -79,10 +79,52 @@ pub async fn space_delete_space(
                 if let Err(error) = writer_reader.space.flag_repo_deleted(&space_id.uri()).await {
                     tracing::warn!(%error, did = %writer.did, "failed to flag writer repo");
                 }
+                if let Err(error) = writer_reader
+                    .space
+                    .clear_notify_registrations(&space_id.uri())
+                    .await
+                {
+                    tracing::warn!(%error, did = %writer.did, "failed to clear writer's notify registrations");
+                }
             }
         } else {
             remote_writers.push(writer.did);
         }
+    }
+    // `putMember` indexes a local member's enrollment on the member's own
+    // store so `listSpaces` shows the space before their first write. That
+    // index has to go with the space, or every local member keeps listing it,
+    // and a member who never wrote has no repo row for the loop above to reach.
+    let members = reader
+        .space
+        .list_members(&space_id.uri(), usize::MAX >> 1, None)
+        .await
+        .map_err(space_def_error)?;
+    for member in members {
+        if member.did == did || !actor_store.exists(&member.did).await.unwrap_or(false) {
+            continue;
+        }
+        if let Ok(member_reader) = actor_store
+            .read(
+                member.did.clone(),
+                blobstore_factory.blobstore(member.did.clone()),
+            )
+            .await
+        {
+            if let Err(error) = member_reader.space.remove_joined(&space_id.uri()).await {
+                tracing::warn!(%error, did = %member.did, "failed to clear member's enrollment");
+            }
+        }
+    }
+    // The registrations end with the space. `endpoints` above already holds
+    // the syncers the deletion notice goes to, so clearing them here does not
+    // keep it from them; best-effort, since the space is already deleted.
+    if let Err(error) = reader
+        .space
+        .clear_notify_registrations(&space_id.uri())
+        .await
+    {
+        tracing::warn!(%error, space = %space_id.uri(), "failed to clear notify registrations");
     }
     let keypair = actor_keypair(actor_store, &did).await?;
     let plc_url = server_config.identity.plc_url.clone();

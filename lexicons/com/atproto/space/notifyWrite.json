@@ -4,7 +4,7 @@
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Notify that a permissioned repo in a space has advanced to a new revision. Sent by a repo host to the space host, and forwarded by the space host to registered syncers. Carries no record data; delivery is best-effort. Authenticated with service auth.",
+      "description": "Notify that a permissioned repo in a space has advanced to a new revision. Sent by a repo host to the space host, and forwarded by the space host to registered syncers with the space's sequence (spaceRev, prevSpaceRev). Carries no record data; delivery is best-effort. Authenticated with service auth. rsky also accepts the earlier names rev (for repoRev, before the 2026-10-01 spaces alpha) and hash (for data, before the 2026-10-22 one).",
       "input": {
         "encoding": "application/json",
         "schema": {
@@ -12,7 +12,8 @@
           "required": [
             "space",
             "repo",
-            "rev"
+            "repoRev",
+            "data"
           ],
           "properties": {
             "space": {
@@ -24,10 +25,24 @@
               "format": "did",
               "description": "The DID of the repo's author."
             },
-            "rev": {
+            "repoRev": {
               "type": "string",
               "format": "tid",
-              "description": "The repo's new commit revision."
+              "description": "The repo's new commit revision. An update with a lower or equal revision is ignored."
+            },
+            "data": {
+              "type": "bytes",
+              "description": "The repo's commit data after the write: sha256 of the LtHash state. Unauthenticated; a reason for a syncer to fetch the head commit, never proof of it."
+            },
+            "spaceRev": {
+              "type": "string",
+              "format": "tid",
+              "description": "The space revision the space host assigned this update. On forwards to syncers only."
+            },
+            "prevSpaceRev": {
+              "type": "string",
+              "format": "tid",
+              "description": "The space revision before spaceRev; absent on a space's first update. On forwards to syncers only."
             }
           }
         }

@@ -183,6 +183,7 @@ mod tests {
             space: SPACE.to_string(),
             repo: "did:plc:writer".to_string(),
             rev: "3jzfcijpj2z2c".to_string(),
+            ..Default::default()
         }
     }
 
@@ -191,10 +192,11 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path(format!("/xrpc/{NOTIFY_WRITE_LXM}")))
+            // `repoRev`: the name since the 2026-10-01 spaces alpha.
             .and(body_json(serde_json::json!({
                 "space": SPACE,
                 "repo": "did:plc:writer",
-                "rev": "3jzfcijpj2z2c",
+                "repoRev": "3jzfcijpj2z2c",
             })))
             .respond_with(ResponseTemplate::new(200))
             .mount(&server)

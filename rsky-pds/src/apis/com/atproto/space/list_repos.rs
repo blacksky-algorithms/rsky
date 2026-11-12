@@ -6,10 +6,18 @@ use crate::apis::ApiError;
 use crate::space_auth::SpaceCredentialAuth;
 use rocket::serde::json::Json;
 use rocket::State;
-use rsky_lexicon::com::atproto::space::{ListReposOutput, RepoRef};
+use rsky_lexicon::com::atproto::space::{WriterRef, WriterSetOutput};
 
-/// The writer set: accounts known to hold data in the space, with each repo's
-/// current rev and commit hash (space-host role).
+/// The writer set as a feed (space-host role, 2026-10-01 spaces alpha): the
+/// repos updated after space revision `cursor`, oldest first, each with its
+/// latest repo revision, commit `data`, and space revision. `cursor` in the
+/// answer is the last entry's space revision, on every non-empty page; an
+/// empty page means the caller has caught up.
+///
+/// A writer recorded without a digest -- one known only from a write
+/// notification that carried none -- is reported with an all-zero `data`. The
+/// field is advisory: a mismatch is a syncer's reason to fetch the repo's head
+/// commit, never proof of anything, so the zero digest asks for exactly that.
 #[tracing::instrument(skip_all)]
 #[rocket::get("/xrpc/com.atproto.space.listRepos?<space>&<limit>&<cursor>")]
 pub async fn space_list_repos(
@@ -19,7 +27,7 @@ pub async fn space_list_repos(
     auth: SpaceCredentialAuth,
     actor_store: &State<ActorStore>,
     blobstore_factory: &State<BlobstoreFactory>,
-) -> Result<Json<ListReposOutput>, ApiError> {
+) -> Result<Json<WriterSetOutput>, ApiError> {
     let space_id = parse_space_uri(&space)?;
     if auth.space_uri != space_id.uri() {
         return Err(ApiError::InvalidToken("Token is invalid".to_string()));
@@ -30,18 +38,19 @@ pub async fn space_list_repos(
         .list_writers(&space_id.uri(), limit, cursor)
         .await
         .map_err(space_error)?;
-    let cursor = if writers.len() == limit {
-        writers.last().map(|writer| writer.did.clone())
-    } else {
-        None
-    };
+    let cursor = writers.last().map(|writer| writer.space_rev.clone());
     let repos = writers
         .into_iter()
-        .map(|writer| RepoRef {
+        .map(|writer| WriterRef {
             did: writer.did,
-            rev: writer.rev,
-            hash: writer.hash,
+            repo_rev: writer.rev,
+            data: writer
+                .hash
+                .as_deref()
+                .and_then(|hash| hex::decode(hash).ok())
+                .unwrap_or_else(|| vec![0u8; 32]),
+            space_rev: writer.space_rev,
         })
         .collect();
-    Ok(Json(ListReposOutput { cursor, repos }))
+    Ok(Json(WriterSetOutput { cursor, repos }))
 }

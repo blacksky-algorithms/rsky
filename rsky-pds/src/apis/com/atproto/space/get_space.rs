@@ -40,8 +40,10 @@ pub async fn space_get_space(
         }
     }
     let (def, _, _) = local_space_def(actor_store, blobstore_factory, &space_id).await?;
-    Ok(Json(GetSpaceOutput {
-        space: space_id.uri(),
-        policy: def_to_policy(&def),
-    }))
+    // `new` also sets `uri`, for clients of the spaces specification before
+    // the field was renamed `space`; see `GetSpaceOutput::uri`.
+    Ok(Json(GetSpaceOutput::new(
+        space_id.uri(),
+        def_to_policy(&def),
+    )))
 }

@@ -44,6 +44,64 @@ pub struct CommitMeta {
     pub hash: String,
 }
 
+/// A space commit as the 2026-10-22 spaces alpha defines it: unsigned, and
+/// vouched for per request by the `Atproto-Space-Mac` response header rather
+/// than by a signature. [`SignedCommit`] is the earlier shape, which rsky's
+/// daemon and standalone space host still speak.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceCommit {
+    pub ver: i64,
+    pub repo: String,
+    pub space: String,
+    pub rev: String,
+    /// `sha256` of the LtHash state.
+    #[serde(with = "crate::atproto_bytes")]
+    pub data: Vec<u8>,
+}
+
+/// `getLatestCommit`'s output with a [`SpaceCommit`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LatestSpaceCommitOutput {
+    pub commit: SpaceCommit,
+}
+
+/// `listRepoOps`'s output with a [`SpaceCommit`], present on the page that
+/// reaches the head of the oplog.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpaceRepoOpsOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    pub ops: Vec<RepoOp>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<SpaceCommit>,
+}
+
+/// One repo in a space's sequenced writer set, as `listRepos` reports it.
+/// [`RepoRef`] is the earlier, unsequenced shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriterRef {
+    pub did: String,
+    /// The repo's latest revision the space host accepted.
+    #[serde(rename = "repoRev")]
+    pub repo_rev: String,
+    /// Its commit `data` at that revision. Unauthenticated: a reason for a
+    /// syncer to fetch the repo's head commit, never proof of it.
+    #[serde(with = "crate::atproto_bytes")]
+    pub data: Vec<u8>,
+    /// The space revision of its latest accepted update.
+    #[serde(rename = "spaceRev")]
+    pub space_rev: String,
+}
+
+/// `listRepos`'s output as a feed in ascending `spaceRev` order. `cursor` is
+/// the last entry's `spaceRev`, present on every non-empty page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriterSetOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    pub repos: Vec<WriterRef>,
+}
+
 /// A space's policy object (spec §Space policy): a `$type`-tagged union of
 /// the baseline policies every PDS must support. Policy parsing happens at
 /// the API boundary, where an unrecognized `$type` is an `UnsupportedPolicy`
@@ -75,16 +133,48 @@ pub struct GetSpaceParams {
     pub space: String,
 }
 
+/// `getSpace`'s output. Build it with [`GetSpaceOutput::new`], which keeps
+/// `space` and `uri` equal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GetSpaceOutput {
     pub space: String,
+    /// The same space URI as `space`, under the name an older version of the
+    /// atproto spaces specification gave it.
+    ///
+    /// Backwards compatibility only. Until 2026-11-04 the `getSpace` lexicon
+    /// named this output field `uri`; bluesky-social/atproto `6bfb3eba` renamed
+    /// it to `space`, on the spaces branches before they reached `main`.
+    /// Clients written against the earlier lexicon require `uri` and reject an
+    /// answer without it -- among them `atproto-space-client` up to at least
+    /// `be466e5a`, which Bulleted uses. Sending both lets those clients and
+    /// current ones read the same answer; current clients ignore `uri`, as the
+    /// Lexicon spec asks of fields a schema does not define.
+    ///
+    /// Remove it once the clients that matter accept `space`. `default` lets
+    /// rsky read an answer from a host that sends only `space`.
+    #[serde(default)]
+    pub uri: String,
     pub policy: Policy,
+}
+
+impl GetSpaceOutput {
+    /// An answer for `space`, with the backwards-compatible `uri` set to the
+    /// same URI.
+    pub fn new(space: String, policy: Policy) -> Self {
+        Self {
+            uri: space.clone(),
+            space,
+            policy,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateSpaceInput {
-    #[serde(rename = "type")]
+    /// `spaceType` on the wire; `type`, its name before the 2026-10-01 spaces
+    /// alpha, is still accepted on input.
+    #[serde(rename = "spaceType", alias = "type")]
     pub space_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skey: Option<String>,
@@ -141,6 +231,16 @@ pub struct RemoveWriterInput {
 #[serde(rename_all = "camelCase")]
 pub struct GetSpaceCredentialInput {
     pub space: String,
+    /// The P-256 `did:key` the credential binds to, as its `cnf.kid`. The
+    /// lexicon names it `credentialKey` and the proposal's prose
+    /// `credentialKid`; both are accepted. Absent, the credential binds to the
+    /// request's DPoP key instead.
+    #[serde(
+        rename = "credentialKey",
+        alias = "credentialKid",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub credential_key: Option<String>,
     /// The delegation token, when the space requires one. Also accepted as
     /// the request's bearer credential for pre-amendment clients; the body
     /// field wins when both are sent.
@@ -430,9 +530,19 @@ pub struct DeleteResult {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListSpacesParams {
-    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    /// `spaceType` and `spaceDid` on the wire; `type` and `did`, their earlier
+    /// names, are still accepted on input.
+    #[serde(
+        rename = "spaceType",
+        alias = "type",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub space_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "spaceDid",
+        alias = "did",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub did: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
@@ -482,11 +592,38 @@ pub struct RegisterNotifyOutput {
     pub expires_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `notifyWrite`'s body: `repo` advanced to `repoRev` in `space`, with its
+/// commit `data`. The same body travels both legs; a forward from the space
+/// host to a registered syncer also carries the `spaceRev` the host assigned
+/// and the `prevSpaceRev` before it, so a syncer can tell when it missed one.
+///
+/// The wire names follow the spaces alphas: `repoRev` was `rev` until the
+/// 2026-10-01 alpha, and `data` was `hash` until the 2026-10-22 one. The
+/// earlier names are still accepted on input, so a peer on either side of
+/// those renames is understood; output always uses the current names.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotifyWriteInput {
     pub space: String,
     pub repo: String,
+    #[serde(rename = "repoRev", alias = "rev")]
     pub rev: String,
+    /// `sha256` of the repo's LtHash state after the write. Unauthenticated: a
+    /// reason for a syncer to fetch the head commit, never proof of it.
+    #[serde(
+        alias = "hash",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::atproto_bytes::option"
+    )]
+    pub data: Option<Vec<u8>>,
+    #[serde(rename = "spaceRev", default, skip_serializing_if = "Option::is_none")]
+    pub space_rev: Option<String>,
+    #[serde(
+        rename = "prevSpaceRev",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub prev_space_rev: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -622,16 +759,24 @@ mod tests {
             },
             r#"{"space":"at://did:plc:auth/space/com.example.forum/self"}"#,
         );
+        let policy = Policy::Memberspace(crate::com::atproto::memberspace::Policy {
+            public_read: Some(true),
+            ..Default::default()
+        });
+        // `uri` repeats `space` for clients written against the earlier
+        // lexicon, which named the field `uri`.
         roundtrip(
-            &GetSpaceOutput {
-                space: SPACE.to_string(),
-                policy: Policy::Memberspace(crate::com::atproto::memberspace::Policy {
-                    public_read: Some(true),
-                    ..Default::default()
-                }),
-            },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","policy":{"$type":"com.atproto.memberspace.policy","publicRead":true}}"#,
+            &GetSpaceOutput::new(SPACE.to_string(), policy.clone()),
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","uri":"at://did:plc:auth/space/com.example.forum/self","policy":{"$type":"com.atproto.memberspace.policy","publicRead":true}}"#,
         );
+        // An answer with only `space`, as the current lexicon defines it, still
+        // reads.
+        let current: GetSpaceOutput = serde_json::from_str(
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","policy":{"$type":"com.atproto.memberspace.policy","publicRead":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(current.space, SPACE);
+        assert_eq!(current.policy, policy);
     }
 
     #[test]
@@ -639,10 +784,29 @@ mod tests {
         roundtrip(
             &GetSpaceCredentialInput {
                 space: SPACE.to_string(),
+                credential_key: None,
                 delegation_token: Some("dt.jwt".to_string()),
                 client_attestation: Some("ca.jwt".to_string()),
             },
             r#"{"space":"at://did:plc:auth/space/com.example.forum/self","delegationToken":"dt.jwt","clientAttestation":"ca.jwt"}"#,
+        );
+        let keyed = GetSpaceCredentialInput {
+            space: SPACE.to_string(),
+            credential_key: Some("did:key:zDnaeTest".to_string()),
+            delegation_token: Some("dt.jwt".to_string()),
+            client_attestation: None,
+        };
+        roundtrip(
+            &keyed,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","credentialKey":"did:key:zDnaeTest","delegationToken":"dt.jwt"}"#,
+        );
+        // The proposal's prose names the field `credentialKid`.
+        assert_eq!(
+            serde_json::from_str::<GetSpaceCredentialInput>(
+                r#"{"space":"at://did:plc:auth/space/com.example.forum/self","credentialKid":"did:key:zDnaeTest","delegationToken":"dt.jwt"}"#
+            )
+            .unwrap(),
+            keyed,
         );
         roundtrip(
             &GetSpaceCredentialOutput {
@@ -950,7 +1114,20 @@ mod tests {
                 limit: None,
                 cursor: Some("c1".to_string()),
             },
-            r#"{"type":"com.example.forum","did":"did:plc:auth","cursor":"c1"}"#,
+            r#"{"spaceType":"com.example.forum","spaceDid":"did:plc:auth","cursor":"c1"}"#,
+        );
+        // The names before the 2026-10-01 spaces alpha are still accepted.
+        assert_eq!(
+            serde_json::from_str::<ListSpacesParams>(
+                r#"{"type":"com.example.forum","did":"did:plc:auth","cursor":"c1"}"#
+            )
+            .unwrap(),
+            ListSpacesParams {
+                space_type: Some("com.example.forum".to_string()),
+                did: Some("did:plc:auth".to_string()),
+                limit: None,
+                cursor: Some("c1".to_string()),
+            },
         );
         roundtrip(
             &ListSpacesOutput {
@@ -1023,14 +1200,39 @@ mod tests {
 
     #[test]
     fn notify_inputs() {
+        // Leg 1, repo host to space host.
+        let leg1 = NotifyWriteInput {
+            space: SPACE.to_string(),
+            repo: "did:plc:writer".to_string(),
+            rev: "3jzfcijpj2z2c".to_string(),
+            data: Some(vec![1, 2, 3]),
+            ..Default::default()
+        };
+        roundtrip(
+            &leg1,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","repoRev":"3jzfcijpj2z2c","data":{"$bytes":"AQID"}}"#,
+        );
+        // Leg 2, space host to syncer, with the space's sequence.
         roundtrip(
             &NotifyWriteInput {
-                space: SPACE.to_string(),
-                repo: "did:plc:writer".to_string(),
-                rev: "3jzfcijpj2z2c".to_string(),
+                space_rev: Some("3jzfcijpj2z2d".to_string()),
+                prev_space_rev: Some("3jzfcijpj2z2b".to_string()),
+                ..leg1.clone()
             },
-            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","rev":"3jzfcijpj2z2c"}"#,
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","repoRev":"3jzfcijpj2z2c","data":{"$bytes":"AQID"},"spaceRev":"3jzfcijpj2z2d","prevSpaceRev":"3jzfcijpj2z2b"}"#,
         );
+        // The names before the 2026-10-01 (`rev`) and 2026-10-22 (`hash`)
+        // alphas are still read, and a body with neither digest still reads.
+        let earlier: NotifyWriteInput = serde_json::from_str(
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","rev":"3jzfcijpj2z2c","hash":{"$bytes":"AQID"}}"#,
+        )
+        .unwrap();
+        assert_eq!(earlier, leg1);
+        let bare: NotifyWriteInput = serde_json::from_str(
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","rev":"3jzfcijpj2z2c"}"#,
+        )
+        .unwrap();
+        assert_eq!(bare.data, None);
         roundtrip(
             &NotifySpaceDeletedInput {
                 space: SPACE.to_string(),

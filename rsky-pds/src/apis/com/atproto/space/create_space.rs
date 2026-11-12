@@ -1,7 +1,9 @@
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::space::{SpaceDefRow, SpacePolicy};
 use crate::actor_store::ActorStore;
+use crate::apis::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 use crate::apis::com::atproto::space::host::parse_policy;
+use crate::apis::com::atproto::space::kem::ensure_kem_key_published;
 use crate::apis::com::atproto::space::publish::reconcile_published;
 use crate::apis::com::atproto::space::{require_manage, space_def_error, valid_key_part};
 use crate::apis::ApiError;
@@ -68,6 +70,15 @@ pub async fn space_create_space(
         .create_space_def(def)
         .await
         .map_err(space_def_error)?;
+    // The authority holds a repo in every space it creates, so it publishes
+    // its `#atproto_kem` key (proposal §KEM key).
+    ensure_kem_key_published(
+        actor_store,
+        &server_config.identity.plc_url,
+        &PDS_PLC_ROTATION_KEYPAIR.secret_key(),
+        &did,
+    )
+    .await;
     if matches!(
         reader
             .space

@@ -112,6 +112,7 @@ impl SpaceHostClient for HttpSpaceHost {
     ) -> Result<String> {
         let input = GetSpaceCredentialInput {
             space: space.to_string(),
+            credential_key: None,
             delegation_token: None,
             client_attestation: client_attestation.map(str::to_string),
         };

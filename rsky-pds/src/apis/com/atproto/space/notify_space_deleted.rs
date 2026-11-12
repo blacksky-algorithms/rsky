@@ -69,6 +69,19 @@ pub async fn space_notify_space_deleted(
             Ok(false) => {}
             Err(error) => tracing::warn!(%error, %did, "failed to flag repo deleted"),
         }
+        // Nor does the space stay in this account's listSpaces.
+        if let Err(error) = reader.space.remove_joined(&space_id.uri()).await {
+            tracing::warn!(%error, %did, "failed to clear enrollment");
+        }
+        // Subscribers registered on this account's repo in the deleted space
+        // will hear nothing more from it.
+        if let Err(error) = reader
+            .space
+            .clear_notify_registrations(&space_id.uri())
+            .await
+        {
+            tracing::warn!(%error, %did, "failed to clear notify registrations");
+        }
     }
     Ok(())
 }
