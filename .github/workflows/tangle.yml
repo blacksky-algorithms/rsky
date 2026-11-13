@@ -25,6 +25,7 @@ jobs:
           chmod 600 ~/.ssh/tangled_key
           cat > ~/.ssh/config <<'EOF'
           Host knot.blacksky.community
+            Port 2222
             StrictHostKeyChecking no
             UserKnownHostsFile=/dev/null
             IdentityFile ~/.ssh/tangled_key
