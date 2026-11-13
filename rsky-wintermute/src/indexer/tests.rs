@@ -2258,6 +2258,123 @@ mod indexer_tests {
     }
 
     #[tokio::test]
+    async fn bulk_like_repost_and_quote_copies_keep_empty_subject_fields() {
+        use crate::indexer::bulk::{self, SubjectRecordRow};
+
+        let pool = setup_test_pool();
+        let creator = "did:plc:wintermute-test-empty-subject";
+        let cid = "bafyreihhl5mpvjkrhnnagen2fomozzhnhhdq2jr6cego2nzbvmwewv5rd4";
+        let target = "at://did:plc:wintermute-test-empty-subject-target/app.bsky.feed.post/p1";
+        let stamp = "2026-07-30T00:00:00.000Z";
+        cleanup_test_data(&pool, creator).await;
+
+        let client = pool.get().await.unwrap();
+        let quote_prefix = format!("at://{creator}/%");
+        client
+            .execute("DELETE FROM quote WHERE uri LIKE $1", &[&quote_prefix])
+            .await
+            .unwrap();
+        client
+            .execute("DELETE FROM post_agg WHERE uri IN ($1, '')", &[&target])
+            .await
+            .unwrap();
+
+        let row =
+            |collection: &str, rkey: &str, subject: &str, subject_cid: &str| SubjectRecordRow {
+                uri: format!("at://{creator}/{collection}/{rkey}"),
+                cid: cid.to_owned(),
+                creator: creator.to_owned(),
+                subject: subject.to_owned(),
+                subject_cid: subject_cid.to_owned(),
+                created_at: stamp.to_owned(),
+                indexed_at: stamp.to_owned(),
+                via: None,
+                via_cid: Some(String::new()),
+            };
+
+        let likes = [
+            row("app.bsky.feed.like", "empty", "", ""),
+            row("app.bsky.feed.like", "full", target, cid),
+        ];
+        bulk::copy_insert_likes(&client, &likes, true)
+            .await
+            .unwrap();
+        let reposts = [
+            row("app.bsky.feed.repost", "empty", "", ""),
+            row("app.bsky.feed.repost", "nocid", target, ""),
+        ];
+        bulk::copy_insert_reposts(&client, &reposts, true)
+            .await
+            .unwrap();
+        let quote_uri = format!("at://{creator}/app.bsky.feed.post/quoting");
+        bulk::copy_insert_quotes(
+            &client,
+            &[(
+                quote_uri.clone(),
+                cid.to_owned(),
+                target.to_owned(),
+                String::new(),
+                stamp.to_owned(),
+                stamp.to_owned(),
+            )],
+            false,
+        )
+        .await
+        .unwrap();
+
+        for (table, expected) in [
+            ("like", vec![("", ""), (target, cid)]),
+            ("repost", vec![("", ""), (target, "")]),
+        ] {
+            let query = format!(
+                "SELECT subject, \"subjectCid\", via, \"viaCid\" FROM \"{table}\" \
+                 WHERE creator = $1 ORDER BY subject"
+            );
+            let rows = client.query(&query, &[&creator]).await.unwrap();
+            assert_eq!(rows.len(), 2, "{table} must hold exactly both rows");
+            for (found, (subject, subject_cid)) in rows.iter().zip(expected) {
+                assert_eq!(found.get::<_, String>(0), subject);
+                assert_eq!(found.get::<_, String>(1), subject_cid);
+                assert_eq!(found.get::<_, Option<String>>(2), None);
+                assert_eq!(found.get::<_, Option<String>>(3), None);
+            }
+        }
+        let counted = client
+            .query_one(
+                "SELECT \"likeCount\", \"repostCount\" FROM post_agg WHERE uri = $1",
+                &[&target],
+            )
+            .await
+            .unwrap();
+        assert_eq!(counted.get::<_, i64>(0), 1);
+        assert_eq!(counted.get::<_, i64>(1), 1);
+        let uncounted = client
+            .query_one("SELECT count(*) FROM post_agg WHERE uri = ''", &[])
+            .await
+            .unwrap();
+        assert_eq!(uncounted.get::<_, i64>(0), 0);
+        let quote = client
+            .query_one(
+                "SELECT subject, \"subjectCid\" FROM quote WHERE uri = $1",
+                &[&quote_uri],
+            )
+            .await
+            .unwrap();
+        assert_eq!(quote.get::<_, String>(0), target);
+        assert_eq!(quote.get::<_, String>(1), "");
+
+        client
+            .execute("DELETE FROM quote WHERE uri LIKE $1", &[&quote_prefix])
+            .await
+            .unwrap();
+        client
+            .execute("DELETE FROM post_agg WHERE uri = $1", &[&target])
+            .await
+            .unwrap();
+        cleanup_test_data(&pool, creator).await;
+    }
+
+    #[tokio::test]
     async fn bulk_aggregates_increment_exactly_and_are_replay_safe() {
         use crate::indexer::bulk::{self, PostCopyRow};
 
