@@ -2839,6 +2839,40 @@ mod indexer_tests {
     }
 
     #[test]
+    fn admitted_by_key_keeps_the_first_job_under_each_key() {
+        use crate::types::{IndexJob, WriteAction};
+
+        let job = |rkey: &str| IndexJob {
+            uri: format!("at://did:plc:lookupdid/app.bsky.feed.post/{rkey}"),
+            cid: "cid".to_owned(),
+            action: WriteAction::Create,
+            record: None,
+            indexed_at: "2026-08-01T00:00:00.000Z".to_owned(),
+            rev: "3a".to_owned(),
+            provenance: None,
+        };
+        let admitted: Vec<(Vec<u8>, IndexJob)> = vec![
+            (b"k1".to_vec(), job("first")),
+            (b"k2".to_vec(), job("second")),
+            (b"k1".to_vec(), job("repeat")),
+        ];
+
+        let by_key = IndexerManager::admitted_by_key(&admitted);
+
+        assert_eq!(by_key.len(), 2);
+        assert_eq!(
+            by_key[b"k1".as_slice()].uri,
+            "at://did:plc:lookupdid/app.bsky.feed.post/first"
+        );
+        assert_eq!(
+            by_key[b"k2".as_slice()].uri,
+            "at://did:plc:lookupdid/app.bsky.feed.post/second"
+        );
+        assert!(!by_key.contains_key(b"k3".as_slice()));
+        assert!(IndexerManager::admitted_by_key(&[]).is_empty());
+    }
+
+    #[test]
     fn shard_live_jobs_is_deterministic_and_did_sticky() {
         use crate::types::{IndexJob, WriteAction};
 
