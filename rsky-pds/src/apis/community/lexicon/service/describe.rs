@@ -17,7 +17,7 @@ const ROLES: [&str; 1] = ["pds"];
 /// Held to the mounted routes by `described_methods_match_the_mounted_routes`
 /// in the integration tests: a description that overstates the surface is worse
 /// than none, because a caller can handle silence.
-const METHODS: [&str; 111] = [
+const METHODS: [&str; 117] = [
     "app.bsky.actor.getPreferences",
     "app.bsky.actor.getProfile",
     "app.bsky.actor.getProfiles",
@@ -87,13 +87,17 @@ const METHODS: [&str; 111] = [
     "com.atproto.server.resetPassword",
     "com.atproto.server.revokeAppPassword",
     "com.atproto.server.updateEmail",
-    "com.atproto.simplespace.addMember",
-    "com.atproto.simplespace.createSpace",
-    "com.atproto.simplespace.deleteSpace",
-    "com.atproto.simplespace.listMembers",
-    "com.atproto.simplespace.removeMember",
-    "com.atproto.simplespace.updateSpace",
+    "com.atproto.memberspace.listMembers",
+    "com.atproto.memberspace.putMember",
+    "com.atproto.memberspace.removeMember",
     "com.atproto.space.applyWrites",
+    "com.atproto.space.clearRecords",
+    "com.atproto.space.createSpace",
+    "com.atproto.space.deleteSpace",
+    "com.atproto.space.exportSpaceMeta",
+    "com.atproto.space.importRepo",
+    "com.atproto.space.importSpaceMeta",
+    "com.atproto.space.notifyCredentialRevoked",
     "com.atproto.space.createRecord",
     "com.atproto.space.deleteRecord",
     "com.atproto.space.getBlob",
@@ -113,7 +117,9 @@ const METHODS: [&str; 111] = [
     "com.atproto.space.notifyWrite",
     "com.atproto.space.putRecord",
     "com.atproto.space.registerNotify",
+    "com.atproto.space.removeWriter",
     "com.atproto.space.unregisterNotify",
+    "com.atproto.space.updateSpace",
     "com.atproto.sync.getBlob",
     "com.atproto.sync.getBlocks",
     "com.atproto.sync.getCheckout",

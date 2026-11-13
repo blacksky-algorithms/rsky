@@ -3,35 +3,24 @@
 //! `space_def` row. A PDS answers as space host only for spaces anchored on
 //! its own accounts.
 
-use crate::actor_store::space::{SpaceDefRow, SpaceStore};
+use crate::actor_store::space::{SpaceDefRow, SpacePolicy, SpaceStore};
 use crate::actor_store::ActorStore;
 use crate::apis::ApiError;
 use crate::space_auth::now_secs;
 use anyhow::Result;
 use async_trait::async_trait;
 use rocket::State;
-use rsky_lexicon::com::atproto::simplespace::{
-    AppAccess as LexAppAccess, AppAccessAllowList, AppAccessOpen, Config as SimplespaceConfig,
-    Policy as LexPolicy,
-};
 use rsky_space::space_id::SpaceId;
-use rsky_space_host::appaccess::AppAccess;
 use rsky_space_host::attestation::JtiStore;
 use rsky_space_host::error::HostError;
 use rsky_space_host::keys::ResolverDocSource;
 use rsky_space_host::managing_app::HttpManagingApp;
-use rsky_space_host::membership::InMemoryMembership;
+use rsky_space_host::membership::{InMemoryMembership, MemberAccess};
 use rsky_space_host::policy::Policy;
 use rsky_space_host::signing::Signer;
 use rsky_space_host::KeyResolver;
 use secp256k1::Keypair;
 use std::sync::Arc;
-
-pub const POLICY_PUBLIC: &str = "public";
-pub const POLICY_MEMBER_LIST: &str = "member-list";
-pub const POLICY_MANAGING_APP: &str = "managing-app";
-pub const APP_ACCESS_OPEN: &str = "open";
-pub const APP_ACCESS_ALLOW_LIST: &str = "allow-list";
 
 /// Ensure the space's authority is an account hosted here and return its
 /// space definition. Only then can this PDS answer host methods for it.
@@ -65,38 +54,33 @@ pub async fn local_space_def(
     Ok((def, reader.space.clone(), keypair))
 }
 
-/// The `getSpace` config surface for a definition row.
-pub fn def_to_config(def: &SpaceDefRow) -> SimplespaceConfig {
-    let policy = match def.policy.as_str() {
-        POLICY_PUBLIC => LexPolicy::Public,
-        POLICY_MANAGING_APP => LexPolicy::ManagingApp,
-        _ => LexPolicy::MemberList,
-    };
-    let app_access = if def.app_access == APP_ACCESS_ALLOW_LIST {
-        LexAppAccess::AllowList(AppAccessAllowList {
-            allowed: def.allowed_clients.clone().unwrap_or_default(),
-        })
-    } else {
-        LexAppAccess::Open(AppAccessOpen {})
-    };
-    SimplespaceConfig {
-        policy: Some(policy),
-        app_access: Some(app_access),
-        managing_app: def.managing_app.clone(),
-    }
+/// The policy object a definition row surfaces through `getSpace`.
+pub fn def_to_policy(def: &SpaceDefRow) -> SpacePolicy {
+    def.policy.clone()
 }
 
-pub fn def_app_access(def: &SpaceDefRow) -> AppAccess {
-    if def.app_access == APP_ACCESS_ALLOW_LIST {
-        AppAccess::AllowList(def.allowed_clients.clone().unwrap_or_default())
-    } else {
-        AppAccess::Open
+/// Parse and validate a policy object from a `createSpace`/`updateSpace`
+/// request body. An unrecognized `$type` or a malformed object is an
+/// `UnsupportedPolicy` error per spec; a `managedspace` additionally requires
+/// a well-formed `managingApp` service identifier.
+pub fn parse_policy(value: serde_json::Value) -> Result<SpacePolicy, ApiError> {
+    let policy: SpacePolicy = serde_json::from_value(value).map_err(|error| {
+        ApiError::BadRequest("UnsupportedPolicy".to_string(), error.to_string())
+    })?;
+    if let SpacePolicy::Managedspace(ref managed) = policy {
+        if !managed.managing_app.starts_with("did:") || !managed.managing_app.contains('#') {
+            return Err(ApiError::InvalidRequest(format!(
+                "managingApp must be a service identifier (did#fragment): {}",
+                managed.managing_app
+            )));
+        }
     }
+    Ok(policy)
 }
 
-/// Build the per-user policy for a definition. `member-list` loads the member
-/// rows; `managing-app` defers to the configured app over HTTP with authority
-/// service auth.
+/// Build the runtime policy for a definition row. `memberspace` loads the
+/// member rows with their read/write access; `managedspace` defers to the
+/// configured app over HTTP with authority service auth.
 pub async fn def_policy(
     def: &SpaceDefRow,
     space_store: &SpaceStore,
@@ -104,15 +88,9 @@ pub async fn def_policy(
     authority: &str,
     plc_url: &str,
 ) -> Result<Policy, ApiError> {
-    match def.policy.as_str() {
-        POLICY_PUBLIC => Ok(Policy::Public),
-        POLICY_MANAGING_APP => {
-            let service_id = def.managing_app.clone().ok_or_else(|| {
-                ApiError::BadRequest(
-                    "InvalidSpaceConfig".to_string(),
-                    "managing-app policy without a managingApp".to_string(),
-                )
-            })?;
+    match &def.policy {
+        SpacePolicy::Personalspace(_) => Ok(Policy::Personalspace),
+        SpacePolicy::Managedspace(managed) => {
             let resolver = rsky_identity::did::did_resolver::DidResolver::new(
                 rsky_identity::types::DidResolverOpts {
                     timeout: None,
@@ -120,10 +98,11 @@ pub async fn def_policy(
                     did_cache: Arc::new(rsky_identity::types::MemoryCache::new(None, None)),
                 },
             );
-            Ok(Policy::ManagingApp {
-                service_id: service_id.clone(),
+            Ok(Policy::Managedspace {
+                service_id: managed.managing_app.clone(),
+                publish_policy: managed.publish_policy.unwrap_or(false),
                 client: Arc::new(HttpManagingApp::new(
-                    service_id,
+                    managed.managing_app.clone(),
                     authority.to_string(),
                     signer,
                     Arc::new(ResolverDocSource::new(resolver)),
@@ -132,27 +111,40 @@ pub async fn def_policy(
                 )),
             })
         }
-        _ => {
-            let mut members: Vec<String> = Vec::new();
+        SpacePolicy::Memberspace(memberspace) => {
+            let mut members: Vec<(String, MemberAccess)> = Vec::new();
             let mut cursor: Option<String> = None;
             loop {
                 let page = space_store
                     .list_members(&def.space_uri, MEMBER_PAGE_SIZE, cursor.clone())
                     .await
                     .map_err(super::space_error)?;
-                let Some(last) = page.last().map(|(did, _, _)| did.clone()) else {
+                let Some(last) = page.last().map(|row| row.did.clone()) else {
                     break;
                 };
                 let full_page = page.len() == MEMBER_PAGE_SIZE;
-                members.extend(page.into_iter().map(|(did, _, _)| did));
+                members.extend(page.into_iter().map(|row| {
+                    (
+                        row.did,
+                        MemberAccess {
+                            read: row.read,
+                            write: row.write,
+                        },
+                    )
+                }));
                 if !full_page {
                     break;
                 }
                 cursor = Some(last);
             }
-            Ok(Policy::MemberList(Arc::new(InMemoryMembership::new(
-                members,
-            ))))
+            Ok(Policy::Memberspace {
+                public_read: memberspace.public_read.unwrap_or(false),
+                public_write: memberspace.public_write.unwrap_or(false),
+                allowed_apps: memberspace.allowed_apps.clone(),
+                publish_policy: memberspace.publish_policy.unwrap_or(false),
+                publish_members: memberspace.publish_members.unwrap_or(false),
+                members: Arc::new(InMemoryMembership::with_access(members)),
+            })
         }
     }
 }
@@ -189,20 +181,23 @@ impl KeyResolver for FixedKeyResolver {
 mod tests {
     use super::*;
     use crate::actor_store::db::get_migrated_db;
+    use rsky_lexicon::com::atproto::managedspace::Access;
+    use rsky_lexicon::com::atproto::{managedspace, memberspace, personalspace};
 
     const SPACE_URI: &str = "at://did:plc:auth/space/com.example.forum/main";
 
-    fn def(policy: &str, app_access: &str) -> SpaceDefRow {
+    fn def(policy: SpacePolicy) -> SpaceDefRow {
         SpaceDefRow {
             space_uri: SPACE_URI.to_string(),
             space_type: "com.example.forum".to_string(),
             skey: "main".to_string(),
-            policy: policy.to_string(),
-            app_access: app_access.to_string(),
-            allowed_clients: None,
-            managing_app: None,
+            policy,
             deleted: false,
         }
+    }
+
+    fn memberspace_def() -> SpaceDefRow {
+        def(SpacePolicy::Memberspace(memberspace::Policy::default()))
     }
 
     async fn store() -> (tempfile::TempDir, SpaceStore) {
@@ -218,53 +213,91 @@ mod tests {
     }
 
     #[test]
-    fn def_to_config_covers_every_variant() {
-        use rsky_lexicon::com::atproto::simplespace::Policy as LexPolicy;
-        let cfg = def_to_config(&def(POLICY_PUBLIC, APP_ACCESS_OPEN));
-        assert_eq!(cfg.policy, Some(LexPolicy::Public));
-        assert!(matches!(cfg.app_access, Some(LexAppAccess::Open(_))));
-
-        let mut allow = def(POLICY_MANAGING_APP, APP_ACCESS_ALLOW_LIST);
-        allow.allowed_clients = Some(vec!["https://app.example/client".to_string()]);
-        allow.managing_app = Some("did:web:app.example#managing_app".to_string());
-        let cfg = def_to_config(&allow);
-        assert_eq!(cfg.policy, Some(LexPolicy::ManagingApp));
-        assert!(
-            matches!(cfg.app_access, Some(LexAppAccess::AllowList(list)) if list.allowed.len() == 1)
-        );
-        assert_eq!(
-            cfg.managing_app.as_deref(),
-            Some("did:web:app.example#managing_app")
-        );
-
-        let cfg = def_to_config(&def(POLICY_MEMBER_LIST, APP_ACCESS_OPEN));
-        assert_eq!(cfg.policy, Some(LexPolicy::MemberList));
+    fn parse_policy_maps_baseline_types() {
+        assert!(matches!(
+            parse_policy(serde_json::json!({"$type": "com.atproto.personalspace.policy"})).unwrap(),
+            SpacePolicy::Personalspace(_)
+        ));
+        assert!(matches!(
+            parse_policy(serde_json::json!({"$type": "com.atproto.memberspace.policy", "publicRead": true})).unwrap(),
+            SpacePolicy::Memberspace(ref p) if p.public_read == Some(true)
+        ));
+        assert!(matches!(
+            parse_policy(serde_json::json!({"$type": "com.atproto.managedspace.policy", "managingApp": "did:web:app#svc"})).unwrap(),
+            SpacePolicy::Managedspace(ref p) if p.managing_app == "did:web:app#svc"
+        ));
+        // Unknown $type and malformed objects are UnsupportedPolicy.
+        for bad in [
+            serde_json::json!({"$type": "com.example.custom.policy"}),
+            serde_json::json!({"$type": "com.atproto.managedspace.policy"}),
+            serde_json::json!({"publicRead": true}),
+        ] {
+            let err = parse_policy(bad).unwrap_err();
+            assert!(
+                matches!(&err, ApiError::BadRequest(name, _) if name == "UnsupportedPolicy"),
+                "{err:?}"
+            );
+        }
+        // A managedspace service identifier must be did#fragment.
+        assert!(parse_policy(serde_json::json!({
+            "$type": "com.atproto.managedspace.policy",
+            "managingApp": "not-a-service-id"
+        }))
+        .is_err());
     }
 
     #[test]
-    fn def_app_access_maps_both_variants() {
-        assert!(matches!(
-            def_app_access(&def(POLICY_PUBLIC, APP_ACCESS_OPEN)),
-            AppAccess::Open
-        ));
-        let mut allow = def(POLICY_PUBLIC, APP_ACCESS_ALLOW_LIST);
-        allow.allowed_clients = Some(vec!["https://a".to_string()]);
-        assert!(matches!(
-            def_app_access(&allow),
-            AppAccess::AllowList(list) if list == vec!["https://a".to_string()]
-        ));
-        // allow-list with no clients defaults to an empty (deny-all) list
-        assert!(matches!(
-            def_app_access(&def(POLICY_PUBLIC, APP_ACCESS_ALLOW_LIST)),
-            AppAccess::AllowList(list) if list.is_empty()
-        ));
+    fn def_to_policy_is_the_stored_object() {
+        let policy = SpacePolicy::Personalspace(personalspace::Policy {});
+        assert_eq!(def_to_policy(&def(policy.clone())), policy);
     }
 
     #[tokio::test]
-    async fn def_policy_public_and_member_list() {
+    async fn def_policy_personalspace_and_memberspace() {
         let (_dir, store) = store().await;
         let policy = def_policy(
-            &def(POLICY_PUBLIC, APP_ACCESS_OPEN),
+            &def(SpacePolicy::Personalspace(personalspace::Policy {})),
+            &store,
+            signer(),
+            "did:plc:auth",
+            "http://127.0.0.1:1",
+        )
+        .await
+        .unwrap();
+        assert!(!policy
+            .authorizes(SPACE_URI, Some("did:plc:anyone"), Access::Read, None)
+            .await
+            .unwrap());
+
+        // An empty member list denies non-members per kind; public flags open
+        // the corresponding axis.
+        let policy = def_policy(
+            &memberspace_def(),
+            &store,
+            signer(),
+            "did:plc:auth",
+            "http://127.0.0.1:1",
+        )
+        .await
+        .unwrap();
+        assert!(!policy
+            .authorizes(SPACE_URI, Some("did:plc:anyone"), Access::Read, None)
+            .await
+            .unwrap());
+
+        // memberspace loads each member's read/write booleans
+        store
+            .put_member(SPACE_URI, "did:plc:reader", true, false)
+            .await
+            .unwrap();
+        for i in 0..5 {
+            store
+                .put_member(SPACE_URI, &format!("did:plc:m{i}"), true, true)
+                .await
+                .unwrap();
+        }
+        let policy = def_policy(
+            &memberspace_def(),
             &store,
             signer(),
             "did:plc:auth",
@@ -273,72 +306,37 @@ mod tests {
         .await
         .unwrap();
         assert!(policy
-            .authorizes(SPACE_URI, "did:plc:anyone", None)
+            .authorizes(SPACE_URI, Some("did:plc:reader"), Access::Read, None)
             .await
             .unwrap());
-
-        // an empty member list denies everyone
-        let policy = def_policy(
-            &def(POLICY_MEMBER_LIST, APP_ACCESS_OPEN),
-            &store,
-            signer(),
-            "did:plc:auth",
-            "http://127.0.0.1:1",
-        )
-        .await
-        .unwrap();
         assert!(!policy
-            .authorizes(SPACE_URI, "did:plc:anyone", None)
+            .authorizes(SPACE_URI, Some("did:plc:reader"), Access::Write, None)
             .await
             .unwrap());
-
-        // member-list paginates through the full member set
-        for i in 0..5 {
-            store
-                .add_member(SPACE_URI, &format!("did:plc:m{i}"))
-                .await
-                .unwrap();
-        }
-        let policy = def_policy(
-            &def(POLICY_MEMBER_LIST, APP_ACCESS_OPEN),
-            &store,
-            signer(),
-            "did:plc:auth",
-            "http://127.0.0.1:1",
-        )
-        .await
-        .unwrap();
         for i in 0..5 {
             assert!(policy
-                .authorizes(SPACE_URI, &format!("did:plc:m{i}"), None)
+                .authorizes(
+                    SPACE_URI,
+                    Some(&format!("did:plc:m{i}")),
+                    Access::Write,
+                    None
+                )
                 .await
                 .unwrap());
         }
         assert!(!policy
-            .authorizes(SPACE_URI, "did:plc:stranger", None)
+            .authorizes(SPACE_URI, Some("did:plc:stranger"), Access::Read, None)
             .await
             .unwrap());
     }
 
     #[tokio::test]
-    async fn def_policy_managing_app() {
+    async fn def_policy_managedspace() {
         let (_dir, store) = store().await;
-        // Missing managingApp is a config error.
-        let result = def_policy(
-            &def(POLICY_MANAGING_APP, APP_ACCESS_OPEN),
-            &store,
-            signer(),
-            "did:plc:auth",
-            "http://127.0.0.1:1",
-        )
-        .await;
-        let Err(err) = result else {
-            panic!("managing-app without a managingApp must be a config error");
-        };
-        assert!(matches!(err, ApiError::BadRequest(name, _) if name == "InvalidSpaceConfig"));
-
-        let mut with_app = def(POLICY_MANAGING_APP, APP_ACCESS_OPEN);
-        with_app.managing_app = Some("did:web:app.example#managing_app".to_string());
+        let with_app = def(SpacePolicy::Managedspace(managedspace::Policy {
+            managing_app: "did:web:app.example#managing_app".to_string(),
+            publish_policy: None,
+        }));
         let policy = def_policy(
             &with_app,
             &store,
@@ -354,7 +352,7 @@ mod tests {
         );
         // The app is unreachable in tests: the decision errors rather than allows.
         assert!(policy
-            .authorizes(SPACE_URI, "did:plc:member", None)
+            .authorizes(SPACE_URI, Some("did:plc:member"), Access::Read, None)
             .await
             .is_err());
     }

@@ -1,15 +1,13 @@
 //! The space authority: mints space credentials (spec §Access control).
 
 use async_trait::async_trait;
-use rsky_lexicon::com::atproto::simplespace::{
-    AppAccess as LexAppAccess, AppAccessAllowList, AppAccessOpen, Config as SimplespaceConfig,
-};
+use rsky_lexicon::com::atproto::managedspace::Access;
+use rsky_lexicon::com::atproto::space::Policy as LexSpacePolicy;
 use rsky_space::credential::{
     self, Confirmation, JwtHeader, SpaceClaims, CREDENTIAL_TTL_SECS, CREDENTIAL_TYP,
 };
 use rsky_space::space_id::SpaceId;
 
-use crate::appaccess::AppAccess;
 use crate::attestation::{verify_client_attestation, JtiStore, MetadataFetcher};
 use crate::error::{HostError, Result};
 use crate::policy::Policy;
@@ -26,16 +24,11 @@ pub trait KeyResolver: Send + Sync {
 pub struct Authority {
     pub space: SpaceId,
     pub signer: Signer,
-    pub app_access: AppAccess,
 }
 
 impl Authority {
-    pub fn new(space: SpaceId, signer: Signer, app_access: AppAccess) -> Self {
-        Self {
-            space,
-            signer,
-            app_access,
-        }
+    pub fn new(space: SpaceId, signer: Signer) -> Self {
+        Self { space, signer }
     }
 
     pub fn authority_did(&self) -> &str {
@@ -46,24 +39,14 @@ impl Authority {
         self.space.uri()
     }
 
-    /// The simplespace config surfaced by `getSpace`.
-    pub fn space_config(&self, policy: &Policy) -> SimplespaceConfig {
-        let app_access = match &self.app_access {
-            AppAccess::Open => LexAppAccess::Open(AppAccessOpen {}),
-            AppAccess::AllowList(allowed) => LexAppAccess::AllowList(AppAccessAllowList {
-                allowed: allowed.clone(),
-            }),
-        };
-        SimplespaceConfig {
-            policy: Some(policy.lexicon_policy()),
-            app_access: Some(app_access),
-            managing_app: policy.managing_app().map(str::to_string),
-        }
+    /// The policy object surfaced by `getSpace`.
+    pub fn space_policy(&self, policy: &Policy) -> LexSpacePolicy {
+        policy.lexicon_policy()
     }
 
-    /// Mint a space credential for an already-authorized user (2h, no `aud`,
-    /// signed by the authority's space key), bound to `dpop_jkt`. `jti` is
-    /// caller-provided so the method stays deterministic/testable.
+    /// Mint a space credential for an already-authorized requester (10min, no
+    /// `aud`, signed by the authority's space key), bound to `dpop_jkt`.
+    /// `jti` is caller-provided so the method stays deterministic/testable.
     ///
     /// `dpop_jkt` must come from a DPoP proof this server verified, never from
     /// a request field: a field is an assertion anyone holding a delegation
@@ -90,12 +73,16 @@ impl Authority {
     }
 
     /// The full `getSpaceCredential` flow: verify the client attestation (when
-    /// required or presented), apply appAccess, verify the delegation token,
-    /// consult the policy, then mint.
+    /// required or presented), apply `allowedApps`, verify the delegation
+    /// token when the policy requires one, consult the policy, then mint.
+    ///
+    /// The delegation token is optional under a policy that authorizes
+    /// anonymous reads (a `memberspace` with `publicRead`): the minted
+    /// credential then identifies no user at all.
     #[allow(clippy::too_many_arguments)]
     pub async fn get_space_credential(
         &self,
-        delegation_jwt: &str,
+        delegation_jwt: Option<&str>,
         attestation_jwt: Option<&str>,
         policy: &Policy,
         keys: &dyn KeyResolver,
@@ -113,32 +100,42 @@ impl Authority {
                 verify_client_attestation(jwt, self.authority_did(), metadata, jti_store, now)
                     .await?,
             ),
-            None if self.app_access.requires_attestation() => {
+            None if policy.requires_attestation() => {
                 return Err(HostError::AttestationRequired);
             }
             None => None,
         };
-        if !self.app_access.permits(attested_client_id.as_deref()) {
+        if !policy.permits_client(attested_client_id.as_deref()) {
             return Err(HostError::ClientNotAuthorized);
         }
-        // Verify the delegation token: resolve the user's key, check typ/sub/aud/exp/sig.
-        let decoded =
-            credential::decode(delegation_jwt).map_err(|e| HostError::Delegation(e.to_string()))?;
-        let user_did = decoded.claims.iss.clone();
-        let user_key = keys.signing_key(&user_did).await?;
-        let verified_user = credential::verify_delegation_token(
-            delegation_jwt,
-            &self.space_uri(),
-            self.authority_did(),
-            &user_key,
-            now,
-        )
-        .map_err(|e| HostError::Delegation(e.to_string()))?;
-        // User axis: the policy decision (member list, public, or managing app).
+        // Verify the delegation token when one was presented: resolve the
+        // user's key, check typ/sub/aud/exp/sig.
+        let verified_user = match delegation_jwt {
+            Some(jwt) => {
+                let decoded =
+                    credential::decode(jwt).map_err(|e| HostError::Delegation(e.to_string()))?;
+                let user_did = decoded.claims.iss.clone();
+                let user_key = keys.signing_key(&user_did).await?;
+                Some(
+                    credential::verify_delegation_token(
+                        jwt,
+                        &self.space_uri(),
+                        self.authority_did(),
+                        &user_key,
+                        now,
+                    )
+                    .map_err(|e| HostError::Delegation(e.to_string()))?,
+                )
+            }
+            None => None,
+        };
+        // User axis: the policy decision (member list, public read, or the
+        // managing app).
         if !policy
             .authorizes(
                 &self.space_uri(),
-                &verified_user,
+                verified_user.as_deref(),
+                Access::Read,
                 attested_client_id.as_deref(),
             )
             .await?
@@ -157,7 +154,6 @@ mod tests {
     use crate::signing::test_signer;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
-    use rsky_lexicon::com::atproto::simplespace::Policy as LexPolicy;
     use rsky_space::jwk::{EcJwk, JwkSet};
     use std::sync::Arc;
 
@@ -169,13 +165,29 @@ mod tests {
             "community.blacksky.feed",
             "main",
         );
-        Authority::new(space, test_signer(), AppAccess::Open)
+        Authority::new(space, test_signer())
     }
 
     fn member_policy(dids: &[&str]) -> Policy {
-        Policy::MemberList(Arc::new(InMemoryMembership::new(
-            dids.iter().map(|d| d.to_string()),
-        )))
+        Policy::Memberspace {
+            public_read: false,
+            public_write: false,
+            allowed_apps: None,
+            publish_policy: false,
+            publish_members: false,
+            members: Arc::new(InMemoryMembership::new(dids.iter().map(|d| d.to_string()))),
+        }
+    }
+
+    fn allowlist_policy(dids: &[&str], allowed: Vec<String>) -> Policy {
+        Policy::Memberspace {
+            public_read: false,
+            public_write: false,
+            allowed_apps: Some(allowed),
+            publish_policy: false,
+            publish_members: false,
+            members: Arc::new(InMemoryMembership::new(dids.iter().map(|d| d.to_string()))),
+        }
     }
 
     fn client_key() -> p256::ecdsa::SigningKey {
@@ -222,7 +234,7 @@ mod tests {
         let claims = SpaceClaims {
             iss: CLIENT_ID.to_string(),
             sub: CLIENT_ID.to_string(),
-            aud: Some(format!("{}#atproto_space_host", auth.authority_did())),
+            aud: Some(format!("{}#atproto_pds", auth.authority_did())),
             iat,
             exp: iat + 60,
             jti: "attest-jti".to_string(),
@@ -293,7 +305,7 @@ mod tests {
         let claims = SpaceClaims {
             iss: user_did.to_string(),
             sub: auth.space_uri(),
-            aud: Some(format!("{}#atproto_space_host", auth.authority_did())),
+            aud: Some(format!("{}#atproto_pds", auth.authority_did())),
             iat,
             exp: iat + 60,
             jti: "delegation-jti".to_string(),
@@ -311,7 +323,7 @@ mod tests {
         let policy = member_policy(&[user]);
         let res = auth
             .get_space_credential(
-                &jwt,
+                Some(&jwt),
                 None,
                 &policy,
                 &DenyAllKeys,
@@ -334,7 +346,7 @@ mod tests {
 
         let credential = auth
             .get_space_credential(
-                &jwt,
+                Some(&jwt),
                 None,
                 &policy,
                 &FixedKey(user_key),
@@ -363,7 +375,7 @@ mod tests {
         let policy = member_policy(&[]);
         let res = auth
             .get_space_credential(
-                &jwt,
+                Some(&jwt),
                 None,
                 &policy,
                 &FixedKey(user_key),
@@ -385,7 +397,7 @@ mod tests {
         let policy = member_policy(&[user]);
         let res = auth
             .get_space_credential(
-                &jwt,
+                Some(&jwt),
                 None,
                 &policy,
                 &FixedKey(user_key.clone()),
@@ -400,7 +412,7 @@ mod tests {
 
         let res = auth
             .get_space_credential(
-                "a.b",
+                Some("a.b"),
                 None,
                 &policy,
                 &FixedKey(user_key),
@@ -415,55 +427,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn space_config_surfaces_policy_and_app_access() {
+    async fn space_policy_surfaces_the_policy_object() {
         let auth = authority();
-        let policy = Policy::Public;
-        let cfg = auth.space_config(&policy);
-        assert_eq!(cfg.policy, Some(LexPolicy::Public));
-        assert!(matches!(cfg.app_access, Some(LexAppAccess::Open(_))));
-        assert!(cfg.managing_app.is_none());
+        let policy = member_policy(&["did:plc:user"]);
+        let lex = auth.space_policy(&policy);
+        assert!(matches!(
+            lex,
+            LexSpacePolicy::Memberspace(ref p)
+                if p.public_read == Some(false) && p.allowed_apps.is_none()
+        ));
 
-        let space = SpaceId::new("did:plc:auth", "community.blacksky.feed", "main");
-        let auth = Authority::new(
-            space,
-            test_signer(),
-            AppAccess::AllowList(vec![CLIENT_ID.to_string()]),
-        );
+        let policy = allowlist_policy(&["did:plc:user"], vec![CLIENT_ID.to_string()]);
+        let lex = auth.space_policy(&policy);
+        assert!(matches!(
+            lex,
+            LexSpacePolicy::Memberspace(ref p)
+                if p.allowed_apps.as_deref() == Some(&[CLIENT_ID.to_string()])
+        ));
+
         struct NeverApp;
         #[async_trait]
         impl crate::managing_app::ManagingAppClient for NeverApp {
-            async fn check_user_access(&self, _: &str, _: &str, _: Option<&str>) -> Result<bool> {
+            async fn check_user_access(
+                &self,
+                _: &str,
+                _: &str,
+                _: Access,
+                _: Option<&str>,
+            ) -> Result<bool> {
                 Ok(false)
             }
         }
-        let policy = Policy::ManagingApp {
+        let policy = Policy::Managedspace {
             service_id: "did:web:app.example#managing_app".to_string(),
+            publish_policy: false,
             client: Arc::new(NeverApp),
         };
-        let cfg = auth.space_config(&policy);
-        assert_eq!(cfg.policy, Some(LexPolicy::ManagingApp));
-        assert!(
-            matches!(cfg.app_access, Some(LexAppAccess::AllowList(list)) if list.allowed == vec![CLIENT_ID.to_string()])
-        );
-        assert_eq!(
-            cfg.managing_app.as_deref(),
-            Some("did:web:app.example#managing_app")
-        );
-        assert!(!policy.authorizes("space", "did:plc:u", None).await.unwrap());
+        let lex = auth.space_policy(&policy);
+        assert!(matches!(
+            lex,
+            LexSpacePolicy::Managedspace(ref p)
+                if p.managing_app == "did:web:app.example#managing_app"
+        ));
+        assert!(!policy
+            .authorizes("space", Some("did:plc:u"), Access::Read, None)
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
     async fn allowlist_without_attestation_requires_one() {
-        let space = SpaceId::new("did:plc:auth", "community.blacksky.feed", "main");
-        let auth = Authority::new(
-            space,
-            test_signer(),
-            AppAccess::AllowList(vec![CLIENT_ID.to_string()]),
-        );
-        let policy = member_policy(&["did:plc:user"]);
+        let auth = authority();
+        let policy = allowlist_policy(&["did:plc:user"], vec![CLIENT_ID.to_string()]);
         let res = auth
             .get_space_credential(
-                "a.b.c",
+                Some("a.b.c"),
                 None,
                 &policy,
                 &DenyAllKeys,
@@ -479,19 +497,17 @@ mod tests {
 
     #[tokio::test]
     async fn allowlist_rejects_unlisted_attested_client() {
-        let space = SpaceId::new("did:plc:auth", "community.blacksky.feed", "main");
-        let auth = Authority::new(
-            space,
-            test_signer(),
-            AppAccess::AllowList(vec!["https://other.example/client".to_string()]),
+        let auth = authority();
+        let policy = allowlist_policy(
+            &["did:plc:user"],
+            vec!["https://other.example/client".to_string()],
         );
-        let policy = member_policy(&["did:plc:user"]);
         // The attestation verifies (proving the client is CLIENT_ID), but that
         // client is not on the allow list.
         let attest = attestation_jwt(&auth, 1000);
         let res = auth
             .get_space_credential(
-                "a.b.c",
+                Some("a.b.c"),
                 Some(&attest),
                 &policy,
                 &DenyAllKeys,
@@ -507,19 +523,14 @@ mod tests {
 
     #[tokio::test]
     async fn allowlisted_attested_client_mints() {
-        let space = SpaceId::new("did:plc:auth", "community.blacksky.feed", "main");
-        let auth = Authority::new(
-            space,
-            test_signer(),
-            AppAccess::AllowList(vec![CLIENT_ID.to_string()]),
-        );
+        let auth = authority();
+        let policy = allowlist_policy(&["did:plc:member"], vec![CLIENT_ID.to_string()]);
         let user = "did:plc:member";
         let (delegation, user_key) = user_delegation(&auth, user, 1000);
         let attest = attestation_jwt(&auth, 1000);
-        let policy = member_policy(&[user]);
         let credential = auth
             .get_space_credential(
-                &delegation,
+                Some(&delegation),
                 Some(&attest),
                 &policy,
                 &FixedKey(user_key),
@@ -559,7 +570,7 @@ mod tests {
         let policy = member_policy(&["did:plc:member"]);
         let res = auth
             .get_space_credential(
-                "a.b.c",
+                Some("a.b.c"),
                 Some("garbage"),
                 &policy,
                 &DenyAllKeys,

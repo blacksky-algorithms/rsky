@@ -1,10 +1,10 @@
 {
   "lexicon": 1,
-  "id": "com.atproto.simplespace.deleteSpace",
+  "id": "com.atproto.space.deleteSpace",
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Delete a simplespace-managed space. The authority stops issuing credentials, deletes its own repo in the space, and notifies registered syncers and known repo hosts via com.atproto.space.notifySpaceDeleted. Requires auth with a covering manage=delete grant, implemented by PDS.",
+      "description": "Delete a space. The authority stops issuing credentials, deletes its own repo in the space, and notifies registered syncers and known repo hosts via com.atproto.space.notifySpaceDeleted. Requires auth with a covering manage=delete grant, implemented by PDS.",
       "input": {
         "encoding": "application/json",
         "schema": {

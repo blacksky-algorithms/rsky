@@ -1,10 +1,10 @@
 {
   "lexicon": 1,
-  "id": "com.atproto.simplespace.removeMember",
+  "id": "com.atproto.memberspace.removeMember",
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Remove a member (by DID) from a simplespace-managed space. Requires auth with a covering manage=update grant, implemented by PDS.",
+      "description": "Remove a member (by DID) from a memberspace space. Requires auth with a covering manage=update grant, implemented by PDS.",
       "input": {
         "encoding": "application/json",
         "schema": {

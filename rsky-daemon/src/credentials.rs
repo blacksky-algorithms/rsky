@@ -215,11 +215,11 @@ mod tests {
 
         let first = provider.credential(1000).await.unwrap();
         assert_eq!(first, credential_jwt(1000));
-        // Before 80% of the 2h TTL (1000 + 5760): served from cache.
-        assert_eq!(provider.credential(6759).await.unwrap(), first);
+        // Before 80% of the 10m TTL (1000 + 480): served from cache.
+        assert_eq!(provider.credential(1479).await.unwrap(), first);
         assert_eq!(host.mints.load(Ordering::SeqCst), 1);
         // At the refresh threshold: re-minted.
-        let second = provider.credential(6760).await.unwrap();
+        let second = provider.credential(1480).await.unwrap();
         assert_eq!(second, credential_jwt(7000));
         assert_eq!(host.mints.load(Ordering::SeqCst), 2);
     }
