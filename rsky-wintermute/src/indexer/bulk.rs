@@ -783,7 +783,7 @@ pub async fn copy_insert_likes(
     // Phase 2: COPY data
     let copy_start = Instant::now();
     let copy_stmt = client
-        .copy_in("COPY _bulk_like (uri, cid, creator, subject, subject_cid, created_at, indexed_at, via, via_cid) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '')")
+        .copy_in("COPY _bulk_like (uri, cid, creator, subject, subject_cid, created_at, indexed_at, via, via_cid) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t')")
         .await?;
 
     let sink = copy_stmt;
@@ -798,8 +798,8 @@ pub async fn copy_insert_likes(
         let subject_cid = escape_copy_field(&row.subject_cid);
         let created_at = escape_copy_field(&row.created_at);
         let indexed_at = escape_copy_field(&row.indexed_at);
-        let via = escape_copy_field(row.via.as_deref().unwrap_or(""));
-        let via_cid = escape_copy_field(row.via_cid.as_deref().unwrap_or(""));
+        let via = escape_copy_opt(row.via.as_deref().filter(|v| !v.is_empty()));
+        let via_cid = escape_copy_opt(row.via_cid.as_deref().filter(|v| !v.is_empty()));
         writeln!(
             buffer,
             "{uri}\t{cid}\t{creator}\t{subject}\t{subject_cid}\t{created_at}\t{indexed_at}\t{via}\t{via_cid}"
@@ -831,7 +831,10 @@ pub async fn copy_insert_likes(
     let mut likes: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     for row in &inserted {
         applied.insert(row.get::<_, String>(0));
-        *likes.entry(row.get::<_, String>(1)).or_insert(0) += 1;
+        let subject = row.get::<_, String>(1);
+        if !subject.is_empty() {
+            *likes.entry(subject).or_insert(0) += 1;
+        }
     }
     if compute_agg {
         increment_post_agg(client, "likeCount", likes).await?;
@@ -997,7 +1000,7 @@ pub async fn copy_insert_reposts(
     // Phase 2: COPY data
     let copy_start = Instant::now();
     let copy_stmt = client
-        .copy_in("COPY _bulk_repost (uri, cid, creator, subject, subject_cid, created_at, indexed_at, via, via_cid) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '')")
+        .copy_in("COPY _bulk_repost (uri, cid, creator, subject, subject_cid, created_at, indexed_at, via, via_cid) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t')")
         .await?;
 
     let sink = copy_stmt;
@@ -1012,8 +1015,8 @@ pub async fn copy_insert_reposts(
         let subject_cid = escape_copy_field(&row.subject_cid);
         let created_at = escape_copy_field(&row.created_at);
         let indexed_at = escape_copy_field(&row.indexed_at);
-        let via = escape_copy_field(row.via.as_deref().unwrap_or(""));
-        let via_cid = escape_copy_field(row.via_cid.as_deref().unwrap_or(""));
+        let via = escape_copy_opt(row.via.as_deref().filter(|v| !v.is_empty()));
+        let via_cid = escape_copy_opt(row.via_cid.as_deref().filter(|v| !v.is_empty()));
         writeln!(
             buffer,
             "{uri}\t{cid}\t{creator}\t{subject}\t{subject_cid}\t{created_at}\t{indexed_at}\t{via}\t{via_cid}"
@@ -1045,7 +1048,10 @@ pub async fn copy_insert_reposts(
     let mut reposts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     for row in &inserted {
         applied.insert(row.get::<_, String>(0));
-        *reposts.entry(row.get::<_, String>(1)).or_insert(0) += 1;
+        let subject = row.get::<_, String>(1);
+        if !subject.is_empty() {
+            *reposts.entry(subject).or_insert(0) += 1;
+        }
     }
     if compute_agg {
         increment_post_agg(client, "repostCount", reposts).await?;
@@ -1089,7 +1095,7 @@ pub async fn copy_insert_quotes(
 
     let copy_start = Instant::now();
     let copy_stmt = client
-        .copy_in("COPY _bulk_quote (uri, cid, subject, subject_cid, created_at, indexed_at) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '')")
+        .copy_in("COPY _bulk_quote (uri, cid, subject, subject_cid, created_at, indexed_at) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t')")
         .await?;
 
     let sink = copy_stmt;
