@@ -1714,6 +1714,16 @@ impl IndexerManager {
         rest.split('/').next().unwrap_or(rest)
     }
 
+    fn admitted_by_key(
+        admitted: &[(Vec<u8>, IndexJob)],
+    ) -> std::collections::HashMap<&[u8], &IndexJob> {
+        let mut by_key = std::collections::HashMap::with_capacity(admitted.len());
+        for (key, job) in admitted {
+            by_key.entry(key.as_slice()).or_insert(job);
+        }
+        by_key
+    }
+
     /// Runs a batch under the write gate of every actor in it: fenced or
     /// stale work is answered without touching the appview, and progress
     /// is recorded for every actor whose jobs were applied.
@@ -1779,10 +1789,11 @@ impl IndexerManager {
         }
         let (applied, batch_failed) =
             Self::apply_jobs_batch(pool, &admitted, bulk_load, skip_boilerplate, &gate_mode).await;
+        let admitted_by_key = Self::admitted_by_key(&admitted);
         let mut progress: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
         for (key, result) in &applied {
             if result.is_ok() {
-                if let Some((_, job)) = admitted.iter().find(|(k, _)| k == key) {
+                if let Some(job) = admitted_by_key.get(key.as_slice()) {
                     let did = Self::job_did(job);
                     let entry = progress.entry(did).or_insert(job.rev.as_str());
                     if job.rev.as_str() > *entry {
@@ -1801,8 +1812,8 @@ impl IndexerManager {
         let failed_dids: std::collections::HashSet<&str> = applied
             .iter()
             .filter(|(_, result)| result.is_err())
-            .filter_map(|(key, _)| admitted.iter().find(|(k, _)| k == key))
-            .map(|(_, job)| Self::job_did(job))
+            .filter_map(|(key, _)| admitted_by_key.get(key.as_slice()))
+            .map(|job| Self::job_did(job))
             .collect();
         results.extend(applied);
         let mut batch_failed = batch_failed;
