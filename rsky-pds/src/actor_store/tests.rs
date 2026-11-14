@@ -538,7 +538,8 @@ impl crate::actor_store::blobstore::BlobStore for FailingBlobStore {
     fn get_stream(
         &self,
         _cid: Cid,
-    ) -> futures::future::BoxFuture<'_, Result<aws_sdk_s3::primitives::ByteStream>> {
+    ) -> futures::future::BoxFuture<'_, Result<crate::actor_store::blobstore::BoxedBlobStream>>
+    {
         Box::pin(async { bail!("blobstore unavailable") })
     }
     fn has_temp(&self, _key: String) -> futures::future::BoxFuture<'_, Result<bool>> {
@@ -610,9 +611,10 @@ async fn destroy_logs_blobstore_failures_and_still_removes_dir() {
     assert!(!store.exists(TEST_DID).await.unwrap());
 }
 
+#[cfg(feature = "disk")]
 #[tokio::test]
 async fn destroy_uses_disk_delete_all_when_available() {
-    use crate::actor_store::disk_blobstore::DiskBlobStore;
+    use rsky_blobstore::backends::disk::DiskBlobStore;
     let (dir, store) = test_store(10).await;
     store.create(TEST_DID, &test_keypair()).await.unwrap();
     let disk_store = Arc::new(DiskBlobStore::new(

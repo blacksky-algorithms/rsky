@@ -41,6 +41,11 @@ pub enum BlobstoreConfig {
         tmp_location: Option<String>,
     },
     S3(S3Config),
+    #[cfg(feature = "opendal")]
+    Opendal {
+        operator_kind: String,
+        bucket: String,
+    },
 }
 
 /// The `PDS_BLOBSTORE_*` variables as read from the environment.
@@ -63,7 +68,19 @@ pub fn blobstore_cfg_from(env: BlobstoreEnv) -> Result<BlobstoreConfig> {
             location,
             tmp_location: env.disk_tmp_location,
         }),
-        None => Ok(BlobstoreConfig::S3(env.s3)),
+        None => {
+            #[cfg(feature = "aws-s3")]
+            {
+                Ok(BlobstoreConfig::S3(env.s3))
+            }
+            #[cfg(not(feature = "aws-s3"))]
+            {
+                let _ = env.s3;
+                bail!(
+                    "S3 blobstore requires the `aws-s3` feature; set PDS_BLOBSTORE_DISK_LOCATION or rebuild with `aws-s3`"
+                )
+            }
+        }
     }
 }
 
@@ -608,6 +625,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "aws-s3")]
     #[test]
     fn blobstore_cfg_reads_the_reference_s3_settings() {
         let s3 = S3Config {
@@ -646,6 +664,24 @@ mod tests {
             ..Default::default()
         })
         .is_err());
+    }
+
+    #[cfg(not(feature = "aws-s3"))]
+    #[test]
+    fn blobstore_cfg_refuses_s3_without_the_aws_feature() {
+        assert!(blobstore_cfg_from(BlobstoreEnv::default()).is_err());
+        // an explicit disk location still configures a store
+        assert_eq!(
+            blobstore_cfg_from(BlobstoreEnv {
+                disk_location: Some("/data/blobs".to_owned()),
+                ..Default::default()
+            })
+            .unwrap(),
+            BlobstoreConfig::Disk {
+                location: "/data/blobs".to_owned(),
+                tmp_location: None,
+            }
+        );
     }
 
     #[test]

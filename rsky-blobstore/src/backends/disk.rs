@@ -1,13 +1,17 @@
-use crate::actor_store::blobstore::{DeleteError, ObjectKind};
 // based on https://github.com/bluesky-social/atproto/blob/main/packages/pds/src/disk-blobstore.ts
-use crate::actor_store::blobstore::{BlobNotFoundError, BlobStore};
+use crate::blobstore::{
+    generation_name, BlobNotFoundError, BlobStore, BoxedBlobStream, DeleteError, ObjectKind,
+};
 use anyhow::{bail, Result};
-use aws_sdk_s3::primitives::ByteStream;
+use bytes::Bytes;
 use futures::future::BoxFuture;
+use futures::stream::StreamExt;
+use futures::TryStreamExt;
 use lexicon_cid::Cid;
 use rand::RngCore;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use tokio_util::io::ReaderStream;
 
 const DELETE_MANY_CHUNK_SIZE: usize = 500;
 
@@ -109,7 +113,7 @@ impl BlobStore for DiskBlobStore {
         ]
     }
     fn object_key(&self, kind: ObjectKind, name: &str, generation: u32) -> String {
-        let name = crate::blob_generations::generation_name(name, generation);
+        let name = generation_name(name, generation);
         let root = match kind {
             ObjectKind::Permanent => &self.location,
             ObjectKind::Temp => &self.tmp_location,
@@ -225,13 +229,14 @@ impl BlobStore for DiskBlobStore {
         })
     }
 
-    fn get_stream(&self, cid: Cid) -> BoxFuture<'_, Result<ByteStream>> {
+    fn get_stream(&self, cid: Cid) -> BoxFuture<'_, Result<BoxedBlobStream>> {
         Box::pin(async move {
             let path = self.stored_path(cid);
-            if !tokio::fs::try_exists(&path).await? {
-                return Err(BlobNotFoundError.into());
-            }
-            Ok(ByteStream::from_path(&path).await?)
+            let file = tokio::fs::File::open(&path).await.map_err(translate_err)?;
+            Ok(ReaderStream::new(file)
+                .map_err(anyhow::Error::from)
+                .map(|chunk| chunk.map(Bytes::from))
+                .boxed())
         })
     }
 
@@ -301,13 +306,18 @@ impl BlobStore for DiskBlobStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rsky_common::ipld::sha256_to_cid;
     use sha2::{Digest, Sha256};
 
     const TEST_DID: &str = "did:example:alice";
+    const SHA2_256: u64 = 0x12;
+    const RAWCODEC: u64 = 0x55;
 
     fn cid_for(bytes: &[u8]) -> Cid {
-        sha256_to_cid(Sha256::digest(bytes).to_vec())
+        let hash = Sha256::digest(bytes).to_vec();
+        Cid::new_v1(
+            RAWCODEC,
+            lexicon_cid::multihash::Multihash::<64>::wrap(SHA2_256, &hash).unwrap(),
+        )
     }
 
     fn test_store(dir: &Path) -> DiskBlobStore {
@@ -396,15 +406,14 @@ mod tests {
         assert!(!store.has_temp(key.clone()).await.unwrap());
         assert!(store.has_stored(cid).await.unwrap());
         assert_eq!(store.get_bytes(cid).await.unwrap(), bytes);
-        let streamed = store
+        let streamed: Vec<Bytes> = store
             .get_stream(cid)
             .await
             .unwrap()
-            .collect()
+            .try_collect()
             .await
-            .unwrap()
-            .to_vec();
-        assert_eq!(streamed, bytes);
+            .unwrap();
+        assert_eq!(streamed.concat(), bytes);
 
         // temp key is a 32-char base32 string
         assert_eq!(key.len(), 32);
@@ -492,8 +501,10 @@ mod tests {
         assert!(store.quarantine_path(cid).is_file());
         let not_found = store.get_bytes(cid).await.unwrap_err();
         assert!(not_found.downcast_ref::<BlobNotFoundError>().is_some());
-        let not_found = store.get_stream(cid).await.unwrap_err();
-        assert!(not_found.downcast_ref::<BlobNotFoundError>().is_some());
+        match store.get_stream(cid).await {
+            Ok(_) => panic!("expected BlobNotFoundError"),
+            Err(err) => assert!(err.downcast_ref::<BlobNotFoundError>().is_some()),
+        }
 
         store.unquarantine(cid).await.unwrap();
         assert!(store.has_stored(cid).await.unwrap());
