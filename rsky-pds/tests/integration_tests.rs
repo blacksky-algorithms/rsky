@@ -886,3 +886,68 @@ async fn test_apply_writes_returns_commit_and_results() {
         .ends_with("/com.example.record/aw1"));
     assert!(results[0]["cid"].is_string());
 }
+
+#[tokio::test]
+async fn test_delete_record_returns_commit_or_empty_object() {
+    let (_dir, client) = common::get_client().await;
+    let token = get_access_token(&client).await;
+    let did = "did:plc:khvyd3oiw46vif5gm7hijslk";
+    client
+        .rocket()
+        .state::<rsky_pds::account_manager::AccountManager>()
+        .unwrap()
+        .activate_account(did)
+        .await
+        .unwrap();
+
+    let response = client
+        .post("/xrpc/com.atproto.repo.createRecord")
+        .header(ContentType::JSON)
+        .header(Header::new("Authorization", format!("Bearer {token}")))
+        .body(
+            json!({
+                "repo": did,
+                "collection": "com.example.record",
+                "rkey": "del1",
+                "validate": false,
+                "record": {"$type": "com.example.record", "text": "gone"}
+            })
+            .to_string(),
+        )
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+
+    let delete = json!({
+        "repo": did,
+        "collection": "com.example.record",
+        "rkey": "del1"
+    })
+    .to_string();
+
+    let response = client
+        .post("/xrpc/com.atproto.repo.deleteRecord")
+        .header(ContentType::JSON)
+        .header(Header::new("Authorization", format!("Bearer {token}")))
+        .body(delete.clone())
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    assert_eq!(response.content_type(), Some(ContentType::JSON));
+    let body: serde_json::Value = response.into_json().await.expect("a JSON body, not empty");
+    assert!(body["commit"]["cid"].is_string(), "{body}");
+    assert!(body["commit"]["rev"].is_string(), "{body}");
+    assert_eq!(body.as_object().unwrap().len(), 1, "{body}");
+
+    let response = client
+        .post("/xrpc/com.atproto.repo.deleteRecord")
+        .header(ContentType::JSON)
+        .header(Header::new("Authorization", format!("Bearer {token}")))
+        .body(delete)
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    assert_eq!(response.content_type(), Some(ContentType::JSON));
+    let body: serde_json::Value = response.into_json().await.expect("a JSON body, not empty");
+    assert_eq!(body, json!({}));
+}

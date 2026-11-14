@@ -174,6 +174,12 @@ pub struct CommitMeta {
     pub rev: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct DeleteRecordOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<CommitMeta>,
+}
+
 /// Output of `applyWrites`: the commit and one result per write.
 ///
 /// A missing body here is not a valid response -- the lexicon declares a JSON

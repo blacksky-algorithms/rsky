@@ -14,7 +14,7 @@ use anyhow::{bail, Result};
 use lexicon_cid::Cid;
 use rocket::serde::json::Json;
 use rocket::State;
-use rsky_lexicon::com::atproto::repo::DeleteRecordInput;
+use rsky_lexicon::com::atproto::repo::{CommitMeta, DeleteRecordInput, DeleteRecordOutput};
 use rsky_repo::types::PreparedWrite;
 use rsky_syntax::aturi::AtUri;
 use std::str::FromStr;
@@ -26,7 +26,7 @@ async fn inner_delete_record(
     blobstore_factory: &State<BlobstoreFactory>,
     actor_store: &State<ActorStore>,
     account_manager: AccountManager,
-) -> Result<()> {
+) -> Result<DeleteRecordOutput> {
     let DeleteRecordInput {
         repo,
         collection,
@@ -75,8 +75,8 @@ async fn inner_delete_record(
                 .record
                 .get_record(&write_at_uri, None, Some(true))
                 .await?;
-            match record {
-                None => return Ok(()), // No-op if record already doesn't exist
+            let commit = match record {
+                None => return Ok(DeleteRecordOutput { commit: None }), // No-op if record already doesn't exist
                 Some(_) => {
                     actor_txn
                         .process_writes(vec![PreparedWrite::Delete(write.clone())], swap_commit_cid)
@@ -88,7 +88,12 @@ async fn inner_delete_record(
                 .await?;
             record_repo_write("delete");
 
-            Ok(())
+            Ok(DeleteRecordOutput {
+                commit: Some(CommitMeta {
+                    cid: commit.commit_data.cid.to_string(),
+                    rev: commit.commit_data.rev,
+                }),
+            })
         }
     }
 }
@@ -109,7 +114,7 @@ pub async fn delete_record(
     account_manager: AccountManager,
     limits: &State<RateLimits>,
     caller: Caller,
-) -> Result<(), ApiError> {
+) -> Result<Json<DeleteRecordOutput>, ApiError> {
     let requester = auth
         .did_for(&vec![RepoTarget::new(
             body.collection.clone(),
@@ -134,7 +139,7 @@ pub async fn delete_record(
     )
     .await
     {
-        Ok(()) => Ok(()),
+        Ok(res) => Ok(Json(res)),
         Err(error) => {
             tracing::error!("@LOG: ERROR: {error}");
             Err(ApiError::from(error))
