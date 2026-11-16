@@ -667,6 +667,32 @@ mod tests {
             .is_none());
     }
 
+    #[cfg(feature = "opendal")]
+    #[tokio::test]
+    async fn factory_builds_a_working_opendal_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let factory = BlobstoreFactory::from_config(BlobstoreConfig::Opendal {
+            operator_kind: "fs".to_owned(),
+            bucket: dir.path().to_string_lossy().to_string(),
+        })
+        .await;
+        let store = factory.blobstore("did:example:alice".to_owned());
+        let bytes = b"opendal factory blob".to_vec();
+        let cid = cid_for(&bytes);
+        store.put_permanent(cid, bytes.clone()).await.unwrap();
+        assert!(store.has_stored(cid).await.unwrap());
+        assert_eq!(store.get_bytes(cid).await.unwrap(), bytes);
+        // streamed reads go through the crate's shared chunk adapter
+        let streamed: Vec<Bytes> = store
+            .get_stream(cid)
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(streamed.concat(), bytes);
+    }
+
     #[cfg(all(feature = "aws-s3", feature = "disk"))]
     #[tokio::test]
     async fn factory_builds_the_configured_backend() {
