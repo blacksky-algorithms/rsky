@@ -1,17 +1,14 @@
 // based on https://github.com/bluesky-social/atproto/blob/main/packages/pds/src/disk-blobstore.ts
 use crate::blobstore::{
-    generation_name, BlobNotFoundError, BlobStore, BoxedBlobStream, DeleteError, ObjectKind,
+    boxed_read_stream, generation_name, BlobNotFoundError, BlobStore, BoxedBlobStream, DeleteError,
+    ObjectKind,
 };
 use anyhow::{bail, Result};
-use bytes::Bytes;
 use futures::future::BoxFuture;
-use futures::stream::StreamExt;
-use futures::TryStreamExt;
 use lexicon_cid::Cid;
 use rand::RngCore;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use tokio_util::io::ReaderStream;
 
 const DELETE_MANY_CHUNK_SIZE: usize = 500;
 
@@ -233,10 +230,7 @@ impl BlobStore for DiskBlobStore {
         Box::pin(async move {
             let path = self.stored_path(cid);
             let file = tokio::fs::File::open(&path).await.map_err(translate_err)?;
-            Ok(ReaderStream::new(file)
-                .map_err(anyhow::Error::from)
-                .map(|chunk| chunk.map(Bytes::from))
-                .boxed())
+            Ok(boxed_read_stream(file))
         })
     }
 
@@ -306,6 +300,8 @@ impl BlobStore for DiskBlobStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use futures::TryStreamExt;
     use sha2::{Digest, Sha256};
 
     const TEST_DID: &str = "did:example:alice";

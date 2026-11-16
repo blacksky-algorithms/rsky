@@ -49,13 +49,19 @@ pub fn generation_name(name: &str, generation: u32) -> String {
     }
 }
 
+/// The chunk size every backend streams at. Backends hand out 64 KiB frames
+/// (an S3 GET body's own frame size); `ReaderStream`'s 4 KiB default would
+/// split each of them into sixteen stream items and sixteen `Bytes`, so the
+/// adapters below set it explicitly.
+pub const STREAM_CHUNK_SIZE: usize = 64 * 1024;
+
 /// Wraps a tokio reader as the boxed stream the trait returns, so a backend
 /// that hands out its own body type keeps streaming through it.
 pub fn boxed_read_stream<R>(reader: R) -> BoxedBlobStream
 where
     R: tokio::io::AsyncRead + Send + 'static,
 {
-    tokio_util::io::ReaderStream::new(reader)
+    tokio_util::io::ReaderStream::with_capacity(reader, STREAM_CHUNK_SIZE)
         .map_ok(Bytes::from)
         .map_err(anyhow::Error::from)
         .boxed()

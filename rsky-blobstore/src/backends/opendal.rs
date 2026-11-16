@@ -3,6 +3,7 @@
 // pulling in each service's SDK directly.
 use crate::blobstore::{
     generation_name, BlobNotFoundError, BlobStore, BoxedBlobStream, DeleteError, ObjectKind,
+    STREAM_CHUNK_SIZE,
 };
 use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
@@ -33,13 +34,6 @@ pub fn build_operator(kind: &str, bucket: &str) -> Result<Operator> {
         other => bail!("unsupported opendal operator kind: {other}"),
     };
     Ok(op)
-}
-
-/// Convenience constructor: build an [`OpendalBlobStore`] in one call. Useful
-/// for callers (e.g. rsky-pds's `BlobstoreFactory`) that don't already hold an
-/// [`Operator`].
-pub fn new_blobstore(kind: &str, bucket: &str, did: String) -> Result<OpendalBlobStore> {
-    Ok(OpendalBlobStore::new(build_operator(kind, bucket)?, did))
 }
 
 fn translate_err(err: opendal::Error) -> anyhow::Error {
@@ -227,13 +221,15 @@ impl BlobStore for OpendalBlobStore {
                 .into_futures_async_read(..)
                 .await
                 .map_err(translate_err)?;
+            // One scratch buffer for the life of the stream: allocating (and
+            // zeroing) a fresh chunk per poll copied every read twice.
+            let mut scratch = vec![0u8; STREAM_CHUNK_SIZE];
             let stream = futures::stream::poll_fn(move |cx| {
-                let mut buf = vec![0u8; 16 * 1024];
                 let pinned = std::pin::Pin::new(&mut async_read);
-                match futures::AsyncRead::poll_read(pinned, cx, &mut buf) {
+                match futures::AsyncRead::poll_read(pinned, cx, &mut scratch[..]) {
                     std::task::Poll::Ready(Ok(0)) => std::task::Poll::Ready(None),
                     std::task::Poll::Ready(Ok(n)) => {
-                        std::task::Poll::Ready(Some(Ok(Bytes::copy_from_slice(&buf[..n]))))
+                        std::task::Poll::Ready(Some(Ok(Bytes::copy_from_slice(&scratch[..n]))))
                     }
                     std::task::Poll::Ready(Err(e)) if e.kind() == ErrorKind::UnexpectedEof => {
                         std::task::Poll::Ready(None)

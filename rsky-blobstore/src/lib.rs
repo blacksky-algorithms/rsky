@@ -12,10 +12,11 @@ pub mod blobstore;
 pub use blobstore::{
     boxed_read_stream, generation_name, unavailable, BlobNotFoundError, BlobStore,
     BlobUnavailableError, BoxedBlobStream, DeleteError, MemoryBlobStore, ObjectKind,
+    STREAM_CHUNK_SIZE,
 };
 
 #[cfg(feature = "disk")]
 pub use backends::disk::DiskBlobStore;
 
 #[cfg(feature = "opendal")]
-pub use backends::opendal::{build_operator, new_blobstore, OpendalBlobStore};
+pub use backends::opendal::{build_operator, OpendalBlobStore};
