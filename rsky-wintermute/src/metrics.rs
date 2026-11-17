@@ -474,7 +474,9 @@ pub fn register_pool(name: impl Into<String>, pool: &deadpool_postgres::Pool) {
     let name = name.into();
     // A panicking holder must not take pool observability down with it; the data
     // behind this lock is a plain Vec that cannot be left half-updated.
-    let mut pools = POOLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut pools = POOLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(slot) = pools.iter_mut().find(|(n, _)| *n == name) {
         slot.1 = pool.clone();
     } else {
@@ -489,7 +491,9 @@ pub fn register_pool(name: impl Into<String>, pool: &deadpool_postgres::Pool) {
 /// and doing it at scrape time means what is exported is what was true when
 /// Prometheus asked rather than up to a tick earlier.
 pub fn sample_pools() {
-    let pools = POOLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let pools = POOLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for (name, pool) in pools.iter() {
         let s = pool.status();
         let labels = &[name.as_str()];
@@ -593,8 +597,18 @@ mod pool_metric_tests {
         register_pool("test:distinct_b", &a_pool(4));
         sample_pools();
 
-        assert_eq!(DB_POOL_MAX_SIZE.with_label_values(&["test:distinct_a"]).get(), 3);
-        assert_eq!(DB_POOL_MAX_SIZE.with_label_values(&["test:distinct_b"]).get(), 4);
+        assert_eq!(
+            DB_POOL_MAX_SIZE
+                .with_label_values(&["test:distinct_a"])
+                .get(),
+            3
+        );
+        assert_eq!(
+            DB_POOL_MAX_SIZE
+                .with_label_values(&["test:distinct_b"])
+                .get(),
+            4
+        );
     }
 
     /// A fresh pool holds nothing and nobody is blocked on it. The point of the
@@ -607,7 +621,10 @@ mod pool_metric_tests {
         sample_pools();
 
         assert_eq!(DB_POOL_SIZE.with_label_values(&["test:fresh"]).get(), 0);
-        assert_eq!(DB_POOL_AVAILABLE.with_label_values(&["test:fresh"]).get(), 0);
+        assert_eq!(
+            DB_POOL_AVAILABLE.with_label_values(&["test:fresh"]).get(),
+            0
+        );
         assert_eq!(DB_POOL_WAITING.with_label_values(&["test:fresh"]).get(), 0);
     }
 }
