@@ -621,19 +621,19 @@ pub struct RegisterNotifyOutput {
 ///
 /// The wire names follow the spaces alphas: `repoRev` was `rev` until the
 /// 2026-10-01 alpha, and `data` was `hash` until the 2026-10-22 one. The
-/// earlier names are still accepted on input, so a peer on either side of
-/// those renames is understood; output always uses the current names.
+/// earlier names are still accepted on input, alone or beside the current
+/// ones, so a peer on either side of those renames is understood; output always
+/// uses the current names. See [`NotifyWriteWire`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "NotifyWriteWire")]
 pub struct NotifyWriteInput {
     pub space: String,
     pub repo: String,
-    #[serde(rename = "repoRev", alias = "rev")]
+    #[serde(rename = "repoRev")]
     pub rev: String,
     /// `sha256` of the repo's LtHash state after the write. Unauthenticated: a
     /// reason for a syncer to fetch the head commit, never proof of it.
     #[serde(
-        alias = "hash",
-        default,
         skip_serializing_if = "Option::is_none",
         with = "crate::atproto_bytes::option"
     )]
@@ -646,6 +646,49 @@ pub struct NotifyWriteInput {
         skip_serializing_if = "Option::is_none"
     )]
     pub prev_space_rev: Option<String>,
+}
+
+/// [`NotifyWriteInput`] as read off the wire, each renamed field under both
+/// its current and its earlier name.
+///
+/// A serde `alias` would refuse a body carrying both names as a duplicate
+/// field, and rsky's space host sends both to syncers: `rev` beside `repoRev`,
+/// for syncers built before the rename. The current name wins when both are
+/// present.
+#[derive(Deserialize)]
+struct NotifyWriteWire {
+    space: String,
+    repo: String,
+    #[serde(rename = "repoRev", default)]
+    repo_rev: Option<String>,
+    #[serde(default)]
+    rev: Option<String>,
+    #[serde(default, with = "crate::atproto_bytes::option")]
+    data: Option<Vec<u8>>,
+    #[serde(default, with = "crate::atproto_bytes::option")]
+    hash: Option<Vec<u8>>,
+    #[serde(rename = "spaceRev", default)]
+    space_rev: Option<String>,
+    #[serde(rename = "prevSpaceRev", default)]
+    prev_space_rev: Option<String>,
+}
+
+impl TryFrom<NotifyWriteWire> for NotifyWriteInput {
+    type Error = &'static str;
+
+    fn try_from(wire: NotifyWriteWire) -> Result<Self, Self::Error> {
+        Ok(Self {
+            space: wire.space,
+            repo: wire.repo,
+            rev: wire
+                .repo_rev
+                .or(wire.rev)
+                .ok_or("missing field `repoRev`")?,
+            data: wire.data.or(wire.hash),
+            space_rev: wire.space_rev,
+            prev_space_rev: wire.prev_space_rev,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1276,6 +1319,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bare.data, None);
+        // Both names at once, as rsky's space host sends syncers, read too;
+        // the current name wins.
+        let both: NotifyWriteInput = serde_json::from_str(
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer","repoRev":"3jzfcijpj2z2c","rev":"3jzfcijpj2z2a","data":{"$bytes":"AQID"},"hash":{"$bytes":"BAUG"}}"#,
+        )
+        .unwrap();
+        assert_eq!(both, leg1);
+        // Neither revision name is an error.
+        assert!(serde_json::from_str::<NotifyWriteInput>(
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","repo":"did:plc:writer"}"#,
+        )
+        .is_err());
         roundtrip(
             &NotifySpaceDeletedInput {
                 space: SPACE.to_string(),
