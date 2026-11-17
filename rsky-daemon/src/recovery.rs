@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 
 use rsky_space::car::RepoCarValidator;
-use rsky_space::commit::verify_commit;
+use rsky_space::commit::verify_commit_either_tag;
 use rsky_space::lthash::{element, LtHash};
 
 use crate::engine::{CommitKeyResolver, SyncOutcome};
@@ -29,7 +29,7 @@ pub async fn recover_repo(
     let validator = RepoCarValidator::new(car.as_slice()).await?;
     let commit = validator.commit().clone();
     let author_key = keys.signing_key(did).await?;
-    verify_commit(
+    verify_commit_either_tag(
         &author_key,
         space_uri,
         did,

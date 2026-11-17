@@ -16,6 +16,12 @@ pub enum DaemonError {
     /// full-state recovery (`getRepo`).
     #[error("history unavailable: {0}")]
     HistoryUnavailable(String),
+    /// The repo host served the unsigned commit of the 2026-10-29 spaces alpha
+    /// (`{ver, repo, space, rev, data}`). It carries no signature; its proof is
+    /// a response MAC this daemon does not yet check. Fall back to full-state
+    /// recovery, whose CAR carries a signed commit.
+    #[error("repo host served an unsigned commit for {0}")]
+    UnsignedCommit(String),
     /// A projection destination was unreachable or overloaded. Distinct from
     /// [`DaemonError::Xrpc`] because it must not consume the batch's failure
     /// budget: an outage is not a bad batch.
@@ -38,6 +44,28 @@ impl DaemonError {
 
     pub fn is_admission_denied(&self) -> bool {
         matches!(self, Self::AdmissionDenied(_))
+    }
+
+    /// Incremental sync cannot proceed, but full-state recovery can.
+    pub fn needs_recovery(&self) -> bool {
+        matches!(
+            self,
+            Self::Diverged(_) | Self::HistoryUnavailable(_) | Self::UnsignedCommit(_)
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovery_follows_divergence_lost_history_and_unsigned_commits() {
+        assert!(DaemonError::Diverged("d".into()).needs_recovery());
+        assert!(DaemonError::HistoryUnavailable("h".into()).needs_recovery());
+        assert!(DaemonError::UnsignedCommit("u".into()).needs_recovery());
+        assert!(!DaemonError::Xrpc("x".into()).needs_recovery());
+        assert!(!DaemonError::KeyResolution("k".into()).needs_recovery());
     }
 }
 

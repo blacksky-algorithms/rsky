@@ -8,7 +8,7 @@ use rsky_space::types::{RepoOp, SignedCommit};
 use serde_bytes::ByteBuf;
 
 use crate::dpop::DpopSigner;
-use crate::error::Result;
+use crate::error::{DaemonError, Result};
 use crate::identity::PdsResolver;
 use crate::xrpc::{http_client, net_err, send_with_dpop_retry};
 use std::collections::HashMap;
@@ -109,18 +109,51 @@ impl HttpRepoHost {
     }
 
     async fn get(&self, nsid: &str, query: &[(&str, &str)]) -> Result<reqwest::Response> {
+        self.get_accepting(nsid, query, None).await
+    }
+
+    /// `get`, naming the media type wanted in `Accept`. Without one, reqwest
+    /// sends `Accept: */*`.
+    async fn get_accepting(
+        &self,
+        nsid: &str,
+        query: &[(&str, &str)],
+        accept: Option<&str>,
+    ) -> Result<reqwest::Response> {
         let url = self.url(nsid);
         send_with_dpop_retry(&self.dpop, "GET", &url, Some(&self.credential), |proof| {
-            Ok(self
+            let request = self
                 .http
                 .get(&url)
                 .header("Authorization", format!("DPoP {}", self.credential))
                 .header("DPoP", proof)
-                .query(query))
+                .query(query);
+            Ok(match accept {
+                Some(accept) => request.header(reqwest::header::ACCEPT, accept),
+                None => request,
+            })
         })
         .await
     }
 }
+
+/// Whether a `listRepoOps` page carries the unsigned commit of the 2026-10-29
+/// spaces alpha (`{ver, repo, space, rev, data}`) rather than a signed one: a
+/// `commit` with no `sig`. A host that also sends the signed fields beside the
+/// unsigned ones still verifies the usual way.
+fn is_unsigned_commit_page(body: &serde_json::Value) -> bool {
+    body.get("commit")
+        .is_some_and(|commit| commit.is_object() && commit.get("sig").is_none())
+}
+
+/// The media type of the repo CAR `getRepo` answers when asked for it.
+///
+/// Hosts on the 2026-10-29 spaces alpha answer `getRepo` with a STAR archive
+/// by default (to `*/*` too) and the CAR -- signed commit plus record index --
+/// only for this type in `Accept`. Recovery reads a CAR and verifies its signed
+/// commit (`recovery::recover_repo`), so it asks for one; hosts before the
+/// alpha answer the CAR either way.
+pub const CAR_MEDIA_TYPE: &str = "application/vnd.ipld.car";
 
 #[async_trait]
 impl RepoHostClient for HttpRepoHost {
@@ -138,12 +171,17 @@ impl RepoHostClient for HttpRepoHost {
         if let Some(cursor) = cursor {
             query.push(("cursor", cursor));
         }
-        let out: wire::ListRepoOpsOutput = self
+        let body: serde_json::Value = self
             .get("com.atproto.space.listRepoOps", &query)
             .await?
             .json()
             .await
             .map_err(net_err)?;
+        if is_unsigned_commit_page(&body) {
+            return Err(DaemonError::UnsignedCommit(did.to_string()));
+        }
+        let out: wire::ListRepoOpsOutput =
+            serde_json::from_value(body).map_err(|e| DaemonError::Xrpc(e.to_string()))?;
         Ok(OplogPage {
             ops: out.ops.into_iter().map(op_from_wire).collect(),
             commit: out.commit.map(commit_from_wire),
@@ -153,9 +191,10 @@ impl RepoHostClient for HttpRepoHost {
 
     async fn get_repo_car(&self, space: &str, did: &str) -> Result<Vec<u8>> {
         let resp = self
-            .get(
+            .get_accepting(
                 "com.atproto.space.getRepo",
                 &[("space", space), ("repo", did)],
+                Some(CAR_MEDIA_TYPE),
             )
             .await?;
         Ok(resp.bytes().await.map_err(net_err)?.to_vec())
@@ -480,6 +519,9 @@ mod tests {
             .and(query_param("repo", AUTHOR))
             .and(header("authorization", "DPoP sc.jwt"))
             .and(header_exists("dpop"))
+            // A host on the spaces alpha answers a STAR archive unless the CAR
+            // is asked for.
+            .and(header("accept", CAR_MEDIA_TYPE))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0xCAu8, 0x11]))
             .mount(&server)
             .await;
@@ -521,6 +563,65 @@ mod tests {
 
         let host = HttpRepoHost::new(server.uri(), "sc.jwt", test_dpop());
         let err = host.get_latest_commit(SPACE, AUTHOR).await.unwrap_err();
+        assert!(matches!(err, DaemonError::Xrpc(_)));
+    }
+
+    /// A host answering `listRepoOps` with `body`, and the server behind it,
+    /// which must stay alive while the host is used.
+    async fn serve_list_repo_ops(body: serde_json::Value) -> (MockServer, HttpRepoHost) {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.space.listRepoOps"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        let host = HttpRepoHost::new(server.uri(), "sc.jwt", test_dpop());
+        (server, host)
+    }
+
+    #[tokio::test]
+    async fn unsigned_commit_page_asks_for_recovery() {
+        // The page a host on the 2026-10-29 spaces alpha serves at the head.
+        let (_server, host) = serve_list_repo_ops(serde_json::json!({
+            "ops": [],
+            "commit": {
+                "ver": 1,
+                "repo": AUTHOR,
+                "space": SPACE,
+                "rev": "3krev",
+                "data": {"$bytes": "AQID"}
+            }
+        }))
+        .await;
+        let err = host
+            .list_repo_ops(SPACE, AUTHOR, None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, DaemonError::UnsignedCommit(did) if did == AUTHOR));
+        assert!(err.needs_recovery());
+    }
+
+    #[tokio::test]
+    async fn commit_carrying_both_shapes_verifies_as_signed() {
+        // A host sending the signed fields beside the unsigned ones is read
+        // the usual way.
+        let mut commit = wire_commit_json();
+        commit["repo"] = serde_json::json!(AUTHOR);
+        commit["space"] = serde_json::json!(SPACE);
+        commit["data"] = serde_json::json!({"$bytes": "AQID"});
+        let (_server, host) =
+            serve_list_repo_ops(serde_json::json!({"ops": [], "commit": commit})).await;
+        let page = host.list_repo_ops(SPACE, AUTHOR, None, None).await.unwrap();
+        assert_eq!(page.commit, Some(expected_commit()));
+    }
+
+    #[tokio::test]
+    async fn misshapen_oplog_page_maps_to_xrpc_variant() {
+        let (_server, host) = serve_list_repo_ops(serde_json::json!({"ops": "not a list"})).await;
+        let err = host
+            .list_repo_ops(SPACE, AUTHOR, None, None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, DaemonError::Xrpc(_)));
     }
 }

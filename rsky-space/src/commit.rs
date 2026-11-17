@@ -18,6 +18,11 @@ use crate::error::{Result, SpaceError};
 /// Fixed protocol tag; also names the commit format version (`ver = 1`).
 const PROTO_TAG: &[u8] = b"atproto-space-v1";
 
+/// The tag the spaces specification names for repo commits, which hosts
+/// following it sign under (rsky-pds since `954becb4`). The rest of the
+/// context is unchanged; only the tag differs. See [`verify_commit_either_tag`].
+pub const REPO_PROTO_TAG: &[u8] = b"atproto-space-repo-v1";
+
 type HmacSha256 = Hmac<Sha256>;
 
 /// Build the domain-separation context:
@@ -34,10 +39,14 @@ type HmacSha256 = Hmac<Sha256>;
 /// order from the little-endian LtHash lanes — the two come from different
 /// specs and each keeps its native order.
 pub fn build_ctx(space: &str, author: &str, rev: &str, ikm: &[u8]) -> Vec<u8> {
-    let mut ctx = Vec::with_capacity(
-        PROTO_TAG.len() + 8 + space.len() + author.len() + rev.len() + ikm.len(),
-    );
-    ctx.extend_from_slice(PROTO_TAG);
+    build_ctx_with_tag(PROTO_TAG, space, author, rev, ikm)
+}
+
+/// [`build_ctx`] under a given protocol tag.
+pub fn build_ctx_with_tag(tag: &[u8], space: &str, author: &str, rev: &str, ikm: &[u8]) -> Vec<u8> {
+    let mut ctx =
+        Vec::with_capacity(tag.len() + 8 + space.len() + author.len() + rev.len() + ikm.len());
+    ctx.extend_from_slice(tag);
     for field in [space.as_bytes(), author.as_bytes(), rev.as_bytes(), ikm] {
         ctx.extend_from_slice(&(field.len() as u16).to_be_bytes());
         ctx.extend_from_slice(field);
@@ -89,7 +98,57 @@ pub fn verify_commit(
     mac: &[u8],
     hash: &[u8],
 ) -> Result<()> {
-    let ctx = build_ctx(space, author, rev, ikm);
+    verify_commit_with_tag(PROTO_TAG, did_key, space, author, rev, ikm, sig, mac, hash)
+}
+
+/// [`verify_commit`], accepting a commit signed under either [`PROTO_TAG`]
+/// or [`REPO_PROTO_TAG`].
+///
+/// For a syncer, which pulls from each member's own repo host and so meets
+/// hosts on both sides of the tag change. The two contexts differ, so a
+/// signature or MAC made under one never verifies under the other; accepting
+/// both only accepts what one of the two protocol versions would.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_commit_either_tag(
+    did_key: &str,
+    space: &str,
+    author: &str,
+    rev: &str,
+    ikm: &[u8],
+    sig: &[u8],
+    mac: &[u8],
+    hash: &[u8],
+) -> Result<()> {
+    verify_commit_with_tag(PROTO_TAG, did_key, space, author, rev, ikm, sig, mac, hash).or_else(
+        |_| {
+            verify_commit_with_tag(
+                REPO_PROTO_TAG,
+                did_key,
+                space,
+                author,
+                rev,
+                ikm,
+                sig,
+                mac,
+                hash,
+            )
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_commit_with_tag(
+    tag: &[u8],
+    did_key: &str,
+    space: &str,
+    author: &str,
+    rev: &str,
+    ikm: &[u8],
+    sig: &[u8],
+    mac: &[u8],
+    hash: &[u8],
+) -> Result<()> {
+    let ctx = build_ctx_with_tag(tag, space, author, rev, ikm);
     let digest = Sha256::digest(&ctx);
     let ok = rsky_crypto::verify::verify_signature_digest(&did_key.to_string(), &digest, sig, None)
         .map_err(|e| SpaceError::Crypto(e.to_string()))?;
@@ -102,6 +161,83 @@ pub fn verify_commit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repo_tag_mac_matches_the_spec_vector() {
+        // The vector rsky-pds pins for `atproto-space-repo-v1` (after
+        // `954becb4`), so this side derives exactly what those hosts sign.
+        let ikm = [7u8; 32];
+        let ctx = build_ctx_with_tag(
+            REPO_PROTO_TAG,
+            "at://a/space/t/main",
+            "did:plc:author",
+            "3krev",
+            &ikm,
+        );
+        let mac = compute_mac(&ikm, &ctx, &[42u8; 32]).unwrap();
+        assert_eq!(
+            hex::encode(mac),
+            "88d7d33cf56a68b7be6757dfb8851db24403e3fb56bfeb647229b2c8c7cf501c"
+        );
+    }
+
+    #[test]
+    fn either_tag_verifies_commits_signed_under_both() {
+        use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
+        let secret = SecretKey::from_slice(&[0x22u8; 32]).unwrap();
+        let did_key = rsky_crypto::utils::encode_did_key(&PublicKey::from_secret_key(
+            &Secp256k1::new(),
+            &secret,
+        ));
+        let (space, author, rev, ikm, hash) = (
+            "at://a/space/t/main",
+            "did:plc:a",
+            "3r",
+            [5u8; 32],
+            [6u8; 32],
+        );
+        let sign = |tag: &[u8]| {
+            let ctx = build_ctx_with_tag(tag, space, author, rev, &ikm);
+            let msg = Message::from_digest_slice(&Sha256::digest(&ctx)).unwrap();
+            let mut sig = secret.sign_ecdsa(msg);
+            sig.normalize_s();
+            (
+                sig.serialize_compact(),
+                compute_mac(&ikm, &ctx, &hash).unwrap(),
+            )
+        };
+
+        // Signed under the earlier tag: both checks accept it.
+        let (sig, mac) = sign(PROTO_TAG);
+        assert!(verify_commit(&did_key, space, author, rev, &ikm, &sig, &mac, &hash).is_ok());
+        assert!(
+            verify_commit_either_tag(&did_key, space, author, rev, &ikm, &sig, &mac, &hash).is_ok()
+        );
+
+        // Signed under the spec's repo tag: only the either-tag check does.
+        let (sig, mac) = sign(REPO_PROTO_TAG);
+        assert!(verify_commit(&did_key, space, author, rev, &ikm, &sig, &mac, &hash).is_err());
+        assert!(
+            verify_commit_either_tag(&did_key, space, author, rev, &ikm, &sig, &mac, &hash).is_ok()
+        );
+
+        // Neither: a tampered hash, or a commit for another space, fails.
+        assert!(verify_commit_either_tag(
+            &did_key, space, author, rev, &ikm, &sig, &mac, &[7u8; 32]
+        )
+        .is_err());
+        assert!(verify_commit_either_tag(
+            &did_key,
+            "at://a/space/t/other",
+            author,
+            rev,
+            &ikm,
+            &sig,
+            &mac,
+            &hash
+        )
+        .is_err());
+    }
 
     #[test]
     fn ctx_is_byte_exact() {

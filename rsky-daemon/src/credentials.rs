@@ -1,10 +1,10 @@
 //! Space-credential lifecycle (proposal §Credential flow): mint a delegation
 //! token from the syncer account's PDS, exchange it with the space authority
-//! for a 2h space credential, and refresh before expiry.
+//! for a space credential, and refresh before expiry.
 
 use async_trait::async_trait;
 use rsky_lexicon::com::atproto::space::GetDelegationTokenOutput;
-use rsky_space::credential::{decode, CREDENTIAL_TTL_SECS};
+use rsky_space::credential::decode;
 use rsky_space::space_id::SpaceId;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -15,7 +15,20 @@ use crate::error::Result;
 use crate::xrpc::{check, http_client, net_err, SpaceHostClient};
 use crate::{service_jwt::ServiceJwtIssuer, HttpSpaceHost};
 
+/// A cached credential, the time to re-mint it, and its generation.
 type AuthCacheEntry = Arc<Mutex<Option<(String, u64, i64)>>>;
+
+/// When to re-mint a credential issued at `iat` that expires at `exp`: once
+/// 80% of its own lifetime has elapsed.
+///
+/// The lifetime is read from the credential rather than assumed, because the
+/// space host chooses it: hosts before the spaces alpha issue 2 hours, and the
+/// alpha sets 10 minutes. Assuming 2 hours against a 10-minute host leaves
+/// every credential past its refresh point at once, so each call re-mints --
+/// and spends a delegation token -- instead of reusing it.
+fn refresh_at(iat: u64, exp: u64) -> u64 {
+    exp.saturating_sub(exp.saturating_sub(iat) / 5)
+}
 
 /// Seconds since the Unix epoch; the injectable-`now` boundary for tests.
 pub fn unix_now() -> u64 {
@@ -242,17 +255,16 @@ impl AuthCredentialProvider {
     pub async fn credential_for(&self, space: &str, generation: i64, now: u64) -> Result<String> {
         let cache = self.cache_for(space).await;
         let mut cached = cache.lock().await;
-        if let Some((jwt, exp, cached_generation)) = cached.as_ref() {
-            if *cached_generation == generation && now < exp.saturating_sub(CREDENTIAL_TTL_SECS / 5)
-            {
+        if let Some((jwt, refresh, cached_generation)) = cached.as_ref() {
+            if *cached_generation == generation && now < *refresh {
                 return Ok(jwt.clone());
             }
         }
         let source = AuthDelegationSource::new(&self.auth_url, space, generation, &self.auth_key)?;
         let token = source.delegation_token(space).await?;
         let jwt = self.host.get_space_credential(space, &token, None).await?;
-        let exp = decode(&jwt)?.claims.exp;
-        *cached = Some((jwt.clone(), exp, generation));
+        let claims = decode(&jwt)?.claims;
+        *cached = Some((jwt.clone(), refresh_at(claims.iat, claims.exp), generation));
         Ok(jwt)
     }
 }
@@ -283,8 +295,8 @@ impl InternalCredentialProvider {
     /// space boundary in the cache.
     pub async fn credential_for(&self, space: &str, now: u64) -> Result<String> {
         let mut cached = self.cached.lock().await;
-        if let Some((jwt, exp)) = cached.get(space) {
-            if now < exp.saturating_sub(CREDENTIAL_TTL_SECS / 5) {
+        if let Some((jwt, refresh)) = cached.get(space) {
+            if now < *refresh {
                 return Ok(jwt.clone());
             }
         }
@@ -294,8 +306,11 @@ impl InternalCredentialProvider {
             .host
             .mint_internal_credential(space, &service_jwt, &self.mint_token)
             .await?;
-        let exp = decode(&jwt)?.claims.exp;
-        cached.insert(space.to_string(), (jwt.clone(), exp));
+        let claims = decode(&jwt)?.claims;
+        cached.insert(
+            space.to_string(),
+            (jwt.clone(), refresh_at(claims.iat, claims.exp)),
+        );
         Ok(jwt)
     }
 }
@@ -306,13 +321,15 @@ impl CredentialSource for InternalCredentialProvider {
     }
 }
 
-/// Mints and caches a space credential, re-minting once 80% of the credential
-/// TTL has elapsed so the daemon never presents one near expiry.
+/// Mints and caches a space credential, re-minting once 80% of the
+/// credential's lifetime has elapsed so the daemon never presents one near
+/// expiry.
 pub struct CredentialProvider {
     space: String,
     source: Box<dyn DelegationSource>,
     host: Arc<dyn SpaceHostClient>,
     client_attestation: Option<String>,
+    /// The cached credential and the time to re-mint it.
     cached: Mutex<Option<(String, u64)>>,
 }
 
@@ -336,8 +353,8 @@ impl CredentialProvider {
 impl CredentialSource for CredentialProvider {
     async fn credential(&self, now: u64) -> Result<String> {
         let mut cached = self.cached.lock().await;
-        if let Some((jwt, exp)) = cached.as_ref() {
-            if now < exp.saturating_sub(CREDENTIAL_TTL_SECS / 5) {
+        if let Some((jwt, refresh)) = cached.as_ref() {
+            if now < *refresh {
                 return Ok(jwt.clone());
             }
         }
@@ -346,9 +363,10 @@ impl CredentialSource for CredentialProvider {
             .host
             .get_space_credential(&self.space, &token, self.client_attestation.as_deref())
             .await?;
-        let exp = decode(&jwt)?.claims.exp;
-        tracing::info!(space = %self.space, exp, "minted space credential");
-        *cached = Some((jwt.clone(), exp));
+        let claims = decode(&jwt)?.claims;
+        let refresh = refresh_at(claims.iat, claims.exp);
+        tracing::info!(space = %self.space, exp = claims.exp, refresh, "minted space credential");
+        *cached = Some((jwt.clone(), refresh));
         Ok(jwt)
     }
 }
@@ -358,7 +376,9 @@ mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
     use rsky_lexicon::com::atproto::space::ListReposOutput;
-    use rsky_space::credential::{encode, JwtHeader, SpaceClaims, CREDENTIAL_TYP};
+    use rsky_space::credential::{
+        encode, JwtHeader, SpaceClaims, CREDENTIAL_TTL_SECS, CREDENTIAL_TYP,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
     use wiremock::matchers::{header, method, path, query_param};
@@ -368,6 +388,10 @@ mod tests {
     const OTHER_SPACE: &str = "at://did:plc:other/space/community.blacksky.feed/main";
 
     fn credential_jwt(iat: u64) -> String {
+        credential_jwt_with_ttl(iat, CREDENTIAL_TTL_SECS)
+    }
+
+    fn credential_jwt_with_ttl(iat: u64, ttl: u64) -> String {
         let header = JwtHeader {
             typ: CREDENTIAL_TYP.to_string(),
             alg: "ES256K".to_string(),
@@ -378,7 +402,7 @@ mod tests {
             sub: SPACE.to_string(),
             aud: None,
             iat,
-            exp: iat + CREDENTIAL_TTL_SECS,
+            exp: iat + ttl,
             jti: format!("jti-{iat}"),
             cnf: None,
         };
@@ -394,11 +418,13 @@ mod tests {
         }
     }
 
-    /// Mints a fresh credential (iat advances per mint) and counts mints.
+    /// Mints a fresh credential (iat advances per mint) with a fixed lifetime,
+    /// and counts mints.
     struct MintingHost {
         mints: AtomicUsize,
         iats: Vec<u64>,
         block: Option<(Arc<Notify>, Arc<Notify>)>,
+        ttl: u64,
     }
     #[async_trait]
     impl SpaceHostClient for MintingHost {
@@ -416,7 +442,7 @@ mod tests {
                 release.notified().await;
             }
             let i = self.mints.fetch_add(1, Ordering::SeqCst);
-            Ok(credential_jwt(self.iats[i]))
+            Ok(credential_jwt_with_ttl(self.iats[i], self.ttl))
         }
         async fn list_repos(
             &self,
@@ -447,6 +473,7 @@ mod tests {
             mints: AtomicUsize::new(0),
             iats: vec![1000, 7000],
             block: None,
+            ttl: CREDENTIAL_TTL_SECS,
         });
         let provider = CredentialProvider::new(SPACE, Box::new(FixedDelegation), host.clone());
 
@@ -628,6 +655,7 @@ mod tests {
             mints: AtomicUsize::new(0),
             iats: vec![1000, 7000],
             block: None,
+            ttl: CREDENTIAL_TTL_SECS,
         });
         let provider = AuthCredentialProvider::new(server.uri(), "auth-key", host.clone());
         let first = provider.credential_for(SPACE, 1, 1000).await.unwrap();
@@ -640,6 +668,53 @@ mod tests {
             credential_jwt(7000)
         );
         assert_eq!(host.mints.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn auth_provider_reuses_ten_minute_credentials_until_80_percent() {
+        // A host on the spaces alpha issues 10-minute credentials. Assuming
+        // the 2h `CREDENTIAL_TTL_SECS`, every one would already be past its
+        // refresh point (exp - 1440s) and each call would re-mint.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/internal/native-spaces/did%3Aplc%3Aauthority/delegation",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "delegationToken": "dt.jwt",
+                "expiresAt": 1893456000,
+            })))
+            .mount(&server)
+            .await;
+        let host = Arc::new(MintingHost {
+            mints: AtomicUsize::new(0),
+            iats: vec![1000, 1480],
+            block: None,
+            ttl: 600,
+        });
+        let provider = AuthCredentialProvider::new(server.uri(), "auth-key", host.clone());
+        let first = provider.credential_for(SPACE, 1, 1000).await.unwrap();
+        // Before 80% of its 10 minutes (1000 + 480): served from cache.
+        assert_eq!(
+            provider.credential_for(SPACE, 1, 1479).await.unwrap(),
+            first
+        );
+        assert_eq!(host.mints.load(Ordering::SeqCst), 1);
+        // At the refresh point: re-minted once.
+        assert_eq!(
+            provider.credential_for(SPACE, 1, 1480).await.unwrap(),
+            credential_jwt_with_ttl(1480, 600)
+        );
+        assert_eq!(host.mints.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn refresh_at_is_80_percent_of_the_lifetime() {
+        assert_eq!(refresh_at(1000, 1600), 1480);
+        assert_eq!(refresh_at(1000, 8200), 6760);
+        // An already-expired or zero-lifetime credential is due at once.
+        assert_eq!(refresh_at(1000, 1000), 1000);
+        assert_eq!(refresh_at(1000, 900), 900);
     }
 
     #[tokio::test]
@@ -658,6 +733,7 @@ mod tests {
             mints: AtomicUsize::new(0),
             iats: vec![1000],
             block: Some((started.clone(), release.clone())),
+            ttl: CREDENTIAL_TTL_SECS,
         });
         let provider = Arc::new(AuthCredentialProvider::new(
             server.uri(),
@@ -702,6 +778,7 @@ mod tests {
             mints: AtomicUsize::new(0),
             iats: vec![],
             block: None,
+            ttl: CREDENTIAL_TTL_SECS,
         };
         assert!(host.list_repos(SPACE, "c", None, None).await.is_ok());
         assert!(host.register_notify(SPACE, "c", "e", None).await.is_ok());
