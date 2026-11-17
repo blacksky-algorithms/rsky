@@ -1,14 +1,37 @@
 //! The managing-app access check (spec §managedspace).
 //!
 //! Under the `managedspace` policy the authority does NOT read the access
-//! decision itself: it asks the space's `managingApp` via
-//! `com.atproto.managedspace.checkUserAccess`, authenticated with a
+//! decision itself: it asks the space's `managingApp`, authenticated with a
 //! service-auth JWT so the app can verify the call originates from the
 //! space's authority. Reads and writes are checked separately.
+//!
+//! # Three methods, one question
+//!
+//! The method has been named three ways, and managing apps in the wild answer
+//! each, so the authority tries them in [`CheckMethod::CHAIN`] order:
+//!
+//! 1. `com.atproto.managedspace.checkUserAccess` -- the 2026-10-29 spaces
+//!    alpha this server implements: `{space, user, access, clientId}`,
+//!    answering `{authorized}`.
+//! 2. `com.atproto.managedspace.checkAccess` -- the reference since
+//!    2026-11-04: `{space, repo, clientId}`, answering both `{read, write}`.
+//! 3. `com.atproto.simplespace.checkUserAccess` -- the API before the
+//!    alphas, which Acorn's feed service still serves: `{space, did,
+//!    clientId}`, answering `{allowed}`. It has no access kind, so one answer
+//!    stands for reads and writes alike, as it did under that API.
+//!
+//! It moves on only when a method is **not served** -- `404` or `501` without
+//! an XRPC error naming anything but `MethodNotImplemented` -- never on an
+//! answer, a refusal, or any other error, so a "no" can never become a "yes"
+//! by asking elsewhere. Each call is signed for its own method (`lxm`). The
+//! method an app answered is remembered per endpoint for the life of the
+//! process, so an app on a later method pays the extra round trips once.
 
 use async_trait::async_trait;
 use rsky_lexicon::com::atproto::managedspace::{Access, CheckUserAccessOutput};
-use std::sync::Arc;
+use serde::Deserialize;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::error::{HostError, Result};
@@ -17,7 +40,74 @@ use crate::service_jwt;
 use crate::signing::Signer;
 
 pub const CHECK_USER_ACCESS_LXM: &str = "com.atproto.managedspace.checkUserAccess";
+pub const CHECK_ACCESS_LXM: &str = "com.atproto.managedspace.checkAccess";
+pub const LEGACY_CHECK_USER_ACCESS_LXM: &str = "com.atproto.simplespace.checkUserAccess";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A method a managing app may answer the access check on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckMethod {
+    /// `com.atproto.managedspace.checkUserAccess`, the 2026-10-29 alpha.
+    CheckUserAccess,
+    /// `com.atproto.managedspace.checkAccess`, the reference since 2026-11-04.
+    CheckAccess,
+    /// `com.atproto.simplespace.checkUserAccess`, the API before the alphas.
+    LegacySimplespace,
+}
+
+impl CheckMethod {
+    /// The order the methods are tried in: the one this server implements,
+    /// then the newer, then the older.
+    pub const CHAIN: [CheckMethod; 3] = [
+        CheckMethod::CheckUserAccess,
+        CheckMethod::CheckAccess,
+        CheckMethod::LegacySimplespace,
+    ];
+
+    /// The method's NSID, also the `lxm` its service auth carries.
+    pub fn nsid(self) -> &'static str {
+        match self {
+            CheckMethod::CheckUserAccess => CHECK_USER_ACCESS_LXM,
+            CheckMethod::CheckAccess => CHECK_ACCESS_LXM,
+            CheckMethod::LegacySimplespace => LEGACY_CHECK_USER_ACCESS_LXM,
+        }
+    }
+}
+
+/// `com.atproto.managedspace.checkAccess`'s answer.
+#[derive(Deserialize)]
+struct CheckAccessOutput {
+    read: Option<bool>,
+    write: Option<bool>,
+}
+
+/// The method each managing-app endpoint last answered on.
+fn answered_by() -> &'static Mutex<HashMap<String, CheckMethod>> {
+    static ANSWERED_BY: OnceLock<Mutex<HashMap<String, CheckMethod>>> = OnceLock::new();
+    ANSWERED_BY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Whether a response says the method is not served at all, as opposed to an
+/// answer or an error from a method that is. `501` is XRPC's
+/// `MethodNotImplemented`; a `404` is what a server with no such route
+/// answers, unless its body is an XRPC error naming something else, which
+/// only a served method would send.
+fn not_served(status: reqwest::StatusCode, body: &[u8]) -> bool {
+    if status != reqwest::StatusCode::NOT_FOUND && status != reqwest::StatusCode::NOT_IMPLEMENTED {
+        return false;
+    }
+    #[derive(Deserialize)]
+    struct XrpcError {
+        error: Option<String>,
+    }
+    match serde_json::from_slice::<XrpcError>(body)
+        .ok()
+        .and_then(|e| e.error)
+    {
+        Some(error) => error == "MethodNotImplemented",
+        None => true,
+    }
+}
 
 /// Asks the managing app whether a user may read or write a space.
 #[async_trait]
@@ -63,7 +153,8 @@ pub(crate) fn require_https(url: &str) -> Result<()> {
 }
 
 /// HTTP [`ManagingAppClient`]: resolves the managing app's service endpoint from
-/// its DID document and calls `checkUserAccess` with authority service auth.
+/// its DID document and asks it with authority service auth, on the first
+/// method of [`CheckMethod::CHAIN`] it serves.
 pub struct HttpManagingApp {
     service_id: String,
     authority_did: String,
@@ -136,6 +227,94 @@ impl HttpManagingApp {
         require_https(&endpoint)?;
         Ok(endpoint)
     }
+
+    /// Ask `endpoint` on one method. `Ok(None)` when the method is not
+    /// served there; otherwise the decision, or the error the served method
+    /// answered with.
+    async fn ask(
+        &self,
+        endpoint: &str,
+        method: CheckMethod,
+        space: &str,
+        user_did: &str,
+        access: Access,
+        client_id: Option<&str>,
+    ) -> Result<Option<bool>> {
+        let nsid = method.nsid();
+        let token = service_jwt::mint(
+            &self.signer,
+            &self.authority_did,
+            &self.service_id,
+            nsid,
+            (self.now)(),
+            (self.jti)(),
+        )?;
+        let access_str = match access {
+            Access::Read => "read",
+            Access::Write => "write",
+        };
+        let mut query: Vec<(&str, &str)> = match method {
+            // `user` is the alpha's name for the user. `did`, the name rsky
+            // sent before, rides beside it for managing apps built to that.
+            CheckMethod::CheckUserAccess => vec![
+                ("space", space),
+                ("user", user_did),
+                ("did", user_did),
+                ("access", access_str),
+            ],
+            // One call answers both kinds of access.
+            CheckMethod::CheckAccess => vec![("space", space), ("repo", user_did)],
+            CheckMethod::LegacySimplespace => vec![("space", space), ("did", user_did)],
+        };
+        if let Some(client_id) = client_id {
+            query.push(("clientId", client_id));
+        }
+        let url = format!("{}/xrpc/{nsid}", endpoint.trim_end_matches('/'));
+        let response = self
+            .http
+            .get(url)
+            .query(&query)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| HostError::ManagingApp(e.to_string()))?;
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| HostError::ManagingApp(e.to_string()))?;
+        if not_served(status, &body) {
+            return Ok(None);
+        }
+        // A served method's error -- a 403 included, which is how the legacy
+        // method says the caller or client is not approved -- is no decision:
+        // an error, so the caller can tell it from a refusal and retry.
+        if !status.is_success() {
+            return Err(HostError::ManagingApp(format!("{nsid} returned {status}")));
+        }
+        let decision = match method {
+            CheckMethod::CheckUserAccess | CheckMethod::LegacySimplespace => {
+                let output: CheckUserAccessOutput = serde_json::from_slice(&body)
+                    .map_err(|e| HostError::ManagingApp(e.to_string()))?;
+                if output.decision() == Some(false) {
+                    tracing::debug!(space, user_did, reason = ?output.reason, "managing app denied access");
+                }
+                output.decision()
+            }
+            CheckMethod::CheckAccess => {
+                let output: CheckAccessOutput = serde_json::from_slice(&body)
+                    .map_err(|e| HostError::ManagingApp(e.to_string()))?;
+                match access {
+                    Access::Read => output.read,
+                    Access::Write => output.write,
+                }
+            }
+        };
+        // An answer naming no decision is no answer.
+        decision
+            .map(Some)
+            .ok_or_else(|| HostError::ManagingApp(format!("{nsid} answered no decision")))
+    }
 }
 
 #[async_trait]
@@ -148,60 +327,38 @@ impl ManagingAppClient for HttpManagingApp {
         client_id: Option<&str>,
     ) -> Result<bool> {
         let endpoint = self.endpoint().await?;
-        let token = service_jwt::mint(
-            &self.signer,
-            &self.authority_did,
-            &self.service_id,
-            CHECK_USER_ACCESS_LXM,
-            (self.now)(),
-            (self.jti)(),
-        )?;
-        let access_str = match access {
-            Access::Read => "read",
-            Access::Write => "write",
-        };
-        // `user` is the 2026-10-29 alpha's name for the user. `did`, the name
-        // rsky sent before, rides beside it for managing apps built to that.
-        let mut query: Vec<(&str, &str)> = vec![
-            ("space", space),
-            ("user", user_did),
-            ("did", user_did),
-            ("access", access_str),
-        ];
-        if let Some(client_id) = client_id {
-            query.push(("clientId", client_id));
-        }
-        let url = format!(
-            "{}/xrpc/{CHECK_USER_ACCESS_LXM}",
-            endpoint.trim_end_matches('/')
+        // The method this endpoint answered on before goes first; the rest
+        // follow in chain order, so an app that changes method is followed.
+        let remembered = answered_by()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&endpoint)
+            .copied();
+        let order = remembered.into_iter().chain(
+            CheckMethod::CHAIN
+                .into_iter()
+                .filter(|m| Some(*m) != remembered),
         );
-        let response = self
-            .http
-            .get(url)
-            .query(&query)
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|e| HostError::ManagingApp(e.to_string()))?;
-        if !response.status().is_success() {
-            return Err(HostError::ManagingApp(format!(
-                "checkUserAccess returned {}",
-                response.status()
-            )));
+        for method in order {
+            match self
+                .ask(&endpoint, method, space, user_did, access, client_id)
+                .await
+            {
+                Ok(None) => {
+                    tracing::debug!(%endpoint, method = method.nsid(), "managing app does not serve this method");
+                }
+                answered => {
+                    answered_by()
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(endpoint.clone(), method);
+                    return answered.map(|decision| decision.unwrap_or(false));
+                }
+            }
         }
-        let output: CheckUserAccessOutput = response
-            .json()
-            .await
-            .map_err(|e| HostError::ManagingApp(e.to_string()))?;
-        // An answer naming no decision is no answer: an error, so the caller
-        // can tell it from a refusal.
-        let authorized = output.decision().ok_or_else(|| {
-            HostError::ManagingApp("checkUserAccess answered no `authorized`".to_string())
-        })?;
-        if !authorized {
-            tracing::debug!(space, user_did, reason = ?output.reason, "managing app denied access");
-        }
-        Ok(authorized)
+        Err(HostError::ManagingApp(format!(
+            "{endpoint} serves no access-check method"
+        )))
     }
 }
 
@@ -371,6 +528,182 @@ mod tests {
             .check_user_access(SPACE, "did:plc:member", Access::Read, None)
             .await;
         assert!(matches!(res, Err(HostError::ManagingApp(_))));
+    }
+
+    /// The `lxm` of each request a mock received, in order.
+    async fn lxms(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| {
+                let auth = r.headers.get("authorization").unwrap().to_str().unwrap();
+                let jwt = auth.strip_prefix("Bearer ").unwrap();
+                let payload = URL_SAFE_NO_PAD
+                    .decode(jwt.split('.').nth(1).unwrap())
+                    .unwrap();
+                let payload: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+                payload["lxm"].as_str().unwrap().to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn not_served_is_a_missing_route_not_an_answer() {
+        use reqwest::StatusCode;
+        assert!(not_served(StatusCode::NOT_FOUND, b"<html>404</html>"));
+        assert!(not_served(StatusCode::NOT_FOUND, b""));
+        assert!(not_served(
+            StatusCode::NOT_IMPLEMENTED,
+            br#"{"error":"MethodNotImplemented"}"#
+        ));
+        assert!(not_served(
+            StatusCode::NOT_FOUND,
+            br#"{"error":"MethodNotImplemented"}"#
+        ));
+        // A served method's own error is an answer, whatever its status.
+        assert!(!not_served(
+            StatusCode::NOT_FOUND,
+            br#"{"error":"SpaceNotFound"}"#
+        ));
+        assert!(!not_served(StatusCode::FORBIDDEN, b""));
+        assert!(!not_served(StatusCode::BAD_REQUEST, b""));
+        assert!(!not_served(StatusCode::INTERNAL_SERVER_ERROR, b""));
+    }
+
+    /// An app on the reference's newer `checkAccess`: the alpha method is not
+    /// implemented, so the authority asks `checkAccess` with `repo`, signed
+    /// for it, and reads the access kind it wants from `{read, write}`. The
+    /// second check goes straight there.
+    #[tokio::test]
+    async fn falls_back_to_check_access_and_remembers_it() {
+        let server = MockServer::start().await;
+        Mock::given(path(format!("/xrpc/{CHECK_USER_ACCESS_LXM}")))
+            .respond_with(
+                ResponseTemplate::new(501)
+                    .set_body_json(serde_json::json!({"error": "MethodNotImplemented"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(path(format!("/xrpc/{CHECK_ACCESS_LXM}")))
+            .and(query_param("space", SPACE))
+            .and(query_param("repo", "did:plc:member"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"read": true, "write": false})),
+            )
+            .mount(&server)
+            .await;
+        let app = client(&server.uri(), DEFAULT_TIMEOUT);
+        let read = app
+            .check_user_access(SPACE, "did:plc:member", Access::Read, None)
+            .await
+            .unwrap();
+        let write = app
+            .check_user_access(SPACE, "did:plc:member", Access::Write, None)
+            .await
+            .unwrap();
+        assert!(read);
+        assert!(!write);
+        assert_eq!(
+            lxms(&server).await,
+            [CHECK_USER_ACCESS_LXM, CHECK_ACCESS_LXM, CHECK_ACCESS_LXM]
+        );
+    }
+
+    /// An app on the legacy simplespace method, as Acorn's feed service is:
+    /// a server with no route for either managedspace method answers a bare
+    /// 404, and the legacy method's `{allowed}` decides reads and writes.
+    #[tokio::test]
+    async fn falls_back_to_the_legacy_simplespace_method() {
+        let server = MockServer::start().await;
+        Mock::given(path(format!("/xrpc/{LEGACY_CHECK_USER_ACCESS_LXM}")))
+            .and(query_param("space", SPACE))
+            .and(query_param("did", "did:plc:member"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"allowed": true})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("<html>Not Found</html>"))
+            .mount(&server)
+            .await;
+        let app = client(&server.uri(), DEFAULT_TIMEOUT);
+        assert!(app
+            .check_user_access(
+                SPACE,
+                "did:plc:member",
+                Access::Read,
+                Some("https://app.example.com/client")
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            lxms(&server).await,
+            [
+                CHECK_USER_ACCESS_LXM,
+                CHECK_ACCESS_LXM,
+                LEGACY_CHECK_USER_ACCESS_LXM
+            ]
+        );
+        // The attested client reaches the legacy method too.
+        let requests = server.received_requests().await.unwrap();
+        assert!(requests[2].url.query().unwrap().contains("clientId="));
+        // The same answer stands for a write, asked straight on the legacy
+        // method this time.
+        assert!(app
+            .check_user_access(SPACE, "did:plc:member", Access::Write, None)
+            .await
+            .unwrap());
+        assert_eq!(lxms(&server).await[3..], [LEGACY_CHECK_USER_ACCESS_LXM]);
+    }
+
+    /// A served method's refusal or error is final: nothing else is asked, so
+    /// a "no" never becomes a "yes" elsewhere.
+    #[tokio::test]
+    async fn an_answer_or_an_error_never_falls_back() {
+        for response in [
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"authorized": false})),
+            ResponseTemplate::new(404).set_body_json(serde_json::json!({"error": "SpaceNotFound"})),
+            ResponseTemplate::new(403).set_body_json(serde_json::json!({"error": "Forbidden"})),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(path(format!("/xrpc/{CHECK_USER_ACCESS_LXM}")))
+                .respond_with(response)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"read": true, "write": true, "allowed": true}),
+                ))
+                .mount(&server)
+                .await;
+            let app = client(&server.uri(), DEFAULT_TIMEOUT);
+            let res = app
+                .check_user_access(SPACE, "did:plc:member", Access::Read, None)
+                .await;
+            assert!(!matches!(res, Ok(true)), "{res:?}");
+            assert_eq!(lxms(&server).await, [CHECK_USER_ACCESS_LXM]);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_app_serving_no_method_is_an_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let app = client(&server.uri(), DEFAULT_TIMEOUT);
+        let res = app
+            .check_user_access(SPACE, "did:plc:member", Access::Read, None)
+            .await;
+        assert!(
+            matches!(res, Err(HostError::ManagingApp(msg)) if msg.contains("serves no access-check method"))
+        );
+        assert_eq!(lxms(&server).await.len(), 3);
     }
 
     #[tokio::test]
