@@ -1,5 +1,6 @@
 //! Full-state recovery (proposal §Full-state recovery): when incremental sync
-//! cannot proceed (diverged hash, oplog window exceeded), fetch the whole repo
+//! cannot proceed (diverged hash, oplog window exceeded, unsigned commit at the
+//! oplog head — see [`DaemonError::needs_recovery`]), fetch the whole repo
 //! as a CAR, validate it end-to-end, and diff it against the local index.
 
 use std::collections::HashSet;
