@@ -1,6 +1,6 @@
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
-use crate::apis::com::atproto::simplespace::adapters::config_to_policy;
+use crate::apis::com::atproto::simplespace::adapters::{config_to_policy, new_create_error_to_old};
 use crate::apis::com::atproto::space::create_space::space_create_space;
 use crate::apis::ApiError;
 use crate::auth_verifier::AccessSpace;
@@ -55,7 +55,8 @@ pub async fn simplespace_create_space(
         policy: policy_value,
     };
 
-    // Forward to new implementation
+    // Forward to new implementation, reporting a duplicate under the legacy
+    // `SpaceExists` name
     let result = space_create_space(
         Json(new_input),
         auth,
@@ -63,7 +64,8 @@ pub async fn simplespace_create_space(
         blobstore_factory,
         server_config,
     )
-    .await?;
+    .await
+    .map_err(new_create_error_to_old)?;
 
     // Return response
     Ok(Json(CreateSpaceOutput {

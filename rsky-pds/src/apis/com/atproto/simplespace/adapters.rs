@@ -149,9 +149,55 @@ pub fn new_member_to_old(member: &memberspace::Member) -> simplespace::Member {
     }
 }
 
+/// Translate a `space.createSpace` error back to the name the legacy API used.
+///
+/// `space.createSpace` reports a duplicate as `SpaceAlreadyExists`; the old
+/// `simplespace.createSpace` reported it as `SpaceExists`, and legacy clients
+/// match on that name to treat a retried create as idempotent. Every other
+/// error passes through unchanged.
+pub fn new_create_error_to_old(error: ApiError) -> ApiError {
+    match error {
+        ApiError::BadRequest(name, message) if name == "SpaceAlreadyExists" => {
+            ApiError::BadRequest("SpaceExists".to_string(), message)
+        }
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_space_already_exists_maps_to_space_exists() {
+        let error = new_create_error_to_old(ApiError::BadRequest(
+            "SpaceAlreadyExists".to_string(),
+            "a space with this type and key already exists".to_string(),
+        ));
+        match error {
+            ApiError::BadRequest(name, message) => {
+                assert_eq!(name, "SpaceExists");
+                assert_eq!(message, "a space with this type and key already exists");
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_other_create_errors_pass_through() {
+        let error = new_create_error_to_old(ApiError::BadRequest(
+            "SpaceNotFound".to_string(),
+            "no such space".to_string(),
+        ));
+        match error {
+            ApiError::BadRequest(name, _) => assert_eq!(name, "SpaceNotFound"),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+        assert!(matches!(
+            new_create_error_to_old(ApiError::RuntimeError),
+            ApiError::RuntimeError
+        ));
+    }
 
     #[test]
     fn test_public_config_to_policy() {
