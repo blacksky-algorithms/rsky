@@ -34,6 +34,36 @@ async fn test_robots_txt() {
 }
 
 #[tokio::test]
+async fn resolve_handle_separates_unresolvable_from_internal_failure() {
+    let (dir, client) = common::get_client().await;
+    let resolve = |handle: &str| {
+        client
+            .get(format!(
+                "/xrpc/com.atproto.identity.resolveHandle?handle={handle}"
+            ))
+            .dispatch()
+    };
+
+    let response = resolve("nobody.rsky.com").await;
+    assert_eq!(response.status(), Status::BadRequest);
+    let body: serde_json::Value = response.into_json().await.unwrap();
+    assert_eq!(body["error"], "InvalidRequest");
+    assert_eq!(body["message"], "Unable to resolve handle");
+
+    let response = resolve("not_a_handle").await;
+    assert_eq!(response.status(), Status::BadRequest);
+    let body: serde_json::Value = response.into_json().await.unwrap();
+    assert_eq!(body["error"], "InvalidHandle");
+
+    rusqlite::Connection::open(dir.path().join("account.sqlite"))
+        .unwrap()
+        .execute_batch("DROP TABLE actor")
+        .unwrap();
+    let response = resolve("nobody.rsky.com").await;
+    assert_eq!(response.status(), Status::InternalServerError);
+}
+
+#[tokio::test]
 async fn test_create_invite_code() {
     let (_dir, client) = common::get_client().await;
     let input = json!({
