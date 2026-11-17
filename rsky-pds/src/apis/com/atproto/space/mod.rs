@@ -324,6 +324,47 @@ pub async fn apply_space_writes(
     Ok(commit)
 }
 
+/// Whether the space's policy authorizes `did` to write, as the authority
+/// decides it for a remote writer's `notifyWrite`. Fails closed: a space that
+/// cannot be loaded, or a managing app that cannot be asked, authorizes no one.
+async fn writer_authorized(
+    actor_store: &State<ActorStore>,
+    blobstore_factory: &State<BlobstoreFactory>,
+    server_config: &State<ServerConfig>,
+    space: &SpaceId,
+    did: &str,
+) -> bool {
+    let Ok((def, space_store, keypair)) =
+        host::local_space_def(actor_store, blobstore_factory, space).await
+    else {
+        return false;
+    };
+    let signer = rsky_space_host::signing::Signer::from_secret(
+        secp256k1::SecretKey::from_slice(&keypair.secret_bytes())
+            .expect("actor key is a valid secret"),
+    );
+    let Ok(policy) = host::def_policy(
+        &def,
+        &space_store,
+        signer,
+        &space.authority,
+        &server_config.identity.plc_url,
+    )
+    .await
+    else {
+        return false;
+    };
+    policy
+        .authorizes(
+            &space.uri(),
+            Some(did),
+            rsky_lexicon::com::atproto::managedspace::Access::Write,
+            None,
+        )
+        .await
+        .unwrap_or(false)
+}
+
 /// Update the writer set and queue notifyWrite deliveries. The authority's
 /// space host is auto-registered as a subscriber on the first write into a
 /// shared space; a local authority is updated in place instead.
@@ -359,26 +400,39 @@ pub async fn notify_after_write(
             .await
         {
             Ok(authority_reader) => {
-                match authority_reader
-                    .space
-                    .upsert_writer(
-                        &space.uri(),
-                        did,
-                        &commit.rev,
-                        Some(hex::encode(commit.hash)),
-                    )
-                    .await
-                {
-                    Ok(update) => advance = update,
-                    Err(error) => tracing::warn!(%error, "failed to update writer set"),
-                }
-                match authority_reader
-                    .space
-                    .host_notify_endpoints(&space.uri(), &now)
-                    .await
-                {
-                    Ok(host_endpoints) => host_subscribers.extend(host_endpoints),
-                    Err(error) => tracing::warn!(%error, "failed to load host registrations"),
+                // A writer on this host is held to the space's write axis as
+                // a remote writer's `notifyWrite` is (`notify_write.rs`):
+                // tracked, and forwarded to syncers, only when the policy
+                // authorizes the write. Without this, a write into a personal
+                // space or a members-only one by any account on the
+                // authority's own host joined its writer set.
+                let authorized = did == space.authority
+                    || writer_authorized(actor_store, blobstore_factory, server_config, space, did)
+                        .await;
+                if authorized {
+                    match authority_reader
+                        .space
+                        .upsert_writer(
+                            &space.uri(),
+                            did,
+                            &commit.rev,
+                            Some(hex::encode(commit.hash)),
+                        )
+                        .await
+                    {
+                        Ok(update) => advance = update,
+                        Err(error) => tracing::warn!(%error, "failed to update writer set"),
+                    }
+                    match authority_reader
+                        .space
+                        .host_notify_endpoints(&space.uri(), &now)
+                        .await
+                    {
+                        Ok(host_endpoints) => host_subscribers.extend(host_endpoints),
+                        Err(error) => tracing::warn!(%error, "failed to load host registrations"),
+                    }
+                } else {
+                    tracing::debug!(space = %space.uri(), %did, "write by an unauthorized writer not tracked");
                 }
                 match authority_reader.keypair().await {
                     Ok(kp) => authority_keypair = Some(kp),

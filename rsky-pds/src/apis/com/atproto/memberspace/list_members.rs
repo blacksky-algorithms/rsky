@@ -47,8 +47,13 @@ pub async fn memberspace_list_members(
     };
     Ok(Json(ListMembersOutput {
         cursor,
+        // The authority is never listed: it reads and writes its own space
+        // without being a member. A row for it is one `createSpace` seeded
+        // before it stopped; skipped after the cursor is taken, so paging is
+        // unchanged.
         members: members
             .into_iter()
+            .filter(|row| row.did != space_id.authority)
             .map(|row| Member {
                 did: row.did,
                 read: row.read,

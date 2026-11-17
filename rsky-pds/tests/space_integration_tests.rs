@@ -396,15 +396,11 @@ async fn memberspace_management() {
     )
     .await;
     assert_eq!(status, Status::Ok);
-    // The creator is seeded as the first member at create, so the list is
-    // the author plus the enrolled member, ordered by did.
+    // The authority is never on its own member list (2026-10-29 reference,
+    // upstream decision D6), so the list is the enrolled member alone.
     let members = body["members"].as_array().unwrap();
-    assert_eq!(members.len(), 2, "{body}");
-    let dids: Vec<&str> = members.iter().map(|m| m["did"].as_str().unwrap()).collect();
-    assert!(
-        dids.contains(&AUTHOR_DID) && dids.contains(&MEMBER_DID),
-        "{body}"
-    );
+    assert_eq!(members.len(), 1, "{body}");
+    assert_eq!(members[0]["did"], MEMBER_DID);
     // The spec-required read/write booleans, plus the metadata clients
     // render: when added, and at what rev.
     for m in members {
@@ -432,10 +428,9 @@ async fn memberspace_management() {
         &s.author_token,
     )
     .await;
-    // removing the enrolled member leaves the seeded creator
+    // removing the enrolled member empties the list
     let members = body["members"].as_array().unwrap();
-    assert_eq!(members.len(), 1, "{body}");
-    assert_eq!(members[0]["did"], AUTHOR_DID);
+    assert!(members.is_empty(), "{body}");
 
     // managing-app policy requires a managingApp
     let (status, _) = post_json(
@@ -552,7 +547,8 @@ async fn credential_mint_flow() {
     assert_eq!(status, Status::BadRequest);
     assert_eq!(body["error"], "SpaceNotFound");
 
-    // allow-list app access requires an attestation
+    // allow-list app access requires an attestation: a member without one is
+    // refused on the app axis, 403 `AppNotAuthorized`, as upstream names it
     let (status, _) = post_json(
         &s.client,
         "/xrpc/com.atproto.space.updateSpace",
@@ -584,8 +580,8 @@ async fn credential_mint_flow() {
         json!({ "space": s.space }),
     )
     .await;
-    assert_eq!(status, Status::BadRequest);
-    assert_eq!(body["error"], "AttestationRequired");
+    assert_eq!(status, Status::Forbidden);
+    assert_eq!(body["error"], "AppNotAuthorized");
 }
 
 /// POST with no `Authorization` and no DPoP proof: the proposal's request.

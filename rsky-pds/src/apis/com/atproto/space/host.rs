@@ -62,15 +62,17 @@ pub fn def_to_policy(def: &SpaceDefRow) -> SpacePolicy {
 /// Parse and validate a policy object from a `createSpace`/`updateSpace`
 /// request body. An unrecognized `$type` or a malformed object is an
 /// `UnsupportedPolicy` error per spec; a `managedspace` additionally requires
-/// a well-formed `managingApp` service identifier.
+/// its `managingApp` to be a DID with an optional service fragment, as
+/// upstream `atproto-pds` validates it (`did:web:example.com` or
+/// `did:web:example.com#forum`).
 pub fn parse_policy(value: serde_json::Value) -> Result<SpacePolicy, ApiError> {
     let policy: SpacePolicy = serde_json::from_value(value).map_err(|error| {
         ApiError::BadRequest("UnsupportedPolicy".to_string(), error.to_string())
     })?;
     if let SpacePolicy::Managedspace(ref managed) = policy {
-        if !managed.managing_app.starts_with("did:") || !managed.managing_app.contains('#') {
+        if rsky_space_host::managing_app::split_service_id(&managed.managing_app).is_err() {
             return Err(ApiError::InvalidRequest(format!(
-                "managingApp must be a service identifier (did#fragment): {}",
+                "managingApp must be a DID with an optional service fragment: {}",
                 managed.managing_app
             )));
         }

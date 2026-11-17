@@ -1,5 +1,5 @@
 use crate::actor_store::blobstore::BlobstoreFactory;
-use crate::actor_store::space::{SpaceDefRow, SpacePolicy};
+use crate::actor_store::space::SpaceDefRow;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
 use crate::apis::com::atproto::space::host::parse_policy;
@@ -79,24 +79,12 @@ pub async fn space_create_space(
         &did,
     )
     .await;
-    if matches!(
-        reader
-            .space
-            .live_space_def(&space.uri())
-            .await
-            .map_err(space_def_error)?
-            .policy,
-        SpacePolicy::Memberspace(_)
-    ) {
-        // The creator is the first member of a memberspace, as the reference
-        // seeds it: the authority must pass their own member list for
-        // whole-space reads and writer tracking.
-        reader
-            .space
-            .put_member(&space.uri(), &did, true, true)
-            .await
-            .map_err(space_def_error)?;
-    }
+    // The creator is not made a member: the authority reads and writes its
+    // own space under every policy without one (`Policy::authorizes`), and is
+    // never on its own member list, as the 2026-10-29 reference's
+    // `createSpace` and upstream `atproto-pds` leave it. Seeding it put the
+    // authority in `listMembers` and, under `publishMembers`, published it as
+    // a member of its own space.
     reconcile_published(
         actor_store,
         blobstore_factory,

@@ -31,12 +31,21 @@ pub trait ManagingAppClient: Send + Sync {
     ) -> Result<bool>;
 }
 
-/// Split a service identifier (`did#fragment`) into its DID and fragment.
-pub fn split_service_id(service_id: &str) -> Result<(&str, &str)> {
-    service_id
-        .split_once('#')
-        .filter(|(did, frag)| did.starts_with("did:") && !frag.is_empty())
-        .ok_or_else(|| HostError::ManagingApp(format!("invalid service identifier: {service_id}")))
+/// Split a service identifier into its DID and, when it has one, its
+/// fragment. The fragment is optional (`did:web:example.com` or
+/// `did:web:example.com#forum`), as upstream `atproto-pds` reads it; an empty
+/// one (`did:web:example.com#`) is not a fragment and is refused.
+pub fn split_service_id(service_id: &str) -> Result<(&str, Option<&str>)> {
+    let invalid = || HostError::ManagingApp(format!("invalid service identifier: {service_id}"));
+    let (did, fragment) = match service_id.split_once('#') {
+        Some((_, "")) => return Err(invalid()),
+        Some((did, fragment)) => (did, Some(fragment)),
+        None => (service_id, None),
+    };
+    if !did.starts_with("did:") || did.len() <= "did:".len() {
+        return Err(invalid());
+    }
+    Ok((did, fragment))
 }
 
 /// Reject plain-http endpoints, except loopback hosts (local testing).
@@ -113,7 +122,17 @@ impl HttpManagingApp {
     async fn endpoint(&self) -> Result<String> {
         let (did, fragment) = split_service_id(&self.service_id)?;
         let doc = self.docs.did_document(did).await?;
-        let endpoint = service_endpoint_from_doc(&doc, fragment)?;
+        // With no fragment, the document's first service, as upstream
+        // `atproto-pds` resolves one (`space::recipient`).
+        let endpoint = match fragment {
+            Some(fragment) => service_endpoint_from_doc(&doc, fragment)?,
+            None => doc
+                .service
+                .as_deref()
+                .and_then(|services| services.first())
+                .map(|s| s.service_endpoint.clone())
+                .ok_or_else(|| HostError::Resolution(format!("{}: no service", doc.id)))?,
+        };
         require_https(&endpoint)?;
         Ok(endpoint)
     }
@@ -141,8 +160,14 @@ impl ManagingAppClient for HttpManagingApp {
             Access::Read => "read",
             Access::Write => "write",
         };
-        let mut query: Vec<(&str, &str)> =
-            vec![("space", space), ("did", user_did), ("access", access_str)];
+        // `user` is the 2026-10-29 alpha's name for the user. `did`, the name
+        // rsky sent before, rides beside it for managing apps built to that.
+        let mut query: Vec<(&str, &str)> = vec![
+            ("space", space),
+            ("user", user_did),
+            ("did", user_did),
+            ("access", access_str),
+        ];
         if let Some(client_id) = client_id {
             query.push(("clientId", client_id));
         }
@@ -168,10 +193,15 @@ impl ManagingAppClient for HttpManagingApp {
             .json()
             .await
             .map_err(|e| HostError::ManagingApp(e.to_string()))?;
-        if !output.allowed {
+        // An answer naming no decision is no answer: an error, so the caller
+        // can tell it from a refusal.
+        let authorized = output.decision().ok_or_else(|| {
+            HostError::ManagingApp("checkUserAccess answered no `authorized`".to_string())
+        })?;
+        if !authorized {
             tracing::debug!(space, user_did, reason = ?output.reason, "managing app denied access");
         }
-        Ok(output.allowed)
+        Ok(authorized)
     }
 }
 
@@ -224,11 +254,13 @@ mod tests {
         Mock::given(method("GET"))
             .and(path(format!("/xrpc/{CHECK_USER_ACCESS_LXM}")))
             .and(query_param("space", SPACE))
+            // The 2026-10-29 alpha's `user`, and the earlier `did` beside it.
+            .and(query_param("user", "did:plc:member"))
             .and(query_param("did", "did:plc:member"))
             .and(query_param("access", "read"))
             .and(query_param("clientId", "https://app.example.com/client"))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({"allowed": true})),
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"authorized": true})),
             )
             .mount(&server)
             .await;
@@ -343,12 +375,17 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_service_ids_and_endpoints_rejected() {
-        assert!(split_service_id("did:plc:app").is_err());
+        assert_eq!(
+            split_service_id("did:plc:app").unwrap(),
+            ("did:plc:app", None)
+        );
         assert!(split_service_id("not-a-did#frag").is_err());
+        assert!(split_service_id("not-a-did").is_err());
+        assert!(split_service_id("did:").is_err());
         assert!(split_service_id("did:plc:app#").is_err());
         assert_eq!(
             split_service_id("did:plc:app#managing_app").unwrap(),
-            ("did:plc:app", "managing_app")
+            ("did:plc:app", Some("managing_app"))
         );
 
         require_https("https://app.example.com").unwrap();

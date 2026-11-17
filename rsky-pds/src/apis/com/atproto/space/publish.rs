@@ -15,7 +15,7 @@ use crate::apis::ApiError;
 use crate::config::ServerConfig;
 use rocket::State;
 use rsky_space::space_id::SpaceId;
-use serde_json::json;
+use serde_json::{json, Value};
 
 /// The collections the space machinery manages in the authority's repo.
 pub const POLICY_COLLECTION: &str = "com.atproto.space.policy";
@@ -55,29 +55,62 @@ fn publish_members_flag(policy: &SpacePolicy) -> bool {
     }
 }
 
-fn policy_record(policy: &SpacePolicy) -> SpaceWrite {
-    SpaceWrite::Update {
-        collection: POLICY_COLLECTION.to_string(),
-        rkey: "self".to_string(),
-        value: json!({
-            "$type": POLICY_COLLECTION,
-            "policy": serde_json::to_value(policy).expect("policy serializes"),
-        }),
-        swap_cid: None,
-    }
+fn policy_record(policy: &SpacePolicy) -> Value {
+    json!({
+        "$type": POLICY_COLLECTION,
+        "policy": serde_json::to_value(policy).expect("policy serializes"),
+    })
 }
 
-fn member_record(member: &str, read: bool, write: bool) -> SpaceWrite {
-    SpaceWrite::Update {
-        collection: MEMBER_COLLECTION.to_string(),
-        rkey: member.to_string(),
-        value: json!({
-            "$type": MEMBER_COLLECTION,
-            "read": read,
-            "write": write,
-        }),
-        swap_cid: None,
-    }
+fn member_record(read: bool, write: bool) -> Value {
+    json!({
+        "$type": MEMBER_COLLECTION,
+        "read": read,
+        "write": write,
+    })
+}
+
+/// A member's DID as the record key of its published record.
+///
+/// A record key cannot contain `%`, so a localhost `did:web`'s encoded port is
+/// left unencoded: `did:web:localhost%3A2583` becomes `did:web:localhost:2583`.
+/// Upstream's `did_to_record_key`, a stopgap until Lexicon has a record-key
+/// format for DIDs; like it, only the first `%3A` is replaced.
+pub fn member_record_key(did: &str) -> String {
+    did.replacen("%3A", ":", 1)
+}
+
+/// The write that puts `value` at `collection`/`rkey`: a create while the
+/// record is not there yet, an update once it is. The store refuses to update
+/// a record that does not exist, so writing every published record as an
+/// update made the first publish of each one fail.
+async fn upsert(
+    space_store: &SpaceStore,
+    space_uri: &str,
+    collection: &str,
+    rkey: String,
+    value: Value,
+) -> Result<SpaceWrite, ApiError> {
+    let exists = space_store
+        .get_record(space_uri, collection, &rkey)
+        .await
+        .map_err(space_def_error)?
+        .is_some();
+    let collection = collection.to_string();
+    Ok(if exists {
+        SpaceWrite::Update {
+            collection,
+            rkey,
+            value,
+            swap_cid: None,
+        }
+    } else {
+        SpaceWrite::Create {
+            collection,
+            rkey,
+            value,
+        }
+    })
 }
 
 async fn apply_published(
@@ -120,7 +153,16 @@ pub async fn reconcile_published(
 ) -> Result<(), ApiError> {
     let mut writes: Vec<SpaceWrite> = Vec::new();
     if publish_policy_flag(policy) {
-        writes.push(policy_record(policy));
+        writes.push(
+            upsert(
+                space_store,
+                &space.uri(),
+                POLICY_COLLECTION,
+                "self".to_string(),
+                policy_record(policy),
+            )
+            .await?,
+        );
     } else if space_store
         .get_record(&space.uri(), POLICY_COLLECTION, "self")
         .await
@@ -156,7 +198,14 @@ pub async fn reconcile_published(
             break;
         }
     }
-    let mut current: std::collections::BTreeSet<String> = dropped_members.into_iter().collect();
+    // Compared as record keys, the form the published records carry.
+    let mut current: std::collections::BTreeSet<String> = dropped_members
+        .iter()
+        .map(|did| member_record_key(did))
+        .collect();
+    // A member record published for the authority, by a space created while
+    // `createSpace` seeded it as a member, comes down.
+    current.insert(member_record_key(&space.authority));
     if publish_members_flag(policy) {
         let mut cursor = None;
         loop {
@@ -169,8 +218,23 @@ pub async fn reconcile_published(
                 did, read, write, ..
             } in &page
             {
-                writes.push(member_record(did, *read, *write));
-                current.remove(did);
+                // The authority is never published as its own member; a row
+                // for it predates `createSpace` no longer seeding one.
+                if *did == space.authority {
+                    continue;
+                }
+                let rkey = member_record_key(did);
+                current.remove(&rkey);
+                writes.push(
+                    upsert(
+                        space_store,
+                        &space.uri(),
+                        MEMBER_COLLECTION,
+                        rkey,
+                        member_record(*read, *write),
+                    )
+                    .await?,
+                );
             }
             cursor = page.last().map(|row| row.did.clone());
             if !full_page {
@@ -218,13 +282,28 @@ pub async fn publish_member(
     if !publish_members_flag(policy) {
         return Ok(());
     }
+    let authority = actor_store
+        .read(
+            authority_did.to_string(),
+            blobstore_factory.blobstore(authority_did.to_string()),
+        )
+        .await
+        .map_err(|error| ApiError::BadRequest("RepoNotFound".to_string(), error.to_string()))?;
+    let write = upsert(
+        &authority.space,
+        &space.uri(),
+        MEMBER_COLLECTION,
+        member_record_key(member),
+        member_record(read, write),
+    )
+    .await?;
     apply_published(
         actor_store,
         blobstore_factory,
         server_config,
         authority_did,
         space,
-        vec![member_record(member, read, write)],
+        vec![write],
     )
     .await
     .map_err(|error| {
@@ -252,9 +331,10 @@ pub async fn unpublish_member(
         )
         .await
         .map_err(|error| ApiError::BadRequest("RepoNotFound".to_string(), error.to_string()))?;
+    let rkey = member_record_key(member);
     if space_store
         .space
-        .get_record(&space.uri(), MEMBER_COLLECTION, member)
+        .get_record(&space.uri(), MEMBER_COLLECTION, &rkey)
         .await
         .map_err(space_def_error)?
         .is_none()
@@ -269,7 +349,7 @@ pub async fn unpublish_member(
         space,
         vec![SpaceWrite::Delete {
             collection: MEMBER_COLLECTION.to_string(),
-            rkey: member.to_string(),
+            rkey,
             swap_cid: None,
         }],
     )

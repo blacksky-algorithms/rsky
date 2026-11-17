@@ -175,18 +175,40 @@ pub async fn space_get_space_credential(
             &binding,
         )
         .await
-        .map_err(|error| match error {
-            HostError::NotAuthorized => {
-                ApiError::AuthRequiredError("user not authorized for this space".to_string())
-            }
-            HostError::ClientNotAuthorized => {
-                ApiError::AuthRequiredError("client not authorized for this space".to_string())
-            }
-            HostError::AttestationRequired => ApiError::BadRequest(
-                "AttestationRequired".to_string(),
-                "this space requires a client attestation".to_string(),
-            ),
-            other => ApiError::InvalidRequest(other.to_string()),
-        })?;
+        .map_err(mint_denial)?;
     Ok(Json(GetSpaceCredentialOutput { credential }))
+}
+
+/// A refused mint, named as the 2026-10-29 reference and upstream
+/// `atproto-pds` name it, so a client can act on the name:
+///
+/// - a user the policy does not admit is `400 SpaceNotFound`, in the words an
+///   absent space gets, so the refusal discloses nothing about the space;
+/// - an app `allowedApps` does not admit, attested or not, is
+///   `403 AppNotAuthorized`;
+/// - a presented attestation that does not verify is
+///   `400 InvalidClientAttestation`;
+/// - a managing app that could not be asked, or answered no decision, is
+///   `403 NotAuthorized`: undecided rather than refused, so a syncer backs
+///   off and retries instead of dropping the space.
+fn mint_denial(error: HostError) -> ApiError {
+    match error {
+        HostError::NotAuthorized => {
+            ApiError::BadRequest("SpaceNotFound".to_string(), "Space not found".to_string())
+        }
+        HostError::ClientNotAuthorized | HostError::AttestationRequired => {
+            ApiError::UpstreamResponse(
+                403,
+                "AppNotAuthorized".to_string(),
+                "Application not authorized for this space".to_string(),
+            )
+        }
+        HostError::Attestation(reason) => {
+            ApiError::BadRequest("InvalidClientAttestation".to_string(), reason)
+        }
+        HostError::ManagingApp(reason) | HostError::Resolution(reason) => {
+            ApiError::UpstreamResponse(403, "NotAuthorized".to_string(), reason)
+        }
+        other => ApiError::InvalidRequest(other.to_string()),
+    }
 }

@@ -71,9 +71,15 @@ impl Authority {
         Ok(jwt)
     }
 
-    /// The full `getSpaceCredential` flow: verify the client attestation (when
-    /// required or presented), apply `allowedApps`, verify the delegation
-    /// token when the policy requires one, consult the policy, then mint.
+    /// The full `getSpaceCredential` flow, in the order of the 2026-10-29
+    /// reference (`authorizeCredential`) and upstream `atproto-pds`: verify a
+    /// presented client attestation, decide the user, then decide the app.
+    ///
+    /// The user is decided before the app so a refusal tells a user the
+    /// policy does not admit nothing more than an absent space would: not
+    /// whether the space restricts apps. Only a user who passes reaches the
+    /// app axis, where `allowedApps` applies to everyone, the authority
+    /// included.
     ///
     /// The delegation token is optional under a policy that authorizes
     /// anonymous reads (a `memberspace` with `publicRead`): the minted
@@ -91,22 +97,18 @@ impl Authority {
         jti: String,
         binding: &Confirmation,
     ) -> Result<String> {
-        // App axis: the attested client_id is only trustworthy after the
-        // attestation's signature has been verified against the client's
-        // published JWKS; a bare header value is never consulted.
+        // The attested client_id is only trustworthy after the attestation's
+        // signature has been verified against the client's published JWKS; a
+        // bare header value is never consulted. A presented attestation that
+        // does not verify is refused whatever the policy. It is verified
+        // before the user is decided because a managing app is told it.
         let attested_client_id = match attestation_jwt {
             Some(jwt) => Some(
                 verify_client_attestation(jwt, self.authority_did(), metadata, jti_store, now)
                     .await?,
             ),
-            None if policy.requires_attestation() => {
-                return Err(HostError::AttestationRequired);
-            }
             None => None,
         };
-        if !policy.permits_client(attested_client_id.as_deref()) {
-            return Err(HostError::ClientNotAuthorized);
-        }
         // Verify the delegation token when one was presented: resolve the
         // user's key, check typ/sub/aud/exp/sig.
         let verified_user = match delegation_jwt {
@@ -140,6 +142,17 @@ impl Authority {
             .await?
         {
             return Err(HostError::NotAuthorized);
+        }
+        // App axis, only once the user has passed: `allowedApps` needs an
+        // attested client_id on the list.
+        if !policy.permits_client(attested_client_id.as_deref()) {
+            return Err(
+                if attested_client_id.is_none() && policy.requires_attestation() {
+                    HostError::AttestationRequired
+                } else {
+                    HostError::ClientNotAuthorized
+                },
+            );
         }
         self.mint_credential(now, jti, binding)
     }
@@ -477,13 +490,15 @@ mod tests {
     #[tokio::test]
     async fn allowlist_without_attestation_requires_one() {
         let auth = authority();
-        let policy = allowlist_policy(&["did:plc:user"], vec![CLIENT_ID.to_string()]);
+        let user = "did:plc:member";
+        let policy = allowlist_policy(&[user], vec![CLIENT_ID.to_string()]);
+        let (delegation, user_key) = user_delegation(&auth, user, 1000);
         let res = auth
             .get_space_credential(
-                Some("a.b.c"),
+                Some(&delegation),
                 None,
                 &policy,
-                &DenyAllKeys,
+                &FixedKey(user_key),
                 &InlineJwksFetcher,
                 &InMemoryJtiStore::default(),
                 1000,
@@ -494,22 +509,44 @@ mod tests {
         assert!(matches!(res, Err(HostError::AttestationRequired)));
     }
 
+    /// The user is decided before the app: a user the policy does not admit
+    /// is refused as one, and so learns nothing of the space's `allowedApps`.
+    #[tokio::test]
+    async fn allowlist_refuses_a_non_member_as_a_user_first() {
+        let auth = authority();
+        let policy = allowlist_policy(&["did:plc:member"], vec![CLIENT_ID.to_string()]);
+        let (delegation, user_key) = user_delegation(&auth, "did:plc:stranger", 1000);
+        let res = auth
+            .get_space_credential(
+                Some(&delegation),
+                None,
+                &policy,
+                &FixedKey(user_key),
+                &InlineJwksFetcher,
+                &InMemoryJtiStore::default(),
+                1000,
+                "jti".into(),
+                &Confirmation::jkt("test-jkt"),
+            )
+            .await;
+        assert!(matches!(res, Err(HostError::NotAuthorized)));
+    }
+
     #[tokio::test]
     async fn allowlist_rejects_unlisted_attested_client() {
         let auth = authority();
-        let policy = allowlist_policy(
-            &["did:plc:user"],
-            vec!["https://other.example/client".to_string()],
-        );
+        let user = "did:plc:member";
+        let policy = allowlist_policy(&[user], vec!["https://other.example/client".to_string()]);
+        let (delegation, user_key) = user_delegation(&auth, user, 1000);
         // The attestation verifies (proving the client is CLIENT_ID), but that
         // client is not on the allow list.
         let attest = attestation_jwt(&auth, 1000);
         let res = auth
             .get_space_credential(
-                Some("a.b.c"),
+                Some(&delegation),
                 Some(&attest),
                 &policy,
-                &DenyAllKeys,
+                &FixedKey(user_key),
                 &InlineJwksFetcher,
                 &InMemoryJtiStore::default(),
                 1000,
