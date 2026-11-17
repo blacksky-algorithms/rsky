@@ -56,6 +56,15 @@ pub struct Config {
     pub managing_app: Option<String>,
 }
 
+/// A [`Config`] as the legacy `getSpace` answered it: tagged with
+/// `$type: com.atproto.simplespace.defs#config`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "$type")]
+pub enum TypedConfig {
+    #[serde(rename = "com.atproto.simplespace.defs#config")]
+    Config(Config),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateSpaceInput {

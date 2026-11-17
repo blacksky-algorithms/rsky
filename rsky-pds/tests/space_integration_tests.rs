@@ -1320,6 +1320,12 @@ async fn host_methods_and_notifications() {
     // specification before the field was renamed
     assert_eq!(body["space"], s.space.as_str());
     assert_eq!(body["uri"], body["space"]);
+    // and the policy as a simplespace `config`, for clients of that API
+    assert_eq!(
+        body["config"]["$type"],
+        "com.atproto.simplespace.defs#config"
+    );
+    assert_eq!(body["config"]["policy"], "member-list");
     // an OAuth read_self session is also accepted (spec §XRPC API)
     let (status, _) = get_json(
         &s.client,

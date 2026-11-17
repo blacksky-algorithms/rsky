@@ -135,6 +135,7 @@ pub struct GetSpaceParams {
 
 /// `getSpace`'s output. Build it with [`GetSpaceOutput::new`], which keeps
 /// `space` and `uri` equal.
+#[allow(deprecated)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GetSpaceOutput {
     pub space: String,
@@ -155,8 +156,20 @@ pub struct GetSpaceOutput {
     #[serde(default)]
     pub uri: String,
     pub policy: Policy,
+    /// `policy` translated to the `com.atproto.simplespace.defs#config` object
+    /// the `getSpace` answer carried before `config` was replaced by `policy`.
+    ///
+    /// Backwards compatibility only, like `uri`. Clients written against the
+    /// simplespace API read the space's configuration back from `config`;
+    /// among them Acorn, which on a `SpaceExists` from
+    /// `simplespace.createSpace` compares `config` against what it asked for.
+    /// Current clients ignore it. Absent unless set with
+    /// [`GetSpaceOutput::with_legacy_config`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<crate::com::atproto::simplespace::TypedConfig>,
 }
 
+#[allow(deprecated)]
 impl GetSpaceOutput {
     /// An answer for `space`, with the backwards-compatible `uri` set to the
     /// same URI.
@@ -165,7 +178,16 @@ impl GetSpaceOutput {
             uri: space.clone(),
             space,
             policy,
+            config: None,
         }
+    }
+
+    /// Also answer the policy as a legacy simplespace `config`.
+    pub fn with_legacy_config(mut self, config: crate::com::atproto::simplespace::Config) -> Self {
+        self.config = Some(crate::com::atproto::simplespace::TypedConfig::Config(
+            config,
+        ));
+        self
     }
 }
 
@@ -777,6 +799,27 @@ mod tests {
         .unwrap();
         assert_eq!(current.space, SPACE);
         assert_eq!(current.policy, policy);
+        assert_eq!(current.config, None);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn get_space_legacy_config() {
+        use crate::com::atproto::simplespace::{AppAccess, AppAccessOpen, Config};
+        let policy = Policy::Managedspace(crate::com::atproto::managedspace::Policy {
+            managing_app: "did:web:feeds.example#bsky_fg".to_string(),
+            publish_policy: None,
+        });
+        // The simplespace `config` rides beside `policy`, tagged with its
+        // `$type`, for clients that read the space back from `config`.
+        roundtrip(
+            &GetSpaceOutput::new(SPACE.to_string(), policy).with_legacy_config(Config {
+                policy: Some("managing-app".to_string()),
+                app_access: Some(AppAccess::Open(AppAccessOpen {})),
+                managing_app: Some("did:web:feeds.example#bsky_fg".to_string()),
+            }),
+            r#"{"space":"at://did:plc:auth/space/com.example.forum/self","uri":"at://did:plc:auth/space/com.example.forum/self","policy":{"$type":"com.atproto.managedspace.policy","managingApp":"did:web:feeds.example#bsky_fg"},"config":{"$type":"com.atproto.simplespace.defs#config","policy":"managing-app","appAccess":{"$type":"com.atproto.simplespace.defs#appAccessOpen"},"managingApp":"did:web:feeds.example#bsky_fg"}}"#,
+        );
     }
 
     #[test]

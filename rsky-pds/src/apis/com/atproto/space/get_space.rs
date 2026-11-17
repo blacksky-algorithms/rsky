@@ -1,5 +1,6 @@
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
+use crate::apis::com::atproto::simplespace::adapters::policy_to_config;
 use crate::apis::com::atproto::space::host::{def_to_policy, local_space_def};
 use crate::apis::com::atproto::space::parse_space_uri;
 use crate::apis::ApiError;
@@ -40,10 +41,12 @@ pub async fn space_get_space(
         }
     }
     let (def, _, _) = local_space_def(actor_store, blobstore_factory, &space_id).await?;
+    let policy = def_to_policy(&def);
     // `new` also sets `uri`, for clients of the spaces specification before
-    // the field was renamed `space`; see `GetSpaceOutput::uri`.
-    Ok(Json(GetSpaceOutput::new(
-        space_id.uri(),
-        def_to_policy(&def),
-    )))
+    // the field was renamed `space`; see `GetSpaceOutput::uri`. The legacy
+    // `config` is for simplespace clients; see `GetSpaceOutput::config`.
+    let config = policy_to_config(&policy);
+    Ok(Json(
+        GetSpaceOutput::new(space_id.uri(), policy).with_legacy_config(config),
+    ))
 }
