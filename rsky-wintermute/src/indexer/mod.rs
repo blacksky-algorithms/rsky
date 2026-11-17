@@ -3350,6 +3350,7 @@ impl IndexerManager {
         let mut notif_rows: Vec<bulk::NotificationRow> = Vec::new();
         // (did, uri, cid, sort_at) for reply posts; ancestor notifications need queries
         let mut reply_posts: Vec<(String, String, String, String)> = Vec::new();
+        let mut subscribed_seeds: Vec<bulk::SubscribedPostSeed> = Vec::with_capacity(jobs.len());
 
         for pj in jobs {
             if let Some(record) = &pj.job.record {
@@ -3457,6 +3458,13 @@ impl IndexerManager {
                         sort_at.clone(),
                     ));
                 }
+                subscribed_seeds.push(bulk::SubscribedPostSeed {
+                    did: pj.did.clone(),
+                    uri: uri.clone(),
+                    cid: pj.job.cid.clone(),
+                    sort_at: sort_at.clone(),
+                    is_reply,
+                });
 
                 // Extract embed data for images and videos
                 if let Some(embed) = record.get("embed") {
@@ -3521,12 +3529,13 @@ impl IndexerManager {
                 bulk::copy_insert_quotes(client, &quote_data, compute_agg).await
             },
             async {
-                if !compute_agg || (notif_rows.is_empty() && reply_posts.is_empty()) {
+                if !compute_agg || subscribed_seeds.is_empty() {
                     return Ok(());
                 }
                 let conn = pool.get().await.map_err(WintermuteError::Pool)?;
                 bulk::copy_insert_notifications(&conn, &notif_rows).await?;
-                bulk::write_reply_notifications_bulk(&conn, &reply_posts).await
+                bulk::write_reply_notifications_bulk(&conn, &reply_posts).await?;
+                bulk::write_subscribed_post_notifications_bulk(&conn, &subscribed_seeds).await
             }
         );
         embed_result?;
@@ -4237,6 +4246,18 @@ impl IndexerManager {
                 )
                 .await?;
         }
+
+        bulk::write_subscribed_post_notifications_bulk(
+            client,
+            &[bulk::SubscribedPostSeed {
+                did: did.to_owned(),
+                uri: uri.clone(),
+                cid: cid.to_owned(),
+                sort_at: sort_at.to_owned(),
+                is_reply: reply_parent.is_some(),
+            }],
+        )
+        .await?;
 
         // Handle embed.record (quote posts)
         if let Some(embed) = record.get("embed") {

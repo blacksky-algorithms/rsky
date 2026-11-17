@@ -419,6 +419,50 @@ pub async fn write_reply_notifications_bulk(
     Ok(())
 }
 
+/// A newly indexed post that may fan out `subscribed-post` notifications.
+pub struct SubscribedPostSeed {
+    pub did: String,
+    pub uri: String,
+    pub cid: String,
+    pub sort_at: String,
+    pub is_reply: bool,
+}
+
+/// Notify every activity subscriber of each post's author. Replies only reach
+/// subscribers who opted into replies. Posts older than a day are skipped so
+/// replays and backfills do not push stale posts to subscribers.
+pub async fn write_subscribed_post_notifications_bulk(
+    client: &deadpool_postgres::Client,
+    seeds: &[SubscribedPostSeed],
+) -> Result<(), WintermuteError> {
+    if seeds.is_empty() {
+        return Ok(());
+    }
+    let dids: Vec<&str> = seeds.iter().map(|s| s.did.as_str()).collect();
+    let uris: Vec<&str> = seeds.iter().map(|s| s.uri.as_str()).collect();
+    let cids: Vec<&str> = seeds.iter().map(|s| s.cid.as_str()).collect();
+    let sort_ats: Vec<&str> = seeds.iter().map(|s| s.sort_at.as_str()).collect();
+    let is_replies: Vec<bool> = seeds.iter().map(|s| s.is_reply).collect();
+
+    client
+        .execute(
+            "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"sortAt\")
+             SELECT a.creator, s.did, s.uri, s.cid, 'subscribed-post', s.sort_at
+             FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::bool[])
+                 AS s(did, uri, cid, sort_at, is_reply)
+             JOIN activity_subscription a ON a.\"subjectDid\" = s.did
+             WHERE CASE WHEN s.is_reply THEN a.reply ELSE a.post END
+               AND a.creator <> s.did
+               AND s.sort_at > to_char(now() AT TIME ZONE 'UTC' - interval '1 day', 'YYYY-MM-DD\"T\"HH24:MI:SS')
+             ORDER BY 1, 3
+             ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
+            &[&dids, &uris, &cids, &sort_ats, &is_replies],
+        )
+        .await?;
+
+    Ok(())
+}
+
 /// Bulk insert records using `COPY` protocol.
 /// Returns vector of booleans indicating which records were applied (not stale).
 pub async fn copy_insert_records(

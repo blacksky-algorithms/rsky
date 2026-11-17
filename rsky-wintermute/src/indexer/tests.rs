@@ -4273,4 +4273,115 @@ mod indexer_tests {
             cleanup(&pool).await;
         }
     }
+
+    #[tokio::test]
+    async fn subscribed_post_notifications_fan_out_to_activity_subscribers() {
+        use crate::types::{IndexJob, WriteAction};
+
+        let pool = setup_test_pool();
+        let author = "did:plc:wintermute-test-subpost-author";
+        let posts_only = "did:plc:wintermute-test-subpost-posts";
+        let with_replies = "did:plc:wintermute-test-subpost-replies";
+        let dids = [author, posts_only, with_replies];
+        let client = pool.get().await.unwrap();
+        let cleanup = || async {
+            for did in dids {
+                cleanup_test_data(&pool, did).await;
+            }
+            client
+                .execute(
+                    "DELETE FROM activity_subscription WHERE \"subjectDid\" = $1",
+                    &[&author],
+                )
+                .await
+                .unwrap();
+        };
+        cleanup().await;
+
+        for (creator, key, reply) in [(posts_only, "k1", false), (with_replies, "k2", true)] {
+            client
+                .execute(
+                    "INSERT INTO activity_subscription (creator, \"subjectDid\", key, \"indexedAt\", post, reply) \
+                     VALUES ($1, $2, $3, '2026-01-01T00:00:00Z', true, $4)",
+                    &[&creator, &author, &key, &reply],
+                )
+                .await
+                .unwrap();
+        }
+
+        let now = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
+        let stale = (chrono::Utc::now() - chrono::Duration::days(2))
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
+        let cid = "bafyreihhl5mpvjkrhnnagen2fomozzhnhhdq2jr6cego2nzbvmwewv5rd4".to_owned();
+        let uri = |rkey: &str| format!("at://{author}/app.bsky.feed.post/{rkey}");
+        let job = |rkey: &str, ts: &str, reply_to: Option<&str>| {
+            let mut record = serde_json::json!({
+                "$type": "app.bsky.feed.post",
+                "text": "subscribed",
+                "createdAt": ts,
+            });
+            if let Some(parent) = reply_to {
+                record["reply"] = serde_json::json!({
+                    "root": {"uri": parent, "cid": cid},
+                    "parent": {"uri": parent, "cid": cid},
+                });
+            }
+            IndexJob {
+                uri: uri(rkey),
+                cid: cid.clone(),
+                action: WriteAction::Create,
+                record: Some(record),
+                indexed_at: ts.to_owned(),
+                rev: "3a".to_owned(),
+                provenance: None,
+            }
+        };
+        let recipients = |rkey: &str| {
+            let record_uri = uri(rkey);
+            let client = &client;
+            async move {
+                client
+                    .query(
+                        "SELECT did FROM notification \
+                         WHERE \"recordUri\" = $1 AND reason = 'subscribed-post' ORDER BY did",
+                        &[&record_uri],
+                    )
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|r| r.get::<_, String>(0))
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        let top = uri("top");
+        let batch = vec![
+            (b"k1".to_vec(), job("top", &now, None)),
+            (b"k2".to_vec(), job("reply", &now, Some(&top))),
+            (b"k3".to_vec(), job("old", &stale, None)),
+        ];
+        for _ in 0..2 {
+            let (results, batch_failed) =
+                IndexerManager::process_jobs_batch(&pool, &batch, false, false).await;
+            assert!(!batch_failed);
+            assert!(results.iter().all(|(_, r)| r.is_ok()));
+        }
+        assert_eq!(recipients("top").await, vec![posts_only, with_replies]);
+        assert_eq!(recipients("reply").await, vec![with_replies]);
+        assert_eq!(recipients("old").await, Vec::<String>::new());
+
+        IndexerManager::process_job(&pool, &job("single", &now, None), false)
+            .await
+            .unwrap();
+        IndexerManager::process_job(&pool, &job("single-reply", &now, Some(&top)), false)
+            .await
+            .unwrap();
+        assert_eq!(recipients("single").await, vec![posts_only, with_replies]);
+        assert_eq!(recipients("single-reply").await, vec![with_replies]);
+
+        cleanup().await;
+    }
 }
