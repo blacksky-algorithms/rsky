@@ -1380,6 +1380,12 @@ async fn host_methods_and_notifications() {
     assert_eq!(repos[0]["did"], AUTHOR_DID);
     assert!(!repos[0]["repoRev"].as_str().unwrap().is_empty());
     assert!(repos[0]["data"]["$bytes"].as_str().is_some());
+    // and, for syncers built before the writer set was sequenced, the same
+    // revision as `rev` and the digest as hex `hash`
+    assert_eq!(repos[0]["rev"], repos[0]["repoRev"]);
+    assert!(repos[0]["hash"]
+        .as_str()
+        .is_some_and(|hash| hex::decode(hash).is_ok()));
     let space_rev = repos[0]["spaceRev"].as_str().unwrap().to_string();
     // the cursor is the last entry's spaceRev, and past it the feed is empty
     assert_eq!(body["cursor"], space_rev.as_str());

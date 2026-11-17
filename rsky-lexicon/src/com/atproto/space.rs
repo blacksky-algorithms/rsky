@@ -91,6 +91,19 @@ pub struct WriterRef {
     /// The space revision of its latest accepted update.
     #[serde(rename = "spaceRev")]
     pub space_rev: String,
+    /// The same revision as `repoRev`, under the name `listRepos` gave it
+    /// before the 2026-10-29 spaces alpha (see [`RepoRef`]).
+    ///
+    /// Backwards compatibility only. Syncers built before then require `rev`
+    /// and reject a row without it -- among them the rsky-daemon Acorn
+    /// deploys. Current syncers ignore it. Empty, and then omitted, unless set.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rev: String,
+    /// The digest `data` carries, as the hex string `listRepos` answered as
+    /// `hash` before the 2026-10-29 spaces alpha. Backwards compatibility
+    /// only, like `rev`; absent when the digest is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
 }
 
 /// `listRepos`'s output as a feed in ascending `spaceRev` order. `cursor` is
@@ -923,6 +936,41 @@ mod tests {
             },
             r#"{"cursor":"c1","repos":[{"did":"did:plc:writer","rev":"3jzfcijpj2z2a"}]}"#,
         );
+        // The writer set, with the pre-alpha `rev` and `hash` beside the
+        // current fields when they are set, and without them when they are not.
+        let writer = WriterRef {
+            did: "did:plc:writer".to_string(),
+            repo_rev: "3jzfcijpj2z2a".to_string(),
+            data: vec![1, 2, 3],
+            space_rev: "3jzfcijpj2z2b".to_string(),
+            rev: String::new(),
+            hash: None,
+        };
+        roundtrip(
+            &WriterSetOutput {
+                cursor: Some("3jzfcijpj2z2b".to_string()),
+                repos: vec![writer.clone()],
+            },
+            r#"{"cursor":"3jzfcijpj2z2b","repos":[{"did":"did:plc:writer","repoRev":"3jzfcijpj2z2a","data":{"$bytes":"AQID"},"spaceRev":"3jzfcijpj2z2b"}]}"#,
+        );
+        roundtrip(
+            &WriterSetOutput {
+                cursor: None,
+                repos: vec![WriterRef {
+                    rev: "3jzfcijpj2z2a".to_string(),
+                    hash: Some("010203".to_string()),
+                    ..writer
+                }],
+            },
+            r#"{"repos":[{"did":"did:plc:writer","repoRev":"3jzfcijpj2z2a","data":{"$bytes":"AQID"},"spaceRev":"3jzfcijpj2z2b","rev":"3jzfcijpj2z2a","hash":"010203"}]}"#,
+        );
+        // A syncer built before the alpha reads the same row as a `RepoRef`.
+        let legacy: ListReposOutput = serde_json::from_str(
+            r#"{"repos":[{"did":"did:plc:writer","repoRev":"3jzfcijpj2z2a","data":{"$bytes":"AQID"},"spaceRev":"3jzfcijpj2z2b","rev":"3jzfcijpj2z2a","hash":"010203"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.repos[0].rev, "3jzfcijpj2z2a");
+        assert_eq!(legacy.repos[0].hash.as_deref(), Some("010203"));
     }
 
     #[test]

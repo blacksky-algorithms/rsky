@@ -1,7 +1,9 @@
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::space::host::{def_policy, local_space_def};
-use crate::apis::com::atproto::space::{deliver_notifications, parse_space_uri, space_error};
+use crate::apis::com::atproto::space::{
+    deliver_notifications, parse_space_uri, space_error, syncer_notice_body,
+};
 use crate::apis::ApiError;
 use crate::auth_verifier::bearer_token_from_req;
 use crate::config::ServerConfig;
@@ -145,15 +147,14 @@ pub async fn space_notify_write(
         let authority = space_id.authority.clone();
         // Leg 2 carries the space's sequence, so a syncer can tell when it
         // missed a notice.
-        let body = serde_json::to_value(NotifyWriteInput {
+        let body = syncer_notice_body(&NotifyWriteInput {
             space: space_id.uri(),
             repo,
             rev,
             data,
             space_rev: Some(advance.space_rev),
             prev_space_rev: advance.prev_space_rev,
-        })
-        .expect("NotifyWriteInput serializes");
+        });
         actor_store.background_queue.add(async move {
             deliver_notifications(
                 &keypair,

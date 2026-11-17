@@ -504,7 +504,7 @@ impl NotifyWriteTask {
                     prev_space_rev: self.advance.as_ref().and_then(|a| a.prev_space_rev.clone()),
                     ..notice
                 };
-                let forward = serde_json::to_value(&forward).expect("NotifyWriteInput serializes");
+                let forward = syncer_notice_body(&forward);
                 deliver_notifications(
                     authority_keypair,
                     &self.space.authority,
@@ -551,6 +551,23 @@ pub async fn resolve_space_host_endpoint(plc_url: &str, authority: &str) -> Resu
         }
     }
     anyhow::bail!("no space host endpoint in DID document for {authority}")
+}
+
+/// The `notifyWrite` body a space host forwards to its registered syncers
+/// (leg 2): the notice under its current field names, plus `rev` beside
+/// `repoRev`.
+///
+/// `rev` is `repoRev`'s name before the 2026-10-01 spaces alpha. Syncers built
+/// before then require it and refuse a notice without it -- among them the
+/// rsky-daemon Acorn deploys. Current syncers read `repoRev`;
+/// `NotifyWriteInput` accepts a body carrying both. Leg 1, to space hosts, is
+/// unchanged.
+pub fn syncer_notice_body(
+    notice: &rsky_lexicon::com::atproto::space::NotifyWriteInput,
+) -> serde_json::Value {
+    let mut body = serde_json::to_value(notice).expect("NotifyWriteInput serializes");
+    body["rev"] = serde_json::Value::String(notice.rev.clone());
+    body
 }
 
 /// POST a signed, method-bound notification to each subscriber, best-effort.
@@ -652,5 +669,36 @@ mod tests {
         assert!(require_repo_matches_subject("did:plc:a", "did:plc:a").is_ok());
         let error = require_repo_matches_subject("did:plc:b", "did:plc:a").unwrap_err();
         assert!(matches!(error, ApiError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn syncer_notices_also_carry_the_pre_alpha_rev() {
+        use rsky_lexicon::com::atproto::space::NotifyWriteInput;
+        let notice = NotifyWriteInput {
+            space: "at://did:plc:auth/space/com.example.forum/self".to_string(),
+            repo: "did:plc:writer".to_string(),
+            rev: "3jzfcijpj2z2c".to_string(),
+            data: Some(vec![1, 2, 3]),
+            space_rev: Some("3jzfcijpj2z2d".to_string()),
+            prev_space_rev: None,
+        };
+        let body = syncer_notice_body(&notice);
+        assert_eq!(body["repoRev"], "3jzfcijpj2z2c");
+        assert_eq!(body["rev"], "3jzfcijpj2z2c");
+        assert_eq!(body["spaceRev"], "3jzfcijpj2z2d");
+        // A current syncer reads the body back as the notice it was.
+        let read: NotifyWriteInput = serde_json::from_value(body.clone()).unwrap();
+        assert_eq!(read, notice);
+
+        // A syncer built before the rename: `rev` required, `repoRev` unknown.
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct PreAlphaNotice {
+            space: String,
+            repo: String,
+            rev: String,
+        }
+        let old: PreAlphaNotice = serde_json::from_value(body).unwrap();
+        assert_eq!(old.rev, "3jzfcijpj2z2c");
     }
 }

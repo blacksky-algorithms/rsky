@@ -43,13 +43,17 @@ pub async fn space_list_repos(
         .into_iter()
         .map(|writer| WriterRef {
             did: writer.did,
-            repo_rev: writer.rev,
             data: writer
                 .hash
                 .as_deref()
                 .and_then(|hash| hex::decode(hash).ok())
                 .unwrap_or_else(|| vec![0u8; 32]),
             space_rev: writer.space_rev,
+            // The pre-alpha `rev` and `hash`, for syncers built before the
+            // writer set was sequenced; see `WriterRef::rev`.
+            rev: writer.rev.clone(),
+            hash: writer.hash,
+            repo_rev: writer.rev,
         })
         .collect();
     Ok(Json(WriterSetOutput { cursor, repos }))
