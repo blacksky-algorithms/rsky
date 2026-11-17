@@ -89,6 +89,38 @@ async fn each_account_gets_its_own_signing_key() {
     assert_ne!(bob_key, shared_key);
 }
 
+async fn recommended_kem_key(client: &Client, token: &str) -> String {
+    let response = client
+        .get("/xrpc/com.atproto.identity.getRecommendedDidCredentials")
+        .header(Header::new("Authorization", format!("Bearer {token}")))
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let body: serde_json::Value = response.into_json().await.unwrap();
+    body["verificationMethods"]["atproto_kem"]
+        .as_str()
+        .expect("recommended credentials name an atproto_kem key")
+        .to_string()
+}
+
+/// An account migrating here signs its PLC operation from the recommended
+/// credentials, so they must carry its `#atproto_kem` key beside `atproto`,
+/// or the operation drops the key from its DID document. The key is the
+/// account's own P-256 key, and the same one on every call.
+#[tokio::test]
+async fn recommended_credentials_carry_the_accounts_kem_key() {
+    let (_dir, client) = common::get_client().await;
+    let dora = account(&client, "did:plc:dddddddddddddddddddddddd", "dora").await;
+    let emil = account(&client, "did:plc:eeeeeeeeeeeeeeeeeeeeeeee", "emil").await;
+
+    let dora_kem = recommended_kem_key(&client, &dora).await;
+    let parsed = rsky_crypto::did::parse_did_key(&dora_kem).unwrap();
+    assert_eq!(parsed.jwt_alg, rsky_crypto::constants::P256_JWT_ALG);
+    assert_eq!(recommended_kem_key(&client, &dora).await, dora_kem);
+    assert_ne!(recommended_kem_key(&client, &emil).await, dora_kem);
+    assert_ne!(recommended_signing_key(&client, &dora).await, dora_kem);
+}
+
 /// A `getServiceAuth` token must verify against the issuing account's own
 /// key — the property a remote service checks after resolving `iss`.
 #[tokio::test]

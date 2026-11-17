@@ -2,6 +2,7 @@ use crate::account_manager::helpers::account::AvailabilityFlags;
 use crate::account_manager::AccountManager;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
+use crate::apis::com::atproto::space::kem::kem_did_key;
 use crate::apis::ApiError;
 use crate::auth_verifier::scope::{NoScopeRequired, Scoped};
 use crate::config::ServerConfig;
@@ -44,8 +45,27 @@ pub async fn get_recommended_did_credentials(
             return Err(ApiError::RuntimeError);
         }
     };
+    // The `#atproto_kem` key too (proposal §KEM key). An account migrating
+    // here signs its PLC operation from these, so recommending `atproto`
+    // alone dropped the key from its DID document -- and with it every
+    // syncer's way to check this server's response MACs -- until the
+    // account's first space write published a new one. Generated here if
+    // the account has none yet; the first space write then finds it already
+    // in the document and only records it.
+    let kem_key = match actor_store.ensure_kem_key(&requester).await {
+        Ok(key) => kem_did_key(&key),
+        Err(error) => Err(error),
+    };
+    let kem_key = match kem_key {
+        Ok(kem_key) => kem_key,
+        Err(error) => {
+            tracing::error!("Failed to load the KEM key for {requester}\n{error}");
+            return Err(ApiError::RuntimeError);
+        }
+    };
     let verification_methods = json!({
-        "atproto": signing_key
+        "atproto": signing_key,
+        "atproto_kem": kem_key
     });
 
     let rotation_key = encode_did_key(&PDS_PLC_ROTATION_KEYPAIR.public_key());
