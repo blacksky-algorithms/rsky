@@ -3,6 +3,7 @@ use crate::account_manager::{AccountManager, CreateAccountOpts};
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::server::safe_resolve_did_doc;
+use crate::apis::com::atproto::space::kem::kem_did_key;
 use crate::apis::ApiError;
 use crate::auth_verifier::UserDidAuthOptional;
 use crate::com::atproto::server::PDS_PLC_ROTATION_KEYPAIR;
@@ -34,6 +35,9 @@ pub struct TransformedCreateAccountInput {
     pub deactivated: bool,
     /// Generated per account, and already named by `plc_op` when there is one.
     pub signing_key: Keypair,
+    /// The `#atproto_kem` key `plc_op` names, when there is one. An account
+    /// that brings its own DID gets its key on first use instead.
+    pub kem_key: Option<p256::SecretKey>,
 }
 
 //TODO: Potential for taking advantage of async better
@@ -114,6 +118,7 @@ pub async fn create_account_for(
         deactivated,
         plc_op,
         signing_key,
+        kem_key,
     } = validate_inputs_for_local_pds(
         cfg,
         id_resolver,
@@ -129,6 +134,13 @@ pub async fn create_account_for(
     if let Err(error) = actor_store.create(&did, &signing_key).await {
         tracing::error!("Failed to create actor store\n{:?}", error);
         return Err(ApiError::from(error));
+    }
+    if let Some(kem_key) = &kem_key {
+        if let Err(error) = actor_store.install_kem_key(&did, kem_key.clone()).await {
+            tracing::error!("Failed to store the KEM key\n{:?}", error);
+            actor_store.destroy(&did, blobstore.clone()).await?;
+            return Err(ApiError::RuntimeError);
+        }
     }
     let commit = {
         let actor_txn = match actor_store.transact(did.clone(), blobstore.clone()).await {
@@ -160,7 +172,19 @@ pub async fn create_account_for(
                 .await
             {
                 Ok(_) => {
-                    tracing::info!("Succesfully sent PLC Operation")
+                    tracing::info!("Succesfully sent PLC Operation");
+                    // The genesis op published the KEM key, so the first space
+                    // write need not (see `space::kem`). If this record is
+                    // lost, that write merely asks the directory again.
+                    if let Some(kem_key) = &kem_key {
+                        let recorded = match kem_did_key(kem_key) {
+                            Ok(did_key) => actor_store.set_kem_published(&did, &did_key).await,
+                            Err(error) => Err(error),
+                        };
+                        if let Err(error) = recorded {
+                            tracing::warn!(%error, %did, "could not record the published KEM key");
+                        }
+                    }
                 }
                 Err(_) => {
                     tracing::error!("Failed to create did:plc");
@@ -363,6 +387,7 @@ pub async fn validate_inputs_for_local_pds(
     // One key per account, generated before the PLC create op so the op and
     // the actor store's key file name the same key.
     let signing_key = Keypair::new(&Secp256k1::new(), &mut rand::thread_rng());
+    let kem_key;
 
     match input.did {
         Some(input_did) => {
@@ -374,12 +399,19 @@ pub async fn validate_inputs_for_local_pds(
             did = input_did;
             plc_op = None;
             deactivated = true;
+            kem_key = None;
         }
         None => {
-            let res = format_did_and_plc_op(input, &signing_key).await?;
+            // The `#atproto_kem` key goes in the create op too. Published
+            // later, on the account's first space write, it raced the
+            // notifyWrite that write sends: a syncer could read the repo
+            // before the directory had the key and fail `KemKeyUnavailable`.
+            let key = p256::SecretKey::random(&mut rand::thread_rng());
+            let res = format_did_and_plc_op(input, &signing_key, &key).await?;
             did = res.0;
             plc_op = Some(res.1);
             deactivated = false;
+            kem_key = Some(key);
         }
     };
 
@@ -392,6 +424,7 @@ pub async fn validate_inputs_for_local_pds(
         plc_op,
         deactivated,
         signing_key,
+        kem_key,
     })
 }
 
@@ -399,7 +432,12 @@ pub async fn validate_inputs_for_local_pds(
 async fn format_did_and_plc_op(
     input: CreateAccountInput,
     signing_key: &Keypair,
+    kem_key: &p256::SecretKey,
 ) -> Result<(String, Operation), ApiError> {
+    let kem_key = kem_did_key(kem_key).map_err(|error| {
+        tracing::error!("{error}");
+        ApiError::RuntimeError
+    })?;
     let mut rotation_keys: Vec<String> = Vec::new();
 
     //Add user provided rotation key
@@ -420,6 +458,7 @@ async fn format_did_and_plc_op(
             env::var("PDS_HOSTNAME").unwrap_or("localhost".to_owned())
         ),
         rotation_keys,
+        kem_key: Some(kem_key),
     };
     let response = match create_op(create_op_input, PDS_PLC_ROTATION_KEYPAIR.secret_key()).await {
         Ok(res) => res,

@@ -5,13 +5,20 @@
 //! a repo host MACs its answers under, so a host whose accounts publish none
 //! can be read by nobody who checks those MACs.
 //!
-//! The key is generated on first use and kept in the actor store beside the
-//! signing key. It is published the first time an account touches spaces --
-//! creating one, or writing into one -- rather than for every account up
-//! front, because the proposal asks it of accounts with space repos and a
-//! directory write per account is not free. Publication is best-effort: a
-//! directory that cannot be reached leaves the write it rode in on to
-//! succeed, and the next space write tries again.
+//! The key is kept in the actor store beside the signing key. An account this
+//! server creates a `did:plc` for gets it at creation, named in the genesis
+//! operation, so its DID document has the key before the account can write
+//! anything. Publishing it later, on the first space write, raced the
+//! `notifyWrite` that write sends: a syncer could read the repo before the
+//! directory had the key, and fail it as `KemKeyUnavailable`. The genesis
+//! operation is a directory write the account makes anyway, so the key costs
+//! no extra one.
+//!
+//! Every other account -- one created before this, or one that brought its
+//! own DID -- gets the key on first use instead, published the first time it
+//! touches spaces: creating one, or writing into one. That publication is
+//! best-effort: a directory that cannot be reached leaves the write it rode
+//! in on to succeed, and the next space write tries again.
 
 use crate::actor_store::ActorStore;
 use crate::plc;
@@ -196,6 +203,36 @@ mod tests {
         .await;
         assert!(store.kem_published(did).await.unwrap().is_none());
         assert!(store.kem_key(did).await.unwrap().is_some());
+    }
+
+    /// What `createAccount` does for a `did:plc` it creates: the key its
+    /// genesis op named is installed and recorded as published, so the first
+    /// space write neither generates another nor asks the directory.
+    #[tokio::test]
+    async fn a_key_installed_at_creation_is_the_one_used_and_not_republished() {
+        let did = "did:plc:kemkeyeeeeeeeeeeeeeeeeee";
+        let (_dir, store) = store_with_actor(did).await;
+        let created = p256::SecretKey::from_slice(&[0x31u8; 32]).unwrap();
+        let installed = store.install_kem_key(did, created.clone()).await.unwrap();
+        assert_eq!(installed.to_bytes(), created.to_bytes());
+        store
+            .set_kem_published(did, &kem_did_key(&created).unwrap())
+            .await
+            .unwrap();
+
+        // An install never replaces the key in place.
+        let other = p256::SecretKey::from_slice(&[0x32u8; 32]).unwrap();
+        let kept = store.install_kem_key(did, other).await.unwrap();
+        assert_eq!(kept.to_bytes(), created.to_bytes());
+        assert_eq!(
+            store.ensure_kem_key(did).await.unwrap().to_bytes(),
+            created.to_bytes()
+        );
+
+        let rotation = keypair(0x11);
+        let plc = MockPlc::start(&encode_did_key(&rotation.public_key()), BTreeMap::new());
+        ensure_kem_key_published(&store, &plc.url, &rotation.secret_key(), did).await;
+        assert!(plc.posted().is_empty());
     }
 
     #[tokio::test]

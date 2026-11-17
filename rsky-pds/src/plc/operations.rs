@@ -24,17 +24,24 @@ pub struct CreateAtprotoOpInput {
     pub handle: String,
     pub pds: String,
     pub rotation_keys: Vec<String>,
+    /// The account's `#atproto_kem` key, a P-256 `did:key`, published from
+    /// the genesis operation on so the DID document never lacks it.
+    pub kem_key: Option<String>,
 }
 
 pub async fn create_op(
     opts: CreateAtprotoOpInput,
     secret_key: SecretKey,
 ) -> Result<(String, Operation)> {
+    let mut verification_methods = BTreeMap::from([("atproto".to_string(), opts.signing_key)]);
+    if let Some(kem_key) = opts.kem_key {
+        verification_methods.insert("atproto_kem".to_string(), kem_key);
+    }
     //Build Operation
     let mut create_op = Operation {
         r#type: "plc_operation".to_string(),
         rotation_keys: opts.rotation_keys,
-        verification_methods: BTreeMap::from([("atproto".to_string(), opts.signing_key)]),
+        verification_methods,
         also_known_as: vec![ensure_atproto_prefix(opts.handle)],
         services: BTreeMap::from([(
             "atproto_pds".to_string(),
@@ -300,4 +307,36 @@ fn sign(mut op: Operation, private_key: &SecretKey) -> Operation {
     // Base 64 encode signature bytes
     op.sig = Some(base64_url::encode(&op_sig).replace("=", ""));
     op
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use secp256k1::Secp256k1;
+
+    fn input(kem_key: Option<String>) -> CreateAtprotoOpInput {
+        CreateAtprotoOpInput {
+            signing_key: "did:key:zSigning".to_string(),
+            handle: "alice.example.com".to_string(),
+            pds: "pds.example.com".to_string(),
+            rotation_keys: vec!["did:key:zRotation".to_string()],
+            kem_key,
+        }
+    }
+
+    /// The genesis operation names the KEM key beside the signing key, so a
+    /// syncer reading the account's first space write finds it published.
+    #[tokio::test]
+    async fn the_genesis_op_carries_the_kem_key() {
+        let (secret_key, _) = Secp256k1::new().generate_keypair(&mut rand::thread_rng());
+        let (_, op) = create_op(input(Some("did:key:zKem".to_string())), secret_key)
+            .await
+            .unwrap();
+        assert_eq!(op.verification_methods["atproto"], "did:key:zSigning");
+        assert_eq!(op.verification_methods["atproto_kem"], "did:key:zKem");
+
+        let (_, op) = create_op(input(None), secret_key).await.unwrap();
+        assert_eq!(op.verification_methods.len(), 1);
+        assert!(!op.verification_methods.contains_key("atproto_kem"));
+    }
 }

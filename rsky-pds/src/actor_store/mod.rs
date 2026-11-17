@@ -534,15 +534,31 @@ impl ActorStore {
 
     /// The account's `#atproto_kem` private key, generated on first use.
     ///
-    /// Two requests can race to generate one, so the new key is staged and
-    /// hard-linked into place, which fails rather than overwrites: the loser
-    /// discards its key and reads the winner's. Only one key is ever used.
+    /// Accounts this server creates a `did:plc` for get theirs at creation
+    /// (see [`Self::install_kem_key`]); this is for every other account.
     pub async fn ensure_kem_key(&self, did: &str) -> Result<p256::SecretKey> {
         let location = self.get_location(did)?;
         if let Some(key) = read_kem_key(&location.kem_key_location).await? {
             return Ok(key);
         }
+        // Bound first: a `thread_rng` temporary held across the await would
+        // make every handler's future `!Send`.
         let key = p256::SecretKey::random(&mut rand::thread_rng());
+        self.install_kem_key(did, key).await
+    }
+
+    /// Install `key` as the account's `#atproto_kem` private key, unless it
+    /// already has one, and answer the key in place.
+    ///
+    /// Two requests can race to install one, so the new key is staged and
+    /// hard-linked into place, which fails rather than overwrites: the loser
+    /// discards its key and reads the winner's. Only one key is ever used.
+    pub async fn install_kem_key(
+        &self,
+        did: &str,
+        key: p256::SecretKey,
+    ) -> Result<p256::SecretKey> {
+        let location = self.get_location(did)?;
         let mut tmp_location = location.kem_key_location.clone().into_os_string();
         tmp_location.push(format!(".{}.tmp", rsky_common::get_random_str()));
         let tmp_location = PathBuf::from(tmp_location);
