@@ -43,7 +43,6 @@ async fn inner_resolve_handle(
     account_manager: AccountManager,
 ) -> Result<ResolveHandleOutput, ApiError> {
     let handle = normalize_and_ensure_valid_handle(handle).map_err(|_| ApiError::InvalidHandle)?;
-    let unresolvable = || ApiError::InvalidRequest("Unable to resolve handle".to_string());
     let mut did: Option<String> = None;
     let user: Option<ActorAccount> = account_manager.get_account(&handle, None).await?;
 
@@ -55,7 +54,10 @@ async fn inner_resolve_handle(
                 .any(|host| handle.ends_with(host.as_str()) || handle == host[1..]);
             // this should be in our DB & we couldn't find it, so fail
             if supported_handle {
-                return Err(unresolvable());
+                return Err(ApiError::BadRequest(
+                    "HandleNotFound".to_string(),
+                    "Unable to resolve handle".to_string(),
+                ));
             }
         }
     }
@@ -72,7 +74,7 @@ async fn inner_resolve_handle(
     }
 
     did.map(|did| ResolveHandleOutput { did })
-        .ok_or_else(unresolvable)
+        .ok_or_else(|| ApiError::InvalidRequest("Unable to resolve handle".to_string()))
 }
 
 #[tracing::instrument(skip_all)]
