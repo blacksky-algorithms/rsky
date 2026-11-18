@@ -266,12 +266,18 @@ jobs:
           deadline=$(( $(date +%s) + DEADLINE_MINUTES * 60 ))
           job_deadline=$(( STARTED + JOB_MINUTES * 60 ))
           if [ "$job_deadline" -lt "$deadline" ]; then deadline=$job_deadline; fi
+          misses=0
           while [ $(( $(date +%s) + 30 )) -lt "$deadline" ]; do
             sleep 30
             code="$(curl -s -m 30 -o "$RUNNER_TEMP/state.json" -w '%{http_code}' -H "$auth" \
               "$ANARRES_BASE_URL/review/$id" || true)"
             if [ "$code" = "404" ]; then exit 0; fi
-            if [ "$code" != "200" ]; then continue; fi
+            if [ "$code" != "200" ]; then
+              misses=$(( misses + 1 ))
+              if [ "$misses" -ge 6 ]; then exit 0; fi
+              continue
+            fi
+            misses=0
             case "$(jq -r .status "$RUNNER_TEMP/state.json" 2> /dev/null)" in
               done)
                 jq -r '.markdown | select(type == "string" and test("\\S"))' "$RUNNER_TEMP/state.json" \
