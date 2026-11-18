@@ -50,6 +50,12 @@ async fn resolve_handle_separates_unresolvable_from_internal_failure() {
     assert_eq!(body["error"], "HandleNotFound");
     assert_eq!(body["message"], "Unable to resolve handle");
 
+    let response = resolve("nobody.example.test").await;
+    assert_eq!(response.status(), Status::BadRequest);
+    let body: serde_json::Value = response.into_json().await.unwrap();
+    assert_eq!(body["error"], "InvalidRequest");
+    assert_eq!(body["message"], "Unable to resolve handle");
+
     let response = resolve("not_a_handle").await;
     assert_eq!(response.status(), Status::BadRequest);
     let body: serde_json::Value = response.into_json().await.unwrap();
