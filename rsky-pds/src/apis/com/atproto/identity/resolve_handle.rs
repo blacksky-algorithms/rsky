@@ -2,11 +2,12 @@ use crate::account_manager::helpers::account::ActorAccount;
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
 use crate::{SharedIdResolver, APP_USER_AGENT};
-use anyhow::{bail, Result};
+use anyhow::Result;
 use rocket::serde::json::Json;
 use rocket::State;
 use rsky_common::env::{env_list, env_str};
 use rsky_lexicon::com::atproto::identity::ResolveHandleOutput;
+use rsky_syntax::handle::normalize_and_ensure_valid_handle;
 
 async fn try_resolve_from_app_view(handle: &String) -> Result<Option<String>> {
     match env_str("PDS_BSKY_APP_VIEW_URL") {
@@ -40,8 +41,8 @@ async fn inner_resolve_handle(
     handle: String,
     id_resolver: &State<SharedIdResolver>,
     account_manager: AccountManager,
-) -> Result<ResolveHandleOutput> {
-    // @TODO: Implement normalizeAndEnsureValidHandle()
+) -> Result<ResolveHandleOutput, ApiError> {
+    let handle = normalize_and_ensure_valid_handle(handle).map_err(|_| ApiError::InvalidHandle)?;
     let mut did: Option<String> = None;
     let user: Option<ActorAccount> = account_manager.get_account(&handle, None).await?;
 
@@ -53,7 +54,10 @@ async fn inner_resolve_handle(
                 .any(|host| handle.ends_with(host.as_str()) || handle == host[1..]);
             // this should be in our DB & we couldn't find it, so fail
             if supported_handle {
-                bail!("unable to resolve handle");
+                return Err(ApiError::BadRequest(
+                    "HandleNotFound".to_string(),
+                    "Unable to resolve handle".to_string(),
+                ));
             }
         }
     }
@@ -66,13 +70,11 @@ async fn inner_resolve_handle(
 
     if did.is_none() {
         let mut lock = id_resolver.id_resolver.write().await;
-        did = lock.handle.resolve(&handle).await?;
+        did = lock.handle.resolve(&handle).await.ok().flatten();
     }
 
-    match did {
-        None => bail!("unable to resolve handle"),
-        Some(did) => Ok(ResolveHandleOutput { did }),
-    }
+    did.map(|did| ResolveHandleOutput { did })
+        .ok_or_else(|| ApiError::InvalidRequest("Unable to resolve handle".to_string()))
 }
 
 #[tracing::instrument(skip_all)]
@@ -82,11 +84,7 @@ pub async fn resolve_handle(
     id_resolver: &State<SharedIdResolver>,
     account_manager: AccountManager,
 ) -> Result<Json<ResolveHandleOutput>, ApiError> {
-    match inner_resolve_handle(handle, id_resolver, account_manager).await {
-        Ok(res) => Ok(Json(res)),
-        Err(error) => {
-            tracing::error!("@LOG: ERROR: {error}");
-            Err(ApiError::RuntimeError)
-        }
-    }
+    inner_resolve_handle(handle, id_resolver, account_manager)
+        .await
+        .map(Json)
 }
