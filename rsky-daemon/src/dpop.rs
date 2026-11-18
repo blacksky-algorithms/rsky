@@ -7,9 +7,9 @@
 //! the proof sent with `getSpaceCredential` carries the public key, and the
 //! authority writes its thumbprint into the credential's `cnf.jkt`.
 //!
-//! The key is generated per process and never persisted. A credential is
-//! minted, used, and dropped by the same run, so a key that outlived it would
-//! only be one more secret to keep.
+//! The key is kept at `DAEMON_DPOP_KEY_PATH` and generated there on first
+//! run ([`DpopSigner::load_or_generate`]), so it stays the same across
+//! restarts and the credentials bound to it remain usable.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;

@@ -16,7 +16,9 @@ Apps sync directly from each member's PDS (there is no relay).
   state, BLAKE3-XOF lanes, `sha256(state)` digest). Order-independent; add/remove
   are single cheap operations.
 - `commit` — the domain-separated commit context (`atproto-space-v1`) and
-  deniable signature + HKDF/HMAC MAC verification.
+  deniable signature + HKDF/HMAC MAC verification. `verify_commit_either_tag`
+  also accepts commits signed under the spec's `atproto-space-repo-v1` tag, for
+  syncers that meet hosts on both sides of the tag change.
 - `credential` — delegation tokens, space credentials, and client attestations:
   the JWT envelope, `typ`/claim validation, and signature verification. Signing
   is injected via a closure so the crate stays key-type agnostic.

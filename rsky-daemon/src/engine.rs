@@ -7,7 +7,7 @@
 //! recovery (`getRepo`). This mirrors the proposal's self-healing sync.
 
 use async_trait::async_trait;
-use rsky_space::commit::verify_commit;
+use rsky_space::commit::verify_commit_either_tag;
 use rsky_space::lthash::element;
 
 use crate::error::{DaemonError, Result};
@@ -113,7 +113,7 @@ pub async fn sync_repo(
         if let Some(commit) = &page.commit {
             let author_key = keys.signing_key(did).await?;
             // Authenticate the commit: signature over ctx + MAC binding its hash.
-            verify_commit(
+            verify_commit_either_tag(
                 &author_key,
                 space_uri,
                 did,

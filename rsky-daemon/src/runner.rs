@@ -107,8 +107,9 @@ pub struct SweepReport {
     pub failed: usize,
 }
 
-/// Sync one repo, falling back to full-state recovery on divergence or when
-/// the host's oplog no longer covers our `since` revision.
+/// Sync one repo, falling back to full-state recovery on divergence, when the
+/// host's oplog no longer covers our `since` revision, or when the host serves
+/// an unsigned commit ([`DaemonError::needs_recovery`]).
 pub async fn sync_repo_healing(
     client: &dyn RepoHostClient,
     index: &dyn SpaceIndex,
@@ -117,11 +118,21 @@ pub async fn sync_repo_healing(
     did: &str,
 ) -> Result<SyncOutcome> {
     match sync_repo(client, index, keys, space_uri, did).await {
-        Err(e @ (DaemonError::Diverged(_) | DaemonError::HistoryUnavailable(_))) => {
-            tracing::warn!(did, error = %e, "incremental sync failed; full-state recovery");
+        Err(e) if e.needs_recovery() => {
+            log_recovery(did, &e);
             recover_repo(client, index, keys, space_uri, did).await
         }
         other => other,
+    }
+}
+
+/// An unsigned commit is how every host on the spaces alpha answers, so
+/// recovering from it is routine; divergence and lost history are not.
+fn log_recovery(did: &str, error: &DaemonError) {
+    if matches!(error, DaemonError::UnsignedCommit(_)) {
+        tracing::debug!(did, error = %error, "unsigned commit; full-state recovery");
+    } else {
+        tracing::warn!(did, error = %error, "incremental sync failed; full-state recovery");
     }
 }
 
@@ -163,8 +174,8 @@ pub async fn sync_space_once(
                 continue;
             }
             let outcome = match sync_repo(client, index, keys, space_uri, &repo.did).await {
-                Err(e @ (DaemonError::Diverged(_) | DaemonError::HistoryUnavailable(_))) => {
-                    tracing::warn!(did = %repo.did, error = %e, "incremental sync failed; full-state recovery");
+                Err(e) if e.needs_recovery() => {
+                    log_recovery(&repo.did, &e);
                     recover_repo(client, index, keys, space_uri, &repo.did)
                         .await
                         .map(|_| true)
@@ -509,8 +520,18 @@ mod tests {
 
     enum Repo {
         Oplog(OplogPage),
-        HistoryGone { car: Vec<u8> },
-        DivergedOplog { page: OplogPage, car: Vec<u8> },
+        HistoryGone {
+            car: Vec<u8>,
+        },
+        DivergedOplog {
+            page: OplogPage,
+            car: Vec<u8>,
+        },
+        /// A host on the spaces alpha: its oplog head is an unsigned commit,
+        /// and its CAR (asked for by type) carries a signed one.
+        UnsignedHead {
+            car: Vec<u8>,
+        },
     }
 
     struct ScriptedRepoHost(HashMap<String, Repo>);
@@ -539,11 +560,14 @@ mod tests {
                 Repo::HistoryGone { .. } => Err(DaemonError::HistoryUnavailable(
                     "oplog compacted".to_string(),
                 )),
+                Repo::UnsignedHead { .. } => Err(DaemonError::UnsignedCommit(did.to_string())),
             }
         }
         async fn get_repo_car(&self, _space: &str, did: &str) -> Result<Vec<u8>> {
             match self.repo(did)? {
-                Repo::HistoryGone { car } | Repo::DivergedOplog { car, .. } => Ok(car.clone()),
+                Repo::HistoryGone { car }
+                | Repo::DivergedOplog { car, .. }
+                | Repo::UnsignedHead { car } => Ok(car.clone()),
                 Repo::Oplog(_) => Err(DaemonError::Xrpc("no car scripted".to_string())),
             }
         }
@@ -727,6 +751,12 @@ mod tests {
                 car: car_as(&f, "did:plc:gone", "3rev2").await,
             },
         );
+        repos.insert(
+            "did:plc:alpha".to_string(),
+            Repo::UnsignedHead {
+                car: car_as(&f, "did:plc:alpha", "3rev2").await,
+            },
+        );
         let client = ScriptedRepoHost(repos);
 
         let host = PagedSpaceHost::new(vec![
@@ -744,6 +774,7 @@ mod tests {
                 repos: vec![
                     repo_ref("did:plc:diverged", "3rev2", None),
                     repo_ref("did:plc:gone", "3rev2", None),
+                    repo_ref("did:plc:alpha", "3rev2", None),
                 ],
             },
         ]);
@@ -762,7 +793,7 @@ mod tests {
             SweepReport {
                 synced: 2,
                 skipped: 2,
-                recovered: 2,
+                recovered: 3,
                 failed: 0,
             }
         );
@@ -770,6 +801,7 @@ mod tests {
         assert_eq!(index.record_count("did:plc:advanced"), 1);
         assert_eq!(index.record_count("did:plc:diverged"), 3);
         assert_eq!(index.record_count("did:plc:gone"), 3);
+        assert_eq!(index.record_count("did:plc:alpha"), 3);
         assert_eq!(
             index.last_rev("did:plc:current").await.unwrap().as_deref(),
             Some("3rev")
@@ -920,6 +952,23 @@ mod tests {
         repos.insert(
             AUTHOR.to_string(),
             Repo::HistoryGone {
+                car: car_as(&f, AUTHOR, "3rev9").await,
+            },
+        );
+        let client = ScriptedRepoHost(repos);
+        let outcome = sync_repo_healing(&client, &index, &keys, SPACE, AUTHOR)
+            .await
+            .unwrap();
+        assert!(outcome.commit_verified);
+        assert_eq!(index.record_count(AUTHOR), 3);
+
+        // An unsigned commit at the oplog head (a host on the spaces alpha)
+        // also falls back to recovery, which verifies the CAR's signed commit.
+        let index = InMemoryIndex::new();
+        let mut repos = HashMap::new();
+        repos.insert(
+            AUTHOR.to_string(),
+            Repo::UnsignedHead {
                 car: car_as(&f, AUTHOR, "3rev9").await,
             },
         );
