@@ -26,6 +26,10 @@ struct Args {
     /// PostgreSQL connection URL
     #[arg(long, env = "DATABASE_URL")]
     database_url: String,
+
+    /// Write notification rows for indexed records (off by default so a re-index does not notify for the account's history)
+    #[arg(long)]
+    notify: bool,
 }
 
 #[tokio::main]
@@ -34,6 +38,9 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let args = Args::parse();
+    if !args.notify {
+        rsky_wintermute::indexer::disable_notifications();
+    }
 
     // Parse all DIDs from args (supporting comma-separated)
     let dids: Vec<String> = args
