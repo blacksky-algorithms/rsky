@@ -272,9 +272,10 @@ jobs:
               "$ANARRES_BASE_URL/review/$id" || true)"
             if [ "$code" = "404" ]; then exit 0; fi
             if [ "$code" != "200" ]; then continue; fi
-            case "$(jq -r .status "$RUNNER_TEMP/state.json")" in
+            case "$(jq -r .status "$RUNNER_TEMP/state.json" 2> /dev/null)" in
               done)
-                jq -r .markdown "$RUNNER_TEMP/state.json" | head -c 60000 > "$RUNNER_TEMP/deep.md"
+                jq -r '.markdown | select(type == "string" and test("\\S"))' "$RUNNER_TEMP/state.json" \
+                  | head -c 60000 > "$RUNNER_TEMP/deep.md"
                 if [ -s "$RUNNER_TEMP/deep.md" ]; then mv "$RUNNER_TEMP/deep.md" "$RUNNER_TEMP/response.md"; fi
                 exit 0
                 ;;
