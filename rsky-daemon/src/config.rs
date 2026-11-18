@@ -62,8 +62,14 @@ pub struct Config {
     )]
     pub pds_access_token: String,
 
+    /// Acorn Auth base URL. Set, the daemon gets each space's delegation token
+    /// from Auth and exchanges it with the space host for a credential.
+    /// Requires `--auth-key`; excludes `--space-host-mint-token` and
+    /// `--static-credential`.
     #[arg(long, env = "DAEMON_AUTH_URL", default_value = "")]
     pub auth_url: String,
+    /// Shared key for Acorn Auth, sent as `X-Acorn-Auth-Key`. Required with
+    /// `--auth-url`.
     #[arg(
         long,
         env = "DAEMON_AUTH_KEY",
@@ -81,6 +87,10 @@ pub struct Config {
     )]
     pub static_credential: String,
 
+    /// Shared secret for minting credentials directly from the space host
+    /// (`/admin/mintCredential`); must match the host's `SPACEHOST_MINT_TOKEN`.
+    /// Required, with `--service-signing-key-hex`, unless `--auth-url` or
+    /// `--static-credential` is set.
     #[arg(
         long,
         env = "DAEMON_SPACE_HOST_MINT_TOKEN",
@@ -88,8 +98,14 @@ pub struct Config {
         hide_env_values = true
     )]
     pub space_host_mint_token: String,
+    /// File holding the daemon's P-256 DPoP key (raw 32 bytes), created on
+    /// first run. Every space credential is bound to it, so keep it across
+    /// restarts. Required.
     #[arg(long, env = "DAEMON_DPOP_KEY_PATH", default_value = "")]
     pub dpop_key_path: String,
+    /// Hex secp256k1 private key for `--service-identity`: signs service-auth
+    /// JWTs (legacy minting, feed and appview projection) and is published as
+    /// `#atproto` in the daemon's DID document.
     #[arg(
         long,
         env = "DAEMON_SERVICE_SIGNING_KEY_HEX",
