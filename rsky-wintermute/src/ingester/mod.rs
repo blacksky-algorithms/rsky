@@ -10,6 +10,7 @@ use crate::config::{CURSOR_SAVE_INTERVAL, DB_POOL_SIZE, FIREHOSE_PING_INTERVAL, 
 use crate::storage::Storage;
 use crate::types::{CommitData, FirehoseEvent, IndexJob, WintermuteError, WriteAction};
 use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
+use futures::FutureExt;
 use futures::SinkExt;
 use futures::stream::StreamExt;
 use std::sync::Arc;
@@ -34,6 +35,66 @@ pub enum ParseResult {
     Skip,
     OutdatedCursor,
     FutureCursor,
+}
+
+/// Most frames taken from the socket before their jobs are queued.
+const INTAKE_BATCH_MAX: usize = 256;
+
+/// How the stream stood when a run of ready frames ended.
+#[derive(Debug)]
+enum StreamEnd<E> {
+    Open,
+    Closed,
+    Error(E),
+}
+
+/// Collects the data frames of `first` and of every message the stream
+/// already has ready, up to `max`, without waiting for more.
+fn drain_ready<S, E>(
+    first: Option<Result<Message, E>>,
+    read: &mut S,
+    max: usize,
+) -> (Vec<Vec<u8>>, StreamEnd<E>)
+where
+    S: futures::Stream<Item = Result<Message, E>> + Unpin,
+{
+    let mut frames = Vec::new();
+    let mut next = Some(first);
+    loop {
+        match next {
+            Some(Some(Ok(Message::Binary(data)))) => frames.push(data),
+            Some(Some(Ok(_))) => {}
+            Some(Some(Err(e))) => return (frames, StreamEnd::Error(e)),
+            Some(None) => return (frames, StreamEnd::Closed),
+            None => return (frames, StreamEnd::Open),
+        }
+        if frames.len() >= max {
+            return (frames, StreamEnd::Open);
+        }
+        next = read.next().now_or_never();
+    }
+}
+
+fn parsed_jobs(seq: i64, parsed: Result<Vec<IndexJob>, WintermuteError>) -> Option<Vec<IndexJob>> {
+    match parsed {
+        Ok(jobs) => Some(jobs),
+        Err(e) => {
+            tracing::warn!("failed to parse event seq={seq} to jobs: {e}");
+            crate::metrics::INGESTER_ERRORS_TOTAL
+                .with_label_values(&["parse_failed"])
+                .inc();
+            None
+        }
+    }
+}
+
+fn record_enqueue(result: Result<(), WintermuteError>) {
+    if let Err(e) = result {
+        tracing::error!("failed to enqueue firehose_live job: {e}");
+        crate::metrics::INGESTER_ERRORS_TOTAL
+            .with_label_values(&["enqueue_failed"])
+            .inc();
+    }
 }
 
 pub struct IngesterManager {
@@ -346,199 +407,44 @@ impl IngesterManager {
                 )));
             }
 
-            let msg = tokio::select! {
-                msg = read.next() => {
-                    match msg {
-                        Some(Ok(m)) => m,
-                        Some(Err(e)) => {
-                            // Save cursor before returning on error
-                            let final_seq = last_seq.load(Ordering::Relaxed);
-                            if final_seq > 0 {
-                                drop(set_cursor_in_postgres(pool, &cursor_key, final_seq).await);
-                            }
-                            metrics::INGESTER_WEBSOCKET_CONNECTIONS
-                                .with_label_values(&["firehose"])
-                                .dec();
-                            ping_task.abort();
-                            cursor_saver_task.abort();
-                            return ConnectionResult::Error(e.into());
-                        }
-                        None => break,
-                    }
-                }
+            let first = tokio::select! {
+                msg = read.next() => msg,
                 () = tokio::time::sleep(Duration::from_millis(100)) => continue,
             };
+            let (frames, stream_end) = drain_ready(first, &mut read, INTAKE_BATCH_MAX);
 
-            if let Message::Binary(data) = msg {
+            if !frames.is_empty() {
                 // Reset idle timer on data messages only (not ping/pong frames
                 // which can succeed on zombie connections where no data flows)
                 last_message_time = std::time::Instant::now();
-                let event = match Self::parse_message(&data) {
-                    Ok(ParseResult::Event(e)) => e,
-                    Ok(ParseResult::Skip) => continue,
-                    Ok(ParseResult::OutdatedCursor) => {
-                        // Per AT Protocol spec: after OutdatedCursor info, relay continues
-                        // from its oldest available position. We just continue processing.
-                        tracing::warn!(
-                            "cursor too old - relay will resume from oldest available position"
-                        );
-                        continue;
-                    }
-                    Ok(ParseResult::FutureCursor) => {
-                        // Cursor is ahead of relay - delete cursor and reconnect from 0
-                        tracing::warn!("cursor in future - relay closed connection");
-                        metrics::INGESTER_WEBSOCKET_CONNECTIONS
-                            .with_label_values(&["firehose"])
-                            .dec();
-                        ping_task.abort();
-                        cursor_saver_task.abort();
-                        return ConnectionResult::FutureCursor;
-                    }
-                    Err(e) => {
-                        tracing::warn!("failed to parse message: {e}");
-                        continue;
-                    }
-                };
+            }
 
-                metrics::INGESTER_FIREHOSE_EVENTS_TOTAL
-                    .with_label_values(&["firehose_live"])
-                    .inc();
+            if Self::ingest_frames(storage, pool, &frames, &last_seq).await {
+                // Cursor is ahead of relay - delete cursor and reconnect from 0
+                metrics::INGESTER_WEBSOCKET_CONNECTIONS
+                    .with_label_values(&["firehose"])
+                    .dec();
+                ping_task.abort();
+                cursor_saver_task.abort();
+                return ConnectionResult::FutureCursor;
+            }
 
-                if let Ok(t) = chrono::DateTime::parse_from_rfc3339(&event.time) {
-                    metrics::INGESTER_LAST_EVENT_TIME_SECONDS.set(t.timestamp());
+            match stream_end {
+                StreamEnd::Open => {}
+                StreamEnd::Closed => break,
+                StreamEnd::Error(e) => {
+                    // Save cursor before returning on error
+                    let final_seq = last_seq.load(Ordering::Relaxed);
+                    if final_seq > 0 {
+                        drop(set_cursor_in_postgres(pool, &cursor_key, final_seq).await);
+                    }
+                    metrics::INGESTER_WEBSOCKET_CONNECTIONS
+                        .with_label_values(&["firehose"])
+                        .dec();
+                    ping_task.abort();
+                    cursor_saver_task.abort();
+                    return ConnectionResult::Error(e.into());
                 }
-
-                // Handle identity events separately (handle changes, key rotations)
-                if event.kind == "identity" {
-                    let pool_clone = Arc::clone(pool);
-                    let event_did = event.did.clone();
-                    let event_time = event.time.clone();
-                    let event_handle = event.identity.as_ref().and_then(|i| i.handle.clone());
-                    tokio::spawn(async move {
-                        if let Err(e) = Self::process_identity_event(
-                            &pool_clone,
-                            &event_did,
-                            &event_time,
-                            event_handle.as_deref(),
-                        )
-                        .await
-                        {
-                            tracing::error!(
-                                "identity event processing failed for {}: {e}",
-                                event_did
-                            );
-                            metrics::INGESTER_ERRORS_TOTAL
-                                .with_label_values(&["identity_failed"])
-                                .inc();
-                        }
-                    });
-                    last_seq.store(event.seq, Ordering::Relaxed);
-                    continue;
-                }
-
-                // Handle account events (takedown, suspension, deletion, reactivation)
-                if event.kind == "account" {
-                    if let Some(ref account) = event.account {
-                        let pool_clone = Arc::clone(pool);
-                        let event_did = event.did.clone();
-                        let event_time = event.time.clone();
-                        let active = account.active;
-                        let status = account.status.clone();
-                        tokio::spawn(async move {
-                            if !active && Self::pds_says_active(&event_did).await == Some(true) {
-                                tracing::info!(
-                                    "skipped account event for {} (active=false, status={:?}): \
-                                     authoritative PDS reports active=true",
-                                    event_did,
-                                    status.as_deref()
-                                );
-                                metrics::INGESTER_ERRORS_TOTAL
-                                    .with_label_values(&["account_skipped_stale_source"])
-                                    .inc();
-                                return;
-                            }
-                            if let Err(e) = Self::process_account_event(
-                                &pool_clone,
-                                &event_did,
-                                &event_time,
-                                active,
-                                status.as_deref(),
-                            )
-                            .await
-                            {
-                                tracing::error!(
-                                    "account event processing failed for {}: {e}",
-                                    event_did
-                                );
-                                metrics::INGESTER_ERRORS_TOTAL
-                                    .with_label_values(&["account_failed"])
-                                    .inc();
-                            }
-                        });
-                    }
-                    last_seq.store(event.seq, Ordering::Relaxed);
-                    continue;
-                }
-
-                // Handle sync events (repo recovery - refresh handle like identity events)
-                if event.kind == "sync" {
-                    let pool_clone = Arc::clone(pool);
-                    let event_did = event.did.clone();
-                    let event_time = event.time.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) =
-                            Self::process_identity_event(&pool_clone, &event_did, &event_time, None)
-                                .await
-                        {
-                            tracing::error!("sync event processing failed for {}: {e}", event_did);
-                            metrics::INGESTER_ERRORS_TOTAL
-                                .with_label_values(&["sync_failed"])
-                                .inc();
-                        }
-                    });
-                    last_seq.store(event.seq, Ordering::Relaxed);
-                    continue;
-                }
-
-                // Queue to Fjall so live intake never blocks on indexing speed; the
-                // firehose_live processor loop consumes and indexes from the queue.
-                match Self::parse_event_to_jobs(&event).await {
-                    Ok(jobs) => {
-                        let generation =
-                            match crate::reconcile::current_generation(pool, &event.did).await {
-                                Ok(generation) => generation,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "generation lookup failed for {}: {e}",
-                                        event.did
-                                    );
-                                    None
-                                }
-                            };
-                        for mut job in jobs {
-                            job.provenance = Some(crate::reconcile::Provenance {
-                                generation,
-                                source: crate::reconcile::Source::Firehose { seq: event.seq },
-                            });
-                            if let Err(e) = storage.enqueue_firehose_live(&job) {
-                                tracing::error!("failed to enqueue firehose_live job: {e}");
-                                metrics::INGESTER_ERRORS_TOTAL
-                                    .with_label_values(&["enqueue_failed"])
-                                    .inc();
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("failed to parse event seq={} to jobs: {e}", event.seq);
-                        metrics::INGESTER_ERRORS_TOTAL
-                            .with_label_values(&["parse_failed"])
-                            .inc();
-                    }
-                }
-
-                // Atomically update last_seq (cheap, lock-free operation)
-                // The cursor_saver_task will persist this to postgres on interval
-                last_seq.store(event.seq, Ordering::Relaxed);
             }
         }
 
@@ -556,6 +462,191 @@ impl IngesterManager {
         ping_task.abort();
         cursor_saver_task.abort();
         ConnectionResult::Closed
+    }
+
+    /// Parses and routes a run of frames in arrival order. Commits are queued
+    /// together after one generation read, and the cursor advances only once
+    /// the whole run is queued. Returns whether the relay reported a cursor
+    /// from the future.
+    async fn ingest_frames(
+        storage: &Storage,
+        pool: &Arc<Pool>,
+        frames: &[Vec<u8>],
+        last_seq: &AtomicI64,
+    ) -> bool {
+        use crate::metrics;
+
+        let mut commits = Vec::new();
+        let mut newest_seq = None;
+        let mut future_cursor = false;
+
+        for data in frames {
+            let event = match Self::parse_message(data) {
+                Ok(ParseResult::Event(e)) => e,
+                Ok(ParseResult::Skip) => continue,
+                Ok(ParseResult::OutdatedCursor) => {
+                    // Per AT Protocol spec: after OutdatedCursor info, relay continues
+                    // from its oldest available position. We just continue processing.
+                    tracing::warn!(
+                        "cursor too old - relay will resume from oldest available position"
+                    );
+                    continue;
+                }
+                Ok(ParseResult::FutureCursor) => {
+                    tracing::warn!("cursor in future - relay closed connection");
+                    future_cursor = true;
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!("failed to parse message: {e}");
+                    continue;
+                }
+            };
+
+            metrics::INGESTER_FIREHOSE_EVENTS_TOTAL
+                .with_label_values(&["firehose_live"])
+                .inc();
+
+            if let Ok(t) = chrono::DateTime::parse_from_rfc3339(&event.time) {
+                metrics::INGESTER_LAST_EVENT_TIME_SECONDS.set(t.timestamp());
+            }
+
+            newest_seq = Some(event.seq);
+
+            // Handle identity events separately (handle changes, key rotations)
+            if event.kind == "identity" {
+                let pool_clone = Arc::clone(pool);
+                let event_did = event.did.clone();
+                let event_time = event.time.clone();
+                let event_handle = event.identity.as_ref().and_then(|i| i.handle.clone());
+                tokio::spawn(async move {
+                    if let Err(e) = Self::process_identity_event(
+                        &pool_clone,
+                        &event_did,
+                        &event_time,
+                        event_handle.as_deref(),
+                    )
+                    .await
+                    {
+                        tracing::error!("identity event processing failed for {}: {e}", event_did);
+                        metrics::INGESTER_ERRORS_TOTAL
+                            .with_label_values(&["identity_failed"])
+                            .inc();
+                    }
+                });
+                continue;
+            }
+
+            // Handle account events (takedown, suspension, deletion, reactivation)
+            if event.kind == "account" {
+                if let Some(ref account) = event.account {
+                    let pool_clone = Arc::clone(pool);
+                    let event_did = event.did.clone();
+                    let event_time = event.time.clone();
+                    let active = account.active;
+                    let status = account.status.clone();
+                    tokio::spawn(async move {
+                        if !active && Self::pds_says_active(&event_did).await == Some(true) {
+                            tracing::info!(
+                                "skipped account event for {} (active=false, status={:?}): \
+                                 authoritative PDS reports active=true",
+                                event_did,
+                                status.as_deref()
+                            );
+                            metrics::INGESTER_ERRORS_TOTAL
+                                .with_label_values(&["account_skipped_stale_source"])
+                                .inc();
+                            return;
+                        }
+                        if let Err(e) = Self::process_account_event(
+                            &pool_clone,
+                            &event_did,
+                            &event_time,
+                            active,
+                            status.as_deref(),
+                        )
+                        .await
+                        {
+                            tracing::error!(
+                                "account event processing failed for {}: {e}",
+                                event_did
+                            );
+                            metrics::INGESTER_ERRORS_TOTAL
+                                .with_label_values(&["account_failed"])
+                                .inc();
+                        }
+                    });
+                }
+                continue;
+            }
+
+            // Handle sync events (repo recovery - refresh handle like identity events)
+            if event.kind == "sync" {
+                let pool_clone = Arc::clone(pool);
+                let event_did = event.did.clone();
+                let event_time = event.time.clone();
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        Self::process_identity_event(&pool_clone, &event_did, &event_time, None)
+                            .await
+                    {
+                        tracing::error!("sync event processing failed for {}: {e}", event_did);
+                        metrics::INGESTER_ERRORS_TOTAL
+                            .with_label_values(&["sync_failed"])
+                            .inc();
+                    }
+                });
+                continue;
+            }
+
+            let parsed = Self::parse_event_to_jobs(&event).await;
+            if let Some(jobs) = parsed_jobs(event.seq, parsed) {
+                commits.push((event.did, event.seq, jobs));
+            }
+        }
+
+        Self::enqueue_commits(storage, pool, commits).await;
+
+        // The cursor_saver_task persists this to postgres on interval; it must
+        // never name a frame whose jobs are not queued yet.
+        if let Some(seq) = newest_seq {
+            last_seq.store(seq, Ordering::Relaxed);
+        }
+
+        future_cursor
+    }
+
+    /// Queues the jobs of `commits` to Fjall so live intake never blocks on
+    /// indexing speed; the `firehose_live` processor loop consumes and indexes
+    /// from the queue.
+    async fn enqueue_commits(
+        storage: &Storage,
+        pool: &Pool,
+        commits: Vec<(String, i64, Vec<IndexJob>)>,
+    ) {
+        if commits.is_empty() {
+            return;
+        }
+        let mut dids: Vec<&str> = commits.iter().map(|(did, _, _)| did.as_str()).collect();
+        dids.sort_unstable();
+        dids.dedup();
+        let generations = match crate::reconcile::current_generations(pool, &dids).await {
+            Ok(generations) => generations,
+            Err(e) => {
+                tracing::warn!("generation lookup failed for {} actors: {e}", dids.len());
+                std::collections::HashMap::new()
+            }
+        };
+        for (did, seq, jobs) in commits {
+            let generation = generations.get(&did).copied();
+            for mut job in jobs {
+                job.provenance = Some(crate::reconcile::Provenance {
+                    generation,
+                    source: crate::reconcile::Source::Firehose { seq },
+                });
+                record_enqueue(storage.enqueue_firehose_live(&job));
+            }
+        }
     }
 
     pub fn parse_message(data: &[u8]) -> Result<ParseResult, WintermuteError> {
@@ -1315,5 +1406,110 @@ mod cursor_tests {
         let mut u = sample_url();
         append_cursor_param(&mut u, Some(12345));
         assert_eq!(u.query(), Some("cursor=12345"));
+    }
+}
+
+#[cfg(test)]
+mod intake_tests {
+    use super::{StreamEnd, drain_ready, parsed_jobs, record_enqueue};
+    use crate::types::WintermuteError;
+    use futures::stream::{self, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    type Read = Result<Message, &'static str>;
+
+    fn binary(byte: u8) -> Message {
+        Message::Binary(vec![byte])
+    }
+
+    fn errors(label: &str) -> u64 {
+        crate::metrics::INGESTER_ERRORS_TOTAL
+            .with_label_values(&[label])
+            .get()
+    }
+
+    #[test]
+    fn a_closed_stream_yields_no_frames() {
+        let mut rest = stream::pending::<Read>();
+        let (frames, end) = drain_ready(None, &mut rest, 8);
+        assert!(frames.is_empty());
+        assert!(matches!(end, StreamEnd::Closed));
+    }
+
+    #[test]
+    fn a_failed_read_is_reported() {
+        let mut rest = stream::pending::<Read>();
+        let (frames, end) = drain_ready(Some(Err("reset")), &mut rest, 8);
+        assert!(frames.is_empty());
+        assert!(matches!(end, StreamEnd::Error("reset")));
+    }
+
+    #[test]
+    fn ready_frames_are_taken_without_waiting() {
+        let ready: Vec<Read> = vec![Ok(binary(2)), Ok(Message::Ping(vec![])), Ok(binary(3))];
+        let mut rest = stream::iter(ready).chain(stream::pending());
+        let (frames, end) = drain_ready(Some(Ok(binary(1))), &mut rest, 8);
+        assert_eq!(frames, vec![vec![1], vec![2], vec![3]]);
+        assert!(matches!(end, StreamEnd::Open));
+    }
+
+    #[test]
+    fn a_lone_control_message_yields_no_frames() {
+        let mut rest = stream::pending::<Read>();
+        let (frames, end) = drain_ready(Some(Ok(Message::Pong(vec![]))), &mut rest, 8);
+        assert!(frames.is_empty());
+        assert!(matches!(end, StreamEnd::Open));
+    }
+
+    #[tokio::test]
+    async fn the_limit_leaves_later_frames_on_the_stream() {
+        let ready: Vec<Read> = vec![Ok(binary(2)), Ok(binary(3)), Ok(binary(4)), Ok(binary(5))];
+        let mut rest = stream::iter(ready);
+        let (frames, end) = drain_ready(Some(Ok(binary(1))), &mut rest, 3);
+        assert_eq!(frames, vec![vec![1], vec![2], vec![3]]);
+        assert!(matches!(end, StreamEnd::Open));
+        assert_eq!(rest.next().await, Some(Ok(binary(4))));
+        assert_eq!(rest.next().await, Some(Ok(binary(5))));
+        assert_eq!(rest.next().await, None);
+    }
+
+    #[test]
+    fn frames_before_the_end_of_the_stream_are_kept() {
+        let ready: Vec<Read> = vec![Ok(binary(2))];
+        let mut rest = stream::iter(ready);
+        let (frames, end) = drain_ready(Some(Ok(binary(1))), &mut rest, 8);
+        assert_eq!(frames, vec![vec![1], vec![2]]);
+        assert!(matches!(end, StreamEnd::Closed));
+    }
+
+    #[test]
+    fn frames_before_a_failed_read_are_kept() {
+        let ready: Vec<Read> = vec![Ok(binary(2)), Err("reset"), Ok(binary(3))];
+        let mut rest = stream::iter(ready);
+        let (frames, end) = drain_ready(Some(Ok(binary(1))), &mut rest, 8);
+        assert_eq!(frames, vec![vec![1], vec![2]]);
+        assert!(matches!(end, StreamEnd::Error("reset")));
+    }
+
+    #[test]
+    fn parsed_jobs_counts_only_failures() {
+        let before = errors("parse_failed");
+        assert_eq!(
+            parsed_jobs(7, Ok(Vec::new())).map(|jobs| jobs.len()),
+            Some(0)
+        );
+        assert_eq!(errors("parse_failed"), before);
+        let failed = Err(WintermuteError::Other("bad car".to_owned()));
+        assert!(parsed_jobs(7, failed).is_none());
+        assert_eq!(errors("parse_failed"), before + 1);
+    }
+
+    #[test]
+    fn record_enqueue_counts_only_failures() {
+        let before = errors("enqueue_failed");
+        record_enqueue(Ok(()));
+        assert_eq!(errors("enqueue_failed"), before);
+        record_enqueue(Err(WintermuteError::Other("queue closed".to_owned())));
+        assert_eq!(errors("enqueue_failed"), before + 1);
     }
 }

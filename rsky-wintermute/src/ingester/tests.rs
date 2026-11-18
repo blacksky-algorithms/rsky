@@ -1391,4 +1391,496 @@ mod ingester_tests {
             assert_eq!(parse_active_flag(""), None);
         }
     }
+
+    mod batched_intake {
+        use super::{create_commit_message, setup_test_storage};
+        use crate::ingester::{ConnectionResult, IngesterManager, get_cursor_from_postgres};
+        use crate::reconcile::{Provenance, Source};
+        use crate::storage::Storage;
+        use crate::types::IndexJob;
+        use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
+        use futures::{SinkExt, StreamExt};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicI64, Ordering};
+        use std::time::Duration;
+        use tokio_postgres::NoTls;
+        use tokio_tungstenite::tungstenite::Message;
+
+        const TIME: &str = "2024-01-01T00:00:00Z";
+        const POST_CID: &str = "bafyreihzwnyumvubacqyflkxpsejegc6sxwkcaxv3iwm3lrn3x45gxkioa";
+
+        fn pool_for(url: String) -> Arc<Pool> {
+            let mut pg_config = Config::new();
+            pg_config.url = Some(url);
+            pg_config.manager = Some(ManagerConfig {
+                recycling_method: RecyclingMethod::Fast,
+            });
+            Arc::new(pg_config.create_pool(Some(Runtime::Tokio1), NoTls).unwrap())
+        }
+
+        async fn test_pool() -> Arc<Pool> {
+            let pool = pool_for(std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+                "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
+            }));
+            pool.get()
+                .await
+                .unwrap()
+                .batch_execute(crate::reconcile::SCHEMA_DDL)
+                .await
+                .unwrap();
+            pool
+        }
+
+        fn unreachable_pool() -> Arc<Pool> {
+            pool_for("postgresql://postgres:postgres@127.0.0.1:1/none".to_owned())
+        }
+
+        fn unique(prefix: &str) -> String {
+            format!("{prefix}{:016x}", rand::random::<u64>())
+        }
+
+        async fn set_generation(pool: &Pool, did: &str, generation: i64) {
+            pool.get()
+                .await
+                .unwrap()
+                .execute(
+                    "INSERT INTO wintermute.did_generation (did, generation) VALUES ($1, $2) \
+                     ON CONFLICT (did) DO UPDATE SET generation = EXCLUDED.generation",
+                    &[&did, &generation],
+                )
+                .await
+                .unwrap();
+        }
+
+        fn commit(seq: i64, did: &str, ops: Vec<(&str, &str, Option<&str>)>) -> Vec<u8> {
+            create_commit_message(seq, did, TIME, &format!("rev-{seq}"), vec![], ops)
+        }
+
+        fn framed<B: serde::Serialize>(kind: &str, body: &B) -> Vec<u8> {
+            #[derive(serde::Serialize)]
+            struct Header {
+                t: String,
+                op: u8,
+            }
+            let mut bytes = Vec::new();
+            let header = Header {
+                t: kind.to_owned(),
+                op: 1,
+            };
+            ciborium::ser::into_writer(&header, &mut bytes).unwrap();
+            serde_ipld_dagcbor::to_writer(&mut bytes, body).unwrap();
+            bytes
+        }
+
+        fn info(kind: &str, name: &str) -> Vec<u8> {
+            #[derive(serde::Serialize)]
+            struct Body {
+                name: String,
+                message: Option<String>,
+            }
+            framed(
+                kind,
+                &Body {
+                    name: name.to_owned(),
+                    message: None,
+                },
+            )
+        }
+
+        fn identity(seq: i64, did: &str, handle: &str) -> Vec<u8> {
+            framed(
+                "#identity",
+                &rsky_lexicon::com::atproto::sync::SubscribeReposIdentity {
+                    did: did.to_owned(),
+                    handle: Some(handle.to_owned()),
+                    seq,
+                    time: TIME.parse().unwrap(),
+                },
+            )
+        }
+
+        fn account(seq: i64, did: &str) -> Vec<u8> {
+            framed(
+                "#account",
+                &rsky_lexicon::com::atproto::sync::SubscribeReposAccount {
+                    seq,
+                    did: did.to_owned(),
+                    time: TIME.parse().unwrap(),
+                    active: true,
+                    status: None,
+                },
+            )
+        }
+
+        fn sync(seq: i64, did: &str) -> Vec<u8> {
+            framed(
+                "#sync",
+                &rsky_lexicon::com::atproto::sync::SubscribeReposSync {
+                    seq,
+                    did: did.to_owned(),
+                    blocks: vec![],
+                    rev: format!("rev-{seq}"),
+                    time: TIME.parse().unwrap(),
+                },
+            )
+        }
+
+        fn queued(storage: &Storage) -> Vec<IndexJob> {
+            storage
+                .dequeue_firehose_live_batch(10_000)
+                .unwrap()
+                .into_iter()
+                .map(|(_, job)| job)
+                .collect()
+        }
+
+        fn stamp(generation: Option<i64>, seq: i64) -> Provenance {
+            Provenance {
+                generation,
+                source: Source::Firehose { seq },
+            }
+        }
+
+        fn errors(label: &str) -> u64 {
+            crate::metrics::INGESTER_ERRORS_TOTAL
+                .with_label_values(&[label])
+                .get()
+        }
+
+        async fn eventually<F, Fut>(mut check: F)
+        where
+            F: FnMut() -> Fut,
+            Fut: std::future::Future<Output = bool>,
+        {
+            for _ in 0..500 {
+                if check().await {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("condition not reached within 5s");
+        }
+
+        #[tokio::test]
+        async fn commits_are_queued_in_order_with_their_generation() {
+            let pool = test_pool().await;
+            let (storage, _dir) = setup_test_storage();
+            let reconciled = unique("did:plc:reconciled");
+            let fresh = unique("did:plc:fresh");
+            set_generation(&pool, &reconciled, 7).await;
+            let frames = vec![
+                commit(
+                    101,
+                    &reconciled,
+                    vec![("create", "app.bsky.feed.post/a", Some(POST_CID))],
+                ),
+                commit(102, &fresh, vec![]),
+                commit(
+                    103,
+                    &reconciled,
+                    vec![("delete", "app.bsky.feed.post/a", None)],
+                ),
+            ];
+            let last_seq = AtomicI64::new(0);
+
+            let future_cursor =
+                IngesterManager::ingest_frames(&storage, &pool, &frames, &last_seq).await;
+
+            assert!(!future_cursor);
+            assert_eq!(last_seq.load(Ordering::Relaxed), 103);
+            let jobs = queued(&storage);
+            let summary: Vec<_> = jobs
+                .iter()
+                .map(|job| {
+                    (
+                        job.uri.clone(),
+                        format!("{:?}", job.action),
+                        job.provenance.clone(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                summary,
+                vec![
+                    (
+                        format!("at://{reconciled}/app.bsky.feed.post/a"),
+                        "Create".to_owned(),
+                        Some(stamp(Some(7), 101))
+                    ),
+                    (
+                        format!("at://{reconciled}"),
+                        "Commit".to_owned(),
+                        Some(stamp(Some(7), 101))
+                    ),
+                    (
+                        format!("at://{fresh}"),
+                        "Commit".to_owned(),
+                        Some(stamp(None, 102))
+                    ),
+                    (
+                        format!("at://{reconciled}/app.bsky.feed.post/a"),
+                        "Delete".to_owned(),
+                        Some(stamp(Some(7), 103))
+                    ),
+                    (
+                        format!("at://{reconciled}"),
+                        "Commit".to_owned(),
+                        Some(stamp(Some(7), 103))
+                    ),
+                ]
+            );
+        }
+
+        #[tokio::test]
+        async fn a_future_cursor_ends_the_run_after_queueing_what_came_before() {
+            let pool = test_pool().await;
+            let (storage, _dir) = setup_test_storage();
+            let did = unique("did:plc:future");
+            let frames = vec![
+                commit(201, &did, vec![]),
+                info("#error", "FutureCursor"),
+                commit(202, &did, vec![]),
+            ];
+            let last_seq = AtomicI64::new(0);
+
+            let future_cursor =
+                IngesterManager::ingest_frames(&storage, &pool, &frames, &last_seq).await;
+
+            assert!(future_cursor);
+            assert_eq!(last_seq.load(Ordering::Relaxed), 201);
+            let jobs = queued(&storage);
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(jobs[0].provenance, Some(stamp(None, 201)));
+        }
+
+        #[tokio::test]
+        async fn frames_without_events_queue_nothing_and_keep_the_cursor() {
+            let pool = test_pool().await;
+            let (storage, _dir) = setup_test_storage();
+            let frames = vec![
+                vec![0xff, 0x00, 0x01],
+                info("#info", "OutdatedCursor"),
+                info("#info", "SomethingElse"),
+            ];
+            let last_seq = AtomicI64::new(55);
+
+            let future_cursor =
+                IngesterManager::ingest_frames(&storage, &pool, &frames, &last_seq).await;
+
+            assert!(!future_cursor);
+            assert_eq!(last_seq.load(Ordering::Relaxed), 55);
+            assert_eq!(storage.firehose_live_len().unwrap(), 0);
+        }
+
+        #[tokio::test]
+        async fn identity_and_account_events_are_applied_and_advance_the_cursor() {
+            let pool = test_pool().await;
+            let (storage, _dir) = setup_test_storage();
+            let did = unique("did:plc:ident");
+            let handle = format!("{}.test", did.rsplit(':').next().unwrap());
+            pool.get()
+                .await
+                .unwrap()
+                .execute(
+                    "INSERT INTO actor (did, handle, \"indexedAt\") VALUES ($1, $2, NOW())",
+                    &[&did, &format!("seed-{handle}")],
+                )
+                .await
+                .unwrap();
+            let frames = vec![identity(301, &did, &handle), account(302, &did)];
+            let last_seq = AtomicI64::new(0);
+
+            let future_cursor =
+                IngesterManager::ingest_frames(&storage, &pool, &frames, &last_seq).await;
+
+            assert!(!future_cursor);
+            assert_eq!(last_seq.load(Ordering::Relaxed), 302);
+            assert_eq!(storage.firehose_live_len().unwrap(), 0);
+            eventually(|| async {
+                let row = pool
+                    .get()
+                    .await
+                    .unwrap()
+                    .query_opt(
+                        "SELECT handle, \"accountEventAt\" IS NOT NULL FROM actor WHERE did = $1",
+                        &[&did],
+                    )
+                    .await
+                    .unwrap();
+                row.is_some_and(|row| {
+                    row.get::<_, Option<String>>(0).as_deref() == Some(handle.as_str())
+                        && row.get::<_, bool>(1)
+                })
+            })
+            .await;
+            pool.get()
+                .await
+                .unwrap()
+                .execute("DELETE FROM actor WHERE did = $1", &[&did])
+                .await
+                .unwrap();
+        }
+
+        #[tokio::test]
+        async fn a_sync_event_advances_the_cursor_without_queueing() {
+            let pool = test_pool().await;
+            let (storage, _dir) = setup_test_storage();
+            let frames = vec![sync(401, "did:web:127.0.0.1%3A1")];
+            let last_seq = AtomicI64::new(0);
+
+            let future_cursor =
+                IngesterManager::ingest_frames(&storage, &pool, &frames, &last_seq).await;
+
+            tokio::task::yield_now().await;
+            assert!(!future_cursor);
+            assert_eq!(last_seq.load(Ordering::Relaxed), 401);
+            assert_eq!(storage.firehose_live_len().unwrap(), 0);
+        }
+
+        #[tokio::test]
+        async fn a_failed_generation_read_still_queues_every_job() {
+            let pool = unreachable_pool();
+            let (storage, _dir) = setup_test_storage();
+            let did = unique("did:plc:nodb");
+            let identity_failures = errors("identity_failed");
+            let account_failures = errors("account_failed");
+            let frames = vec![
+                commit(501, &did, vec![]),
+                identity(502, &did, "nodb.test"),
+                account(503, &did),
+                commit(504, &did, vec![]),
+            ];
+            let last_seq = AtomicI64::new(0);
+
+            let future_cursor =
+                IngesterManager::ingest_frames(&storage, &pool, &frames, &last_seq).await;
+
+            assert!(!future_cursor);
+            assert_eq!(last_seq.load(Ordering::Relaxed), 504);
+            let stamps: Vec<_> = queued(&storage)
+                .into_iter()
+                .map(|job| job.provenance)
+                .collect();
+            assert_eq!(stamps, vec![Some(stamp(None, 501)), Some(stamp(None, 504))]);
+            eventually(|| async {
+                errors("identity_failed") == identity_failures + 1
+                    && errors("account_failed") == account_failures + 1
+            })
+            .await;
+        }
+
+        async fn serve<F, Fut>(script: F) -> (String, tokio::task::JoinHandle<()>)
+        where
+            F: FnOnce(tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>) -> Fut
+                + Send
+                + 'static,
+            Fut: std::future::Future<Output = ()> + Send,
+        {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let hostname = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
+            let server = tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                script(tokio_tungstenite::accept_async(tcp).await.unwrap()).await;
+            });
+            (hostname, server)
+        }
+
+        async fn forget_cursor(pool: &Pool, hostname: &str) {
+            pool.get()
+                .await
+                .unwrap()
+                .execute(
+                    "DELETE FROM sub_state WHERE service = $1",
+                    &[&format!("firehose:{hostname}")],
+                )
+                .await
+                .unwrap();
+        }
+
+        async fn saved_cursor(pool: &Pool, hostname: &str) -> Option<i64> {
+            get_cursor_from_postgres(pool, &format!("firehose:{hostname}"))
+                .await
+                .unwrap()
+        }
+
+        #[tokio::test]
+        #[serial_test::serial(shutdown_flag)]
+        async fn a_closed_stream_queues_every_frame_and_saves_the_last_seq() {
+            let pool = test_pool().await;
+            let (storage, _dir) = setup_test_storage();
+            let did = unique("did:plc:stream");
+            let frames: Vec<_> = (1..=600).map(|seq| commit(seq, &did, vec![])).collect();
+            let (hostname, server) = serve(|mut ws| async move {
+                for frame in frames {
+                    ws.send(Message::Binary(frame)).await.unwrap();
+                }
+                ws.close(None).await.unwrap();
+                while ws.next().await.is_some() {}
+            })
+            .await;
+            forget_cursor(&pool, &hostname).await;
+
+            let result = IngesterManager::connect_and_stream(&storage, &hostname, &pool).await;
+
+            server.await.unwrap();
+            assert!(matches!(result, ConnectionResult::Closed));
+            let seqs: Vec<_> = queued(&storage)
+                .into_iter()
+                .map(|job| job.provenance)
+                .collect();
+            let expected: Vec<_> = (1..=600).map(|seq| Some(stamp(None, seq))).collect();
+            assert_eq!(seqs, expected);
+            assert_eq!(saved_cursor(&pool, &hostname).await, Some(600));
+            forget_cursor(&pool, &hostname).await;
+        }
+
+        #[tokio::test]
+        #[serial_test::serial(shutdown_flag)]
+        async fn a_dropped_stream_saves_the_last_seq_and_reports_the_error() {
+            let pool = test_pool().await;
+            let (storage, _dir) = setup_test_storage();
+            let did = unique("did:plc:dropped");
+            let frames: Vec<_> = (1..=40).map(|seq| commit(seq, &did, vec![])).collect();
+            let (hostname, server) = serve(|mut ws| async move {
+                for frame in frames {
+                    ws.send(Message::Binary(frame)).await.unwrap();
+                }
+            })
+            .await;
+            forget_cursor(&pool, &hostname).await;
+
+            let result = IngesterManager::connect_and_stream(&storage, &hostname, &pool).await;
+
+            server.await.unwrap();
+            assert!(matches!(result, ConnectionResult::Error(_)));
+            assert_eq!(queued(&storage).len(), 40);
+            assert_eq!(saved_cursor(&pool, &hostname).await, Some(40));
+            forget_cursor(&pool, &hostname).await;
+        }
+
+        #[tokio::test]
+        #[serial_test::serial(shutdown_flag)]
+        async fn a_future_cursor_on_the_stream_ends_the_connection() {
+            let pool = test_pool().await;
+            let (storage, _dir) = setup_test_storage();
+            let did = unique("did:plc:ahead");
+            let (hostname, server) = serve(|mut ws| async move {
+                ws.send(Message::Binary(commit(1, &did, vec![])))
+                    .await
+                    .unwrap();
+                ws.send(Message::Binary(info("#error", "FutureCursor")))
+                    .await
+                    .unwrap();
+                while ws.next().await.is_some() {}
+            })
+            .await;
+            forget_cursor(&pool, &hostname).await;
+
+            let result = IngesterManager::connect_and_stream(&storage, &hostname, &pool).await;
+
+            assert!(matches!(result, ConnectionResult::FutureCursor));
+            assert_eq!(queued(&storage).len(), 1);
+            server.abort();
+        }
+    }
 }

@@ -325,5 +325,23 @@ pub async fn current_generation(pool: &Pool, did: &str) -> Result<Option<i64>, W
     generation_of(&client, did).await
 }
 
+/// The generations to stamp on work obtained now for `dids`, in one read;
+/// actors that were never reconciled are absent. Read from the table every
+/// time, for the reason [`current_generation`] gives.
+pub async fn current_generations(
+    pool: &Pool,
+    dids: &[&str],
+) -> Result<HashMap<String, i64>, WintermuteError> {
+    let client = pool.get().await?;
+    let statement = client
+        .prepare_cached("SELECT did, generation FROM wintermute.did_generation WHERE did = ANY($1)")
+        .await?;
+    let rows = client.query(&statement, &[&dids]).await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests;
