@@ -3793,7 +3793,7 @@ impl IndexerManager {
         if let Some(via_uri_str) = via_uri_str {
             if let Ok(via_uri) = AtUri::new(via_uri_str.to_owned(), None) {
                 let reposter = via_uri.get_hostname();
-                if reposter != did {
+                if reposter != did && reposter != subject_author {
                     notif_rows.push(bulk::NotificationRow {
                         did: reposter.to_owned(),
                         author: did.to_owned(),
@@ -4694,7 +4694,7 @@ impl IndexerManager {
                 if let Some(via_uri_str) = via {
                     if let Ok(via_uri) = AtUri::new(via_uri_str.to_owned(), None) {
                         let reposter = via_uri.get_hostname();
-                        if reposter != did {
+                        if reposter != did && reposter != subject_author {
                             drop(
                                 client
                                     .execute(
@@ -4950,7 +4950,7 @@ impl IndexerManager {
                 if let Some(via_uri_str) = via {
                     if let Ok(via_uri) = AtUri::new(via_uri_str.to_owned(), None) {
                         let original_reposter = via_uri.get_hostname();
-                        if original_reposter != did {
+                        if original_reposter != did && original_reposter != subject_author {
                             drop(
                                 client
                                     .execute(

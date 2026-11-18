@@ -2507,6 +2507,26 @@ mod indexer_tests {
         );
         assert!(rows.is_empty());
 
+        // Liking through the author's own repost notifies the author once
+        let mut rows = Vec::new();
+        IndexerManager::collect_subject_notifications(
+            &mut rows,
+            &serde_json::json!({
+                "subject": {"uri": "at://did:plc:subject-author/app.bsky.feed.post/abc"},
+                "via": {"uri": "at://did:plc:subject-author/app.bsky.feed.repost/xyz"},
+            }),
+            "did:plc:liker",
+            "at://did:plc:liker/app.bsky.feed.like/4",
+            "cid4",
+            "at://did:plc:subject-author/app.bsky.feed.post/abc",
+            "2026-07-30T00:00:00.000Z",
+            "like",
+            "like-via-repost",
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].did, "did:plc:subject-author");
+        assert_eq!(rows[0].reason, "like");
+
         // Empty subject generates nothing
         let mut rows = Vec::new();
         IndexerManager::collect_subject_notifications(
@@ -3384,9 +3404,51 @@ mod indexer_tests {
                 assert!(got_via.is_none() && got_via_cid.is_none(), "{uri}");
             }
         }
+
+        let single_actor = "did:plc:wintermute-test-via-single";
+        cleanup_test_data(&pool, single_actor).await;
+        for (coll, record) in [
+            (
+                "app.bsky.feed.like",
+                serde_json::json!({"$type": "app.bsky.feed.like", "subject": subject, "via": via, "createdAt": ts}),
+            ),
+            (
+                "app.bsky.feed.repost",
+                serde_json::json!({"$type": "app.bsky.feed.repost", "subject": subject, "via": via, "createdAt": ts}),
+            ),
+        ] {
+            let single_job = IndexJob {
+                uri: format!("at://{single_actor}/{coll}/selfvia"),
+                ..job(coll, "selfvia", record)
+            };
+            IndexerManager::process_job(&pool, &single_job, false)
+                .await
+                .unwrap();
+        }
+
+        let notif_rows = client
+            .query(
+                "SELECT author, reason FROM notification WHERE did = $1 ORDER BY author, reason",
+                &[&author],
+            )
+            .await
+            .unwrap();
+        let notifs: Vec<(String, String)> =
+            notif_rows.iter().map(|r| (r.get(0), r.get(1))).collect();
+        assert_eq!(
+            notifs,
+            vec![
+                (actor.to_owned(), "follow".to_owned()),
+                (actor.to_owned(), "like".to_owned()),
+                (actor.to_owned(), "like".to_owned()),
+                (actor.to_owned(), "repost".to_owned()),
+                (single_actor.to_owned(), "like".to_owned()),
+                (single_actor.to_owned(), "repost".to_owned()),
+            ]
+        );
         drop(client);
 
-        for did in [author, actor] {
+        for did in [author, actor, single_actor] {
             cleanup_test_data(&pool, did).await;
         }
     }
