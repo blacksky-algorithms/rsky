@@ -70,17 +70,20 @@ Where this repo differs from a typical Rust service:
   exact expected counts.
 - Comments and documentation must describe the current state of the code.
 
-For each finding, state the scenario in one or two sentences, cite
-file:line (and the reference file:line where it applies), and mark
-severity (blocking / non-blocking). If you are uncertain but the potential
-impact is high (data loss, auth bypass, protocol incompatibility), include
-it and say what you are uncertain about.
+Keep the review short; maintainers should be able to read it in a minute.
+List at most five findings, most severe first. For each, give severity
+(blocking / non-blocking), one sentence on the scenario and wrong result,
+and file:line (plus the reference file:line where it applies). Include an
+uncertain finding only if the impact is high (data loss, auth bypass,
+protocol incompatibility), and say in a few words what is uncertain.
 
-If a claim in the pull request description is false, say so. If there is
-something you could not verify, end with a short "Not verified:" list.
+A false claim in the pull request description is its own one-sentence
+finding. Do not explain what the diff does, list what you checked, or add a
+summary. Only if something unverified could change the verdict, end with
+"Not verified:" and at most three one-line bullets.
 
-If there are no findings, start with "This PR looks fine." and say what
-you checked, including which reference code you compared against.
+If there are no findings, write "This PR looks fine." and one sentence
+naming the reference code you compared against.
 
-Write the review as a single Markdown document; it is posted as one
-top-level PR comment.
+Stay under 250 words. The review is posted as one top-level PR comment in
+Markdown.
