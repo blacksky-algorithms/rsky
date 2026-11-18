@@ -455,7 +455,7 @@ pub async fn copy_insert_records(
             .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
-    sink.send(bytes::Bytes::from(buffer)).await?;
+    send_copy(sink.as_mut(), buffer).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
@@ -535,7 +535,7 @@ pub async fn copy_ensure_actors(
             .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
-    sink.send(bytes::Bytes::from(buffer)).await?;
+    send_copy(sink.as_mut(), buffer).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
@@ -618,7 +618,7 @@ pub async fn copy_insert_posts(
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
-    sink.send(bytes::Bytes::from(buffer)).await?;
+    send_copy(sink.as_mut(), buffer).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
@@ -728,7 +728,7 @@ pub async fn copy_insert_feed_items(
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
-    sink.send(bytes::Bytes::from(buffer)).await?;
+    send_copy(sink.as_mut(), buffer).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
@@ -807,7 +807,7 @@ pub async fn copy_insert_likes(
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
-    sink.send(bytes::Bytes::from(buffer)).await?;
+    send_copy(sink.as_mut(), buffer).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
@@ -903,7 +903,7 @@ pub async fn copy_insert_follows(
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
-    sink.send(bytes::Bytes::from(buffer)).await?;
+    send_copy(sink.as_mut(), buffer).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
@@ -1024,7 +1024,7 @@ pub async fn copy_insert_reposts(
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
-    sink.send(bytes::Bytes::from(buffer)).await?;
+    send_copy(sink.as_mut(), buffer).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
@@ -1116,7 +1116,7 @@ pub async fn copy_insert_quotes(
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
-    sink.send(bytes::Bytes::from(buffer)).await?;
+    send_copy(sink.as_mut(), buffer).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
@@ -1202,7 +1202,7 @@ pub async fn copy_insert_blocks(
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
-    sink.send(bytes::Bytes::from(buffer)).await?;
+    send_copy(sink.as_mut(), buffer).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
@@ -1276,7 +1276,7 @@ pub async fn copy_insert_post_embed_images(
             .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
-    sink.send(bytes::Bytes::from(buffer)).await?;
+    send_copy(sink.as_mut(), buffer).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
@@ -1352,7 +1352,7 @@ pub async fn copy_insert_post_embed_videos(
             .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
-    sink.send(bytes::Bytes::from(buffer)).await?;
+    send_copy(sink.as_mut(), buffer).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
@@ -1385,8 +1385,54 @@ pub async fn copy_insert_post_embed_videos(
     Ok(())
 }
 
+/// Most COPY bytes sent as one protocol message; the server ends the
+/// connection on a message of 1 GiB or more.
+const COPY_CHUNK_BYTES: usize = 64 * 1024 * 1024;
+
+fn copy_chunks(buffer: Vec<u8>, max: usize) -> impl Iterator<Item = bytes::Bytes> {
+    let bytes = bytes::Bytes::from(buffer);
+    (0..bytes.len())
+        .step_by(max)
+        .map(move |start| bytes.slice(start..bytes.len().min(start + max)))
+}
+
+async fn send_copy(
+    mut sink: std::pin::Pin<&mut tokio_postgres::CopyInSink<bytes::Bytes>>,
+    buffer: Vec<u8>,
+) -> Result<(), tokio_postgres::Error> {
+    for chunk in copy_chunks(buffer, COPY_CHUNK_BYTES) {
+        sink.send(chunk).await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use super::copy_chunks;
+
+    #[test]
+    fn copy_chunks_split_a_buffer_in_order() {
+        let chunks: Vec<_> = copy_chunks(b"abcdefgh".to_vec(), 3).collect();
+        assert_eq!(chunks, vec![&b"abc"[..], &b"def"[..], &b"gh"[..]]);
+    }
+
+    #[test]
+    fn copy_chunks_keep_an_exact_multiple_whole() {
+        let chunks: Vec<_> = copy_chunks(b"abcdef".to_vec(), 3).collect();
+        assert_eq!(chunks, vec![&b"abc"[..], &b"def"[..]]);
+    }
+
+    #[test]
+    fn copy_chunks_pass_a_small_buffer_through() {
+        let chunks: Vec<_> = copy_chunks(b"ab".to_vec(), 3).collect();
+        assert_eq!(chunks, vec![&b"ab"[..]]);
+    }
+
+    #[test]
+    fn copy_chunks_of_nothing_are_none() {
+        assert_eq!(copy_chunks(Vec::new(), 3).count(), 0);
+    }
+
     // A table truncated but not declared fails on a fresh connection, not in review.
     #[test]
     fn every_truncated_staging_table_is_declared() {
