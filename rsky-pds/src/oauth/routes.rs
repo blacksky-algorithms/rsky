@@ -532,9 +532,9 @@ async fn include_sets(
         if views.contains_key(nsid) {
             continue;
         }
-        let scopes = sets
+        let set = sets
             .resolver
-            .try_resolved_scopes(nsid)
+            .try_resolved_set(nsid)
             .await
             .map_err(|error| {
                 tracing::warn!(%error, nsid, "permission set could not be resolved for consent");
@@ -543,9 +543,9 @@ async fn include_sets(
         views.insert(
             nsid.to_string(),
             IncludeSetView {
-                title: None,
-                detail: None,
-                scopes,
+                title: set.title,
+                detail: set.detail,
+                scopes: set.scopes,
             },
         );
     }
@@ -1590,8 +1590,10 @@ mod tests {
     async fn include_sets_resolve_once_per_set_and_fail_closed() {
         let sets = SharedPermissionSets::default();
         sets.resolver
-            .prime(
+            .prime_set(
                 "app.example.set",
+                Some("Example set"),
+                Some("Reads and writes example records."),
                 vec![crate::permission_set::repo_permission("app.example.record")],
             )
             .await;
@@ -1612,7 +1614,20 @@ mod tests {
             views["app.example.set?aud=did:web:x%23y"].scopes,
             ["repo:app.example.record"]
         );
-        assert!(views["app.example.set"].title.is_none());
+        // The set's own prose reaches the page, so it shows what the set says
+        // it does rather than its NSID.
+        assert_eq!(
+            views["app.example.set"].title.as_deref(),
+            Some("Example set")
+        );
+        assert_eq!(
+            views["app.example.set"].detail.as_deref(),
+            Some("Reads and writes example records.")
+        );
+        assert_eq!(
+            views["app.example.set?aud=did:web:x%23y"].title.as_deref(),
+            Some("Example set")
+        );
         let error = include_sets(&sets, &["include:invalid.example.nothing".into()])
             .await
             .unwrap_err();

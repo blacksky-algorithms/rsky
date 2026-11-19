@@ -61,6 +61,36 @@ pub struct PermissionGroup {
     pub rpc_table: Option<RpcTable>,
     /// The email card offers a checkbox to decline that grant
     pub email_checkbox: bool,
+    /// The NSID of the `include:` set this card describes; empty for the cards
+    /// that are not a permission set. Emitted as `data-permission-set`, and
+    /// together with [`Self::set_slug`] as the per-set styling hook.
+    pub nsid: String,
+}
+
+impl PermissionGroup {
+    /// A CSS-safe form of an NSID: its alphanumeric runs, lowercased, joined by
+    /// `-`, so `net.olamaelcu.livtet.authLivtetCore` becomes
+    /// `net-olamaelcu-livtet-authlivtetcore`.
+    #[must_use]
+    pub fn set_slug(&self) -> String {
+        nsid_slug(&self.nsid)
+    }
+}
+
+/// The slug [`PermissionGroup::set_slug`] emits for an NSID. Anything that is
+/// not an ASCII alphanumeric separates runs; an empty or entirely punctuation
+/// input yields an empty slug rather than a stray `-`.
+#[must_use]
+pub fn nsid_slug(nsid: &str) -> String {
+    let mut slug = String::with_capacity(nsid.len());
+    for ch in nsid.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.trim_end_matches('-').to_string()
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -518,6 +548,7 @@ pub fn permission_groups(
                 intro: Some(INTRO_ON_BEHALF.to_string()),
                 rpc_table: inner.rpc_table(),
                 repo_table: inner.repo_table(),
+                nsid: nsid.clone(),
                 ..PermissionGroup::default()
             });
         }
@@ -827,6 +858,15 @@ mod tests {
         assert_eq!(g.groups[0].icon, "atom");
         assert_eq!(g.groups[0].description, "Read the outlines.");
         assert_eq!(g.groups[0].intro.as_deref(), Some(INTRO_ON_BEHALF));
+        // The set's card carries a styling hook and its NSID, so a deployment
+        // can style one set; cards that are not a set carry neither.
+        assert_eq!(g.groups[0].nsid, "app.bulleted.spaceAccess");
+        assert_eq!(g.groups[0].set_slug(), "app-bulleted-spaceaccess");
+        assert_eq!(g.groups[1].nsid, "chat.bsky.auth");
+        assert_eq!(g.groups[1].set_slug(), "chat-bsky-auth");
+        // Cards that are not an `include:` set carry no hook at all.
+        assert_eq!(PermissionGroup::default().nsid, "");
+        assert_eq!(PermissionGroup::default().set_slug(), "");
         assert_eq!(
             g.groups[0].repo_table.as_ref().unwrap().rows[0].collection,
             "app.bulleted.note"
@@ -852,6 +892,20 @@ mod tests {
         assert_eq!(g.groups[0].icon, "layout-grid");
         assert_eq!(g.groups[0].title, "Full");
         assert_eq!(g.groups[0].description, "app.bsky.authFull");
+    }
+
+    #[test]
+    fn an_nsid_becomes_a_css_slug() {
+        assert_eq!(
+            nsid_slug("net.olamaelcu.livtet.authLivtetCore"),
+            "net-olamaelcu-livtet-authlivtetcore"
+        );
+        assert_eq!(
+            nsid_slug("app.bulleted.spaceAccess"),
+            "app-bulleted-spaceaccess"
+        );
+        assert_eq!(nsid_slug(""), "");
+        assert_eq!(nsid_slug("..."), "");
     }
 
     #[test]

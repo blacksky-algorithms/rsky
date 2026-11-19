@@ -236,6 +236,12 @@ fn scope_string(resource: &str, key: &str, values: &[String], params: Vec<String
 struct SchemaDef {
     #[serde(default, rename = "type")]
     def_type: String,
+    /// The set's name, as the consent page shows it.
+    #[serde(default)]
+    title: Option<String>,
+    /// A sentence on what the set confers.
+    #[serde(default)]
+    detail: Option<String>,
     #[serde(default)]
     permissions: Vec<Permission>,
 }
@@ -251,14 +257,36 @@ struct GetRecordOutput {
     value: SchemaRecord,
 }
 
-/// The permissions a fetched `com.atproto.lexicon.schema` record publishes.
-fn permissions_from_record(record: &SchemaRecord) -> Vec<Permission> {
+/// The def a permission set publishes its prose and grants in: `defs["main"]`
+/// when that is the permission set, else the first permission-set def by name.
+///
+/// A set has one meaningful def. Reading every def, as this did before, would
+/// concatenate two unrelated sets' grants and could only pick one def's prose
+/// arbitrarily, so the record's own main definition wins and the rest are
+/// ignored.
+fn set_def(record: &SchemaRecord) -> Option<&SchemaDef> {
+    if let Some(def) = record.defs.get("main") {
+        if def.def_type == "permission-set" {
+            return Some(def);
+        }
+    }
     record
         .defs
-        .values()
-        .filter(|def| def.def_type == "permission-set")
-        .flat_map(|def| def.permissions.iter().cloned())
-        .collect()
+        .iter()
+        .filter(|(_, def)| def.def_type == "permission-set")
+        .min_by(|a, b| a.0.cmp(b.0))
+        .map(|(_, def)| def)
+}
+
+/// The prose and permissions a fetched `com.atproto.lexicon.schema` record
+/// publishes. Without prose the set is still usable; the consent page falls
+/// back to the NSID.
+fn resolved_record(record: &SchemaRecord) -> SetRecord {
+    set_def(record).map_or_else(SetRecord::default, |def| SetRecord {
+        title: def.title.clone(),
+        detail: def.detail.clone(),
+        permissions: def.permissions.clone(),
+    })
 }
 
 /// The scope strings a permission set confers -- across all five proposal
@@ -273,7 +301,19 @@ fn render_scopes(permissions: &[Permission], inherited_aud: Option<&str>) -> Vec
 
 #[cfg(test)]
 fn resource_scopes_from_record(record: &SchemaRecord) -> Vec<String> {
-    render_scopes(&permissions_from_record(record), None)
+    render_scopes(&resolved_record(record).permissions, None)
+}
+
+/// A permission set as a caller outside this module sees it: what it calls
+/// itself, what it says it does, and the scope strings it confers for the
+/// `include:` it was resolved for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResolvedSet {
+    /// The set's `title`; absent when the record publishes none.
+    pub title: Option<String>,
+    /// The set's `detail`; absent when the record publishes none.
+    pub detail: Option<String>,
+    pub scopes: Vec<String>,
 }
 
 /// What follows `include:` in a scope: the set's NSID and, optionally, the
@@ -311,10 +351,20 @@ impl IncludeScope {
 }
 
 struct CacheEntry {
-    permissions: Vec<Permission>,
+    set: SetRecord,
     expires: Instant,
     /// Set when the entry records a failed fetch rather than a resolved set.
     failed: bool,
+}
+
+/// What a fetched record publishes, as the cache holds it. The prose is only
+/// available from the record, so it is cached beside the grants rather than
+/// fetched a second time for the consent page.
+#[derive(Debug, Clone, Default)]
+struct SetRecord {
+    title: Option<String>,
+    detail: Option<String>,
+    permissions: Vec<Permission>,
 }
 
 /// A permission set could not be fetched or read.
@@ -356,6 +406,23 @@ impl PermissionSetResolver {
         self.try_resolved_scopes(include).await.unwrap_or_default()
     }
 
+    /// The set's own prose -- its `title` and `detail` -- and the scope
+    /// strings an `include:` of it confers, for the token after `include:`:
+    /// the set's NSID, or `nsid?aud=...` when the include names an audience.
+    ///
+    /// The prose is the set's, not this server's. It is what the consent page
+    /// shows in place of the bare NSID, so the user reads what the set says it
+    /// does.
+    pub async fn try_resolved_set(&self, include: &str) -> Result<ResolvedSet, PermissionSetError> {
+        let include = IncludeScope::parse(include)?;
+        let set = self.set(&include.nsid).await?;
+        Ok(ResolvedSet {
+            title: set.title,
+            detail: set.detail,
+            scopes: render_scopes(&set.permissions, include.aud.as_deref()),
+        })
+    }
+
     /// Like [`Self::resolved_scopes`], but tells a set that confers nothing
     /// apart from one that could not be resolved. A remembered failure is
     /// reported as such until it expires.
@@ -363,13 +430,11 @@ impl PermissionSetResolver {
         &self,
         include: &str,
     ) -> Result<Vec<String>, PermissionSetError> {
-        let include = IncludeScope::parse(include)?;
-        let permissions = self.permissions(&include.nsid).await?;
-        Ok(render_scopes(&permissions, include.aud.as_deref()))
+        Ok(self.try_resolved_set(include).await?.scopes)
     }
 
-    /// The set's published permissions, from the cache or fetched.
-    async fn permissions(&self, nsid: &str) -> Result<Vec<Permission>, PermissionSetError> {
+    /// The set's published prose and permissions, from the cache or fetched.
+    async fn set(&self, nsid: &str) -> Result<SetRecord, PermissionSetError> {
         if let Some(entry) = self.cache.read().await.get(nsid) {
             if entry.expires > Instant::now() {
                 return if entry.failed {
@@ -378,7 +443,7 @@ impl PermissionSetResolver {
                         reason: "recent fetch failed".to_string(),
                     })
                 } else {
-                    Ok(entry.permissions.clone())
+                    Ok(entry.set.clone())
                 };
             }
         }
@@ -393,7 +458,7 @@ impl PermissionSetResolver {
         self.cache.write().await.insert(
             nsid.to_string(),
             CacheEntry {
-                permissions: result.clone().unwrap_or_default(),
+                set: result.clone().unwrap_or_default(),
                 expires: Instant::now() + ttl,
                 failed: result.is_err(),
             },
@@ -403,17 +468,33 @@ impl PermissionSetResolver {
 
     #[cfg(test)]
     pub(crate) async fn prime(&self, nsid: &str, permissions: Vec<Permission>) {
+        self.prime_set(nsid, None, None, permissions).await;
+    }
+
+    /// [`Self::prime`] for a set whose record publishes prose.
+    #[cfg(test)]
+    pub(crate) async fn prime_set(
+        &self,
+        nsid: &str,
+        title: Option<&str>,
+        detail: Option<&str>,
+        permissions: Vec<Permission>,
+    ) {
         self.cache.write().await.insert(
             nsid.to_string(),
             CacheEntry {
-                permissions,
+                set: SetRecord {
+                    title: title.map(str::to_string),
+                    detail: detail.map(str::to_string),
+                    permissions,
+                },
                 expires: Instant::now() + OK_TTL,
                 failed: false,
             },
         );
     }
 
-    async fn fetch(&self, nsid: &str) -> anyhow::Result<Vec<Permission>> {
+    async fn fetch(&self, nsid: &str) -> anyhow::Result<SetRecord> {
         let parsed = Nsid::parse(nsid).map_err(|e| anyhow::anyhow!("invalid nsid: {e}"))?;
         let authority = parsed.authority();
         let did = resolve_lexicon_authority(&authority).await?;
@@ -439,7 +520,7 @@ impl PermissionSetResolver {
             anyhow::bail!("{url} returned {}", response.status());
         }
         let output: GetRecordOutput = response.json().await?;
-        Ok(permissions_from_record(&output.value))
+        Ok(resolved_record(&output.value))
     }
 }
 
@@ -559,6 +640,127 @@ mod tests {
     fn bulleted_scopes() -> Vec<String> {
         let record: SchemaRecord = serde_json::from_str(BULLETED_SPACE_ACCESS).unwrap();
         resource_scopes_from_record(&record)
+    }
+
+    #[test]
+    fn a_published_sets_prose_survives_parsing() {
+        let record: SchemaRecord = serde_json::from_str(BULLETED_SPACE_ACCESS).unwrap();
+        let set = resolved_record(&record);
+        assert_eq!(set.title.as_deref(), Some("Bulleted spaces"));
+        assert_eq!(
+            set.detail.as_deref(),
+            Some(
+                "Read the outlines shared in your Bulleted spaces, and write your own bullets in them."
+            )
+        );
+    }
+
+    /// A record may publish several defs. Its prose and its grants have to
+    /// come from the same one -- `main` when that is the set -- or the consent
+    /// page would describe a set using another def's grants.
+    #[test]
+    fn a_sets_prose_and_grants_come_from_one_def() {
+        let record: SchemaRecord = serde_json::from_str(
+            r#"{
+              "$type": "com.atproto.lexicon.schema",
+              "lexicon": 1,
+              "id": "app.example.twoDefs",
+              "defs": {
+                "main": {
+                  "type": "permission-set",
+                  "title": "Main",
+                  "detail": "The one that counts.",
+                  "permissions": [
+                    {
+                      "type": "permission",
+                      "resource": "repo",
+                      "collection": ["app.example.main"],
+                      "action": ["create"]
+                    }
+                  ]
+                },
+                "other": {
+                  "type": "permission-set",
+                  "title": "Other",
+                  "permissions": [
+                    {
+                      "type": "permission",
+                      "resource": "repo",
+                      "collection": ["app.example.other"],
+                      "action": ["create"]
+                    }
+                  ]
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let set = resolved_record(&record);
+        assert_eq!(set.title.as_deref(), Some("Main"));
+        assert_eq!(
+            render_scopes(&set.permissions, None),
+            ["repo:app.example.main?action=create"]
+        );
+
+        // When `main` is not the permission set, the set def the record does
+        // publish is the one read.
+        let record: SchemaRecord = serde_json::from_str(
+            r#"{
+              "$type": "com.atproto.lexicon.schema",
+              "lexicon": 1,
+              "id": "app.example.offMain",
+              "defs": {
+                "main": { "type": "record", "record": {} },
+                "access": {
+                  "type": "permission-set",
+                  "title": "Off main",
+                  "permissions": [
+                    {
+                      "type": "permission",
+                      "resource": "repo",
+                      "collection": ["app.example.off"],
+                      "action": ["read"]
+                    }
+                  ]
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let set = resolved_record(&record);
+        assert_eq!(set.title.as_deref(), Some("Off main"));
+        assert_eq!(
+            render_scopes(&set.permissions, None),
+            ["repo:app.example.off?action=read"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resolved_set_carries_its_prose_and_scopes() {
+        let resolver = PermissionSetResolver::new();
+        resolver
+            .prime_set(
+                "app.example.viewAll",
+                Some("Example set"),
+                Some("Reads example things."),
+                vec![Permission {
+                    resource: "rpc".into(),
+                    lxm: vec!["app.example.getThing".into()],
+                    inherit_aud: true,
+                    ..Default::default()
+                }],
+            )
+            .await;
+        let set = resolver
+            .try_resolved_set("app.example.viewAll?aud=did:web:api.example.com%23svc")
+            .await
+            .unwrap();
+        assert_eq!(set.title.as_deref(), Some("Example set"));
+        assert_eq!(set.detail.as_deref(), Some("Reads example things."));
+        assert_eq!(
+            set.scopes,
+            ["rpc:app.example.getThing?aud=did:web:api.example.com#svc"]
+        );
     }
 
     #[test]
@@ -815,7 +1017,10 @@ mod tests {
         resolver.cache.write().await.insert(
             "invalid.example.expired".to_string(),
             CacheEntry {
-                permissions: vec![repo_permission("app.example.record")],
+                set: SetRecord {
+                    permissions: vec![repo_permission("app.example.record")],
+                    ..Default::default()
+                },
                 expires: Instant::now() - Duration::from_secs(1),
                 failed: false,
             },
