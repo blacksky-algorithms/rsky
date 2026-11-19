@@ -2736,12 +2736,46 @@ mod indexer_tests {
     }
 
     #[tokio::test]
-    async fn a_bulk_batch_keeps_every_like_record_and_one_like_row_per_subject() {
+    async fn a_bulk_batch_without_the_like_constraint_keeps_one_row_per_subject() {
         use crate::types::IndexJob;
 
+        // A `like` table with no `(subject, creator)` constraint, ahead of the
+        // real one on this pool's search path only.
         let pool = setup_test_pool();
+        pool.get()
+            .await
+            .unwrap()
+            .batch_execute(
+                "CREATE SCHEMA IF NOT EXISTS likes_without_unique;
+                 CREATE TABLE IF NOT EXISTS likes_without_unique.\"like\"
+                   (LIKE public.\"like\" INCLUDING DEFAULTS INCLUDING GENERATED);
+                 CREATE UNIQUE INDEX IF NOT EXISTS like_uri_idx
+                   ON likes_without_unique.\"like\" (uri);",
+            )
+            .await
+            .unwrap();
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
+        });
+        let separator = if database_url.contains('?') { '&' } else { '?' };
+        let unconstrained = crate::config::create_pg_pool(
+            &format!(
+                "{database_url}{separator}options=-csearch_path%3Dlikes_without_unique,public"
+            ),
+            crate::config::pg_pool_config(16),
+        )
+        .expect("test pool builds");
+
         let liker = "did:plc:wintermute-test-repeated-liker";
         cleanup_test_data(&pool, liker).await;
+        let client = pool.get().await.unwrap();
+        client
+            .execute(
+                "DELETE FROM likes_without_unique.\"like\" WHERE creator = $1",
+                &[&liker],
+            )
+            .await
+            .unwrap();
         let post = "at://did:plc:wintermute-test-repeated-author/app.bsky.feed.post/p1";
         let cid = "bafyreihhl5mpvjkrhnnagen2fomozzhnhhdq2jr6cego2nzbvmwewv5rd4";
         let ts = "2026-11-18T00:00:00.000Z";
@@ -2770,14 +2804,14 @@ mod indexer_tests {
         ];
 
         let (results, batch_failed) =
-            IndexerManager::process_jobs_batch(&pool, &jobs, true, false).await;
+            IndexerManager::process_jobs_batch(&unconstrained, &jobs, true, false).await;
 
-        assert!(!batch_failed);
+        assert!(!batch_failed, "{results:?}");
         assert!(results.iter().all(|(_, r)| r.is_ok()), "{results:?}");
-        let client = pool.get().await.unwrap();
         let rows: Vec<(String, String)> = client
             .query(
-                "SELECT uri, subject FROM \"like\" WHERE creator = $1 ORDER BY uri",
+                "SELECT uri, subject FROM likes_without_unique.\"like\" \
+                 WHERE creator = $1 ORDER BY uri",
                 &[&liker],
             )
             .await
@@ -2805,6 +2839,13 @@ mod indexer_tests {
             .get(0);
         assert_eq!(records, 4);
 
+        client
+            .execute(
+                "DELETE FROM likes_without_unique.\"like\" WHERE creator = $1",
+                &[&liker],
+            )
+            .await
+            .unwrap();
         cleanup_test_data(&pool, liker).await;
     }
 
