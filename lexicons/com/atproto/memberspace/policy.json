@@ -1,0 +1,36 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.memberspace.policy",
+  "defs": {
+    "main": {
+      "type": "object",
+      "description": "Policy for a space governed by a member list maintained by the PDS. A user is authorized for an access kind when the corresponding public flag is set, or when their member-list entry has the corresponding read or write boolean set. The member list itself is not part of this object and is managed through com.atproto.memberspace.putMember, removeMember, and listMembers.",
+      "properties": {
+        "publicRead": {
+          "type": "boolean",
+          "description": "Authorize anyone to read, rather than only members. No delegation token is required."
+        },
+        "publicWrite": {
+          "type": "boolean",
+          "description": "Track and forward notifications for any user's writes, rather than only members'."
+        },
+        "allowedApps": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "An OAuth client_id permitted to access the space."
+          },
+          "description": "The applications the authority authorizes, evaluated against the attested client_id of a verified client attestation. Any application may read the space when omitted. Does not apply to writes."
+        },
+        "publishPolicy": {
+          "type": "boolean",
+          "description": "Publish the policy to readers as a com.atproto.space.policy record in the authority's own repo in the space."
+        },
+        "publishMembers": {
+          "type": "boolean",
+          "description": "Publish the member list to readers as com.atproto.memberspace.member records in the authority's own repo in the space."
+        }
+      }
+    }
+  }
+}

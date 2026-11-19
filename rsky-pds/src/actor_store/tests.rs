@@ -932,7 +932,7 @@ async fn writing_a_reference_store_applies_only_local_migrations() {
         .await
         .unwrap();
     assert_eq!(shared, ["001"]);
-    assert_eq!(local, ["002", "003", "004", "005"]);
+    assert_eq!(local, ["002", "003", "004", "005", "006", "007"]);
 }
 
 #[tokio::test]

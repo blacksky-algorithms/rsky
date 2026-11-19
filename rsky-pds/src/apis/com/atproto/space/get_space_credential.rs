@@ -1,7 +1,7 @@
 use crate::actor_store::blobstore::BlobstoreFactory;
 use crate::actor_store::ActorStore;
 use crate::apis::com::atproto::space::host::{
-    def_app_access, def_policy, local_space_def, ActorJtiStore, FixedKeyResolver,
+    def_policy, local_space_def, ActorJtiStore, FixedKeyResolver,
 };
 use crate::apis::com::atproto::space::{internal_error, parse_space_uri};
 use crate::apis::ApiError;
@@ -32,7 +32,9 @@ use secp256k1::SecretKey;
 /// before the grant is consumed, so a caller with a bad proof does not burn
 /// its single-use token finding out.
 pub struct Issuance {
-    pub delegation_token: String,
+    /// Absent under a policy that requires no user assertion (e.g. a
+    /// `memberspace` with `publicRead`).
+    pub delegation_token: Option<String>,
     pub dpop_jkt: String,
 }
 
@@ -50,17 +52,13 @@ impl<'r> FromRequest<'r> for Issuance {
                 return Outcome::Error((rocket::http::Status::Unauthorized, error));
             }
         };
-        match crate::auth_verifier::bearer_token_from_req(req) {
-            Ok(Some(delegation_token)) => Outcome::Success(Issuance {
-                delegation_token,
-                dpop_jkt,
-            }),
-            _ => {
-                let error = ApiError::AuthRequiredError("delegation token required".to_string());
-                req.local_cache(|| Some(error.clone()));
-                Outcome::Error((rocket::http::Status::Unauthorized, error))
-            }
-        }
+        let delegation_token = crate::auth_verifier::bearer_token_from_req(req)
+            .ok()
+            .flatten();
+        Outcome::Success(Issuance {
+            delegation_token,
+            dpop_jkt,
+        })
     }
 }
 
@@ -82,38 +80,50 @@ pub async fn space_get_space_credential(
 ) -> Result<Json<GetSpaceCredentialOutput>, ApiError> {
     let GetSpaceCredentialInput {
         space,
+        delegation_token: body_token,
         client_attestation,
     } = body.into_inner();
     let Issuance {
-        delegation_token,
+        delegation_token: bearer_token,
         dpop_jkt,
     } = issuance;
     let space_id = parse_space_uri(&space)?;
     let (def, space_store, keypair) =
         local_space_def(actor_store, blobstore_factory, &space_id).await?;
 
-    // The delegation token is single-use: consume its jti up front.
-    let decoded = decode(&delegation_token)
-        .map_err(|error| ApiError::InvalidRequest(format!("bad delegation token: {error}")))?;
-    let user_did = decoded.claims.iss.clone();
-    let fresh = space_store
-        .consume_jti(
-            &decoded.claims.jti,
-            decoded.claims.exp as i64,
-            now_secs() as i64,
-        )
-        .await
-        .map_err(internal_error("jti store failure"))?;
-    if !fresh {
-        return Err(ApiError::InvalidRequest(
-            "delegation token replayed".to_string(),
-        ));
-    }
-    let user_key = resolve_signing_did_key(actor_store, id_resolver, &user_did, ATPROTO_KEY_IDS)
-        .await
-        .map_err(|error| {
-            ApiError::InvalidRequest(format!("could not resolve {user_did}: {error}"))
-        })?;
+    // The body field wins over the bearer credential (spec §Requesting a
+    // space credential); a `publicRead` space requires neither.
+    let delegation_token = body_token.or(bearer_token);
+    let user_key = match &delegation_token {
+        Some(token) => {
+            // The delegation token is single-use: consume its jti up front.
+            let decoded = decode(token).map_err(|error| {
+                ApiError::InvalidRequest(format!("bad delegation token: {error}"))
+            })?;
+            let fresh = space_store
+                .consume_jti(
+                    &decoded.claims.jti,
+                    decoded.claims.exp as i64,
+                    now_secs() as i64,
+                )
+                .await
+                .map_err(internal_error("jti store failure"))?;
+            if !fresh {
+                return Err(ApiError::InvalidRequest(
+                    "delegation token replayed".to_string(),
+                ));
+            }
+            let user_did = decoded.claims.iss.clone();
+            Some(
+                resolve_signing_did_key(actor_store, id_resolver, &user_did, ATPROTO_KEY_IDS)
+                    .await
+                    .map_err(|error| {
+                        ApiError::InvalidRequest(format!("could not resolve {user_did}: {error}"))
+                    })?,
+            )
+        }
+        None => None,
+    };
 
     let signer = Signer::from_secret(
         SecretKey::from_slice(&keypair.secret_bytes()).expect("actor key is a valid secret"),
@@ -126,13 +136,13 @@ pub async fn space_get_space_credential(
         &server_config.identity.plc_url,
     )
     .await?;
-    let authority = Authority::new(space_id.clone(), signer, def_app_access(&def));
+    let authority = Authority::new(space_id.clone(), signer);
     let credential = authority
         .get_space_credential(
-            &delegation_token,
+            delegation_token.as_deref(),
             client_attestation.as_deref(),
             &policy,
-            &FixedKeyResolver(user_key),
+            &FixedKeyResolver(user_key.unwrap_or_default()),
             &HttpMetadataFetcher::new(),
             &ActorJtiStore(space_store),
             now_secs(),

@@ -46,6 +46,7 @@ pub async fn space_list_records(
         &account_manager,
         &repo,
         false,
+        &auth,
     )
     .await?;
     reader

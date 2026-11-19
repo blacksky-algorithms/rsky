@@ -1,0 +1,37 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.memberspace.putMember",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Add a member (by DID) or replace their read and write access on a memberspace space. Requires auth with a covering manage=update grant, implemented by PDS.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["space", "did", "read", "write"],
+          "properties": {
+            "space": {
+              "type": "string",
+              "description": "Permissioned space URI, in the form at://{authority}/space/{spaceType}/{skey}. Not a standard at-uri."
+            },
+            "did": {
+              "type": "string",
+              "format": "did",
+              "description": "The DID of the account to add or update as a member."
+            },
+            "read": {
+              "type": "boolean",
+              "description": "Whether the member is authorized to read the space."
+            },
+            "write": {
+              "type": "boolean",
+              "description": "Whether the member's writes are tracked and forwarded by the space authority."
+            }
+          }
+        }
+      },
+      "errors": [{ "name": "SpaceNotFound" }]
+    }
+  }
+}

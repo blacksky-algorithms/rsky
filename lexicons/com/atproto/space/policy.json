@@ -1,0 +1,26 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.space.policy",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A published copy of a space's policy. Written into the space authority's own repo in the space when the policy sets publishPolicy. Direct writes of this record type are rejected: the PDS keeps the record in sync with the configured policy.",
+      "key": "literal:self",
+      "record": {
+        "type": "object",
+        "required": ["policy"],
+        "properties": {
+          "policy": {
+            "type": "union",
+            "refs": [
+              "com.atproto.personalspace.policy#main",
+              "com.atproto.memberspace.policy#main",
+              "com.atproto.managedspace.policy#main"
+            ],
+            "description": "The space's current policy object."
+          }
+        }
+      }
+    }
+  }
+}

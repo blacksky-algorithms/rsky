@@ -97,7 +97,7 @@ pub async fn verify_client_attestation(
             "client_id is not an https url".into(),
         ));
     }
-    let want_aud = format!("{authority_did}#atproto_space_host");
+    let want_aud = format!("{authority_did}#atproto_pds");
     if claims.aud.as_deref() != Some(want_aud.as_str()) {
         return Err(HostError::Attestation("aud != space host".into()));
     }
@@ -245,7 +245,7 @@ mod tests {
                 kid: Some("key-1".to_string()),
                 iss: CLIENT_ID.to_string(),
                 sub: CLIENT_ID.to_string(),
-                aud: Some(format!("{AUTHORITY}#atproto_space_host")),
+                aud: Some(format!("{AUTHORITY}#atproto_pds")),
                 iat: 1000,
                 exp: 1060,
                 jti: "attest-jti".to_string(),
@@ -408,7 +408,7 @@ mod tests {
             ),
             (
                 Attestation {
-                    aud: Some("did:plc:other#atproto_space_host".to_string()),
+                    aud: Some("did:plc:other#atproto_pds".to_string()),
                     ..Default::default()
                 },
                 "aud",

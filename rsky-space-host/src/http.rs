@@ -11,7 +11,6 @@ use axum::{Json, Router};
 use rsky_lexicon::com::atproto::space::{
     GetSpaceCredentialInput, GetSpaceCredentialOutput, GetSpaceOutput, GetSpaceParams,
     ListReposOutput, ListReposParams, NotifyWriteInput, RegisterNotifyInput, RegisterNotifyOutput,
-    SpaceConfig,
 };
 use rsky_oauth::dpop::{DpopManager, DpopProof, DpopRequest};
 use rsky_space::credential;
@@ -23,7 +22,7 @@ use crate::error::HostError;
 use crate::keys::DocSource;
 use crate::managing_app::require_https;
 use crate::notify::{fan_out_write, Notifier, NOTIFY_WRITE_LXM};
-use crate::policy::Policy;
+use crate::policy::{Access, Policy};
 use crate::service_jwt;
 use crate::store::{RegistrationStore, Subscriber, WriterSetStore};
 
@@ -145,12 +144,11 @@ impl From<HostError> for ApiError {
     }
 }
 
-fn bearer(headers: &HeaderMap) -> Result<&str, ApiError> {
+fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or_else(|| ApiError::auth_required("missing bearer token"))
 }
 
 fn dpop_credential(headers: &HeaderMap) -> Result<&str, ApiError> {
@@ -282,7 +280,7 @@ async fn get_space(
     require_this_space(&state, &params.space)?;
     Ok(Json(GetSpaceOutput {
         space: state.authority.space_uri(),
-        config: SpaceConfig::Simplespace(state.authority.space_config(&state.policy)),
+        policy: state.authority.space_policy(&state.policy),
     }))
 }
 
@@ -292,7 +290,12 @@ async fn get_space_credential(
     Json(input): Json<GetSpaceCredentialInput>,
 ) -> Result<Json<GetSpaceCredentialOutput>, ApiError> {
     require_this_space(&state, &input.space)?;
-    let delegation_token = bearer(&headers)?;
+    // The delegation token is the body field when present, else the request's
+    // bearer credential; a `publicRead` space requires neither.
+    let delegation_token = input
+        .delegation_token
+        .as_deref()
+        .or_else(|| bearer(&headers));
     // Before the delegation token, so a caller with a bad proof does not burn
     // its single-use grant finding out.
     let proof = check_proof(
@@ -383,7 +386,7 @@ async fn notify_write(
     Json(input): Json<NotifyWriteInput>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_this_space(&state, &input.space)?;
-    let jwt = bearer(&headers)?;
+    let jwt = bearer(&headers).ok_or_else(|| ApiError::auth_required("missing bearer token"))?;
     let claims = service_jwt::claims(jwt)?;
     // The repo host signs with the member's own key, so a notification may only
     // announce the issuer's own repo.
@@ -396,7 +399,7 @@ async fn notify_write(
     }
     let issuer_key = state.keys.signing_key(&claims.iss).await?;
     let authority_did = state.authority.authority_did();
-    let space_host_aud = format!("{authority_did}#atproto_space_host");
+    let space_host_aud = format!("{authority_did}#atproto_pds");
     service_jwt::verify(
         jwt,
         &[authority_did, space_host_aud.as_str()],
@@ -404,6 +407,16 @@ async fn notify_write(
         &issuer_key,
         (state.now)(),
     )?;
+    // The space's write axis: only authorized writers are tracked and have
+    // their notifications forwarded (spec §Baseline policies).
+    if !state
+        .policy
+        .authorizes(&input.space, Some(&input.repo), Access::Write, None)
+        .await?
+    {
+        tracing::debug!(space = %input.space, repo = %input.repo, "write notice from unauthorized writer rejected");
+        return Err(HostError::NotAuthorized.into());
+    }
 
     let now = (state.now)();
     state
@@ -418,7 +431,6 @@ async fn notify_write(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::appaccess::AppAccess;
     use crate::attestation::{ClientMetadata, InMemoryJtiStore};
     use crate::error::Result as HostResult;
     use crate::membership::InMemoryMembership;
@@ -530,19 +542,26 @@ mod tests {
         writes: tokio::sync::mpsc::UnboundedReceiver<(String, NotifyWriteInput)>,
     }
 
-    fn fixture(app_access: AppAccess, members: &[&str]) -> Fixture {
+    fn fixture(allowed_apps: Option<Vec<String>>, members: &[&str]) -> Fixture {
         let space = SpaceId::new(
             "did:plc:communityauthority",
             "community.blacksky.feed",
             "main",
         );
-        let authority = Authority::new(space, test_signer(), app_access);
+        let authority = Authority::new(space, test_signer());
         let (tx, writes) = tokio::sync::mpsc::unbounded_channel();
         let state = AppState {
             authority: Arc::new(authority),
-            policy: Arc::new(Policy::MemberList(Arc::new(InMemoryMembership::new(
-                members.iter().map(|m| m.to_string()),
-            )))),
+            policy: Arc::new(Policy::Memberspace {
+                public_read: false,
+                public_write: false,
+                allowed_apps,
+                publish_policy: false,
+                publish_members: false,
+                members: Arc::new(InMemoryMembership::new(
+                    members.iter().map(|m| m.to_string()),
+                )),
+            }),
             keys: Arc::new(UserKeys),
             metadata: Arc::new(NoFetch),
             jti_store: Arc::new(InMemoryJtiStore::default()),
@@ -616,10 +635,7 @@ mod tests {
         let claims = SpaceClaims {
             iss: user.to_string(),
             sub: state.authority.space_uri(),
-            aud: Some(format!(
-                "{}#atproto_space_host",
-                state.authority.authority_did()
-            )),
+            aud: Some(format!("{}#atproto_pds", state.authority.authority_did())),
             iat: NOW,
             exp: NOW + 60,
             jti: "delegation-jti".to_string(),
@@ -690,7 +706,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_reports_version() {
-        let f = fixture(AppAccess::Open, &[]);
+        let f = fixture(None, &[]);
         let (status, body) = send(&f.state, get_req("/xrpc/_health", None)).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
@@ -698,7 +714,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_space_requires_and_verifies_a_credential() {
-        let f = fixture(AppAccess::Open, &[]);
+        let f = fixture(None, &[]);
         let path = format!(
             "/xrpc/com.atproto.space.getSpace?space={}",
             urlencode(&space_uri())
@@ -744,11 +760,7 @@ mod tests {
         let (status, body) = send(&f.state, get_req(&path, Some(&token))).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["space"], space_uri());
-        assert_eq!(
-            body["config"]["$type"],
-            "com.atproto.simplespace.defs#config"
-        );
-        assert_eq!(body["config"]["policy"], "member-list");
+        assert_eq!(body["policy"]["$type"], "com.atproto.memberspace.policy");
 
         let wrong = format!(
             "/xrpc/com.atproto.space.getSpace?space={}",
@@ -761,7 +773,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_space_credential_happy_and_denied_paths() {
-        let f = fixture(AppAccess::Open, &[MEMBER]);
+        let f = fixture(None, &[MEMBER]);
         let path = "/xrpc/com.atproto.space.getSpaceCredential";
 
         let body = serde_json::json!({ "space": space_uri() });
@@ -794,7 +806,7 @@ mod tests {
         assert_eq!(out["error"], "InvalidDpopProof");
 
         // Non-member is refused by the policy.
-        let f = fixture(AppAccess::Open, &[]);
+        let f = fixture(None, &[]);
         let body = serde_json::json!({ "space": space_uri() });
         let delegation = delegation_for(&f.state, MEMBER);
         let (status, out) = send(&f.state, post_req(path, Some(&delegation), body)).await;
@@ -831,7 +843,7 @@ mod tests {
     #[tokio::test]
     async fn get_space_credential_attestation_errors() {
         let f = fixture(
-            AppAccess::AllowList(vec!["https://app.example/client".to_string()]),
+            Some(vec!["https://app.example/client".to_string()]),
             &[MEMBER],
         );
         let path = "/xrpc/com.atproto.space.getSpaceCredential";
@@ -853,7 +865,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_repos_pages_the_writer_set() {
-        let f = fixture(AppAccess::Open, &[]);
+        let f = fixture(None, &[]);
         for did in ["did:plc:aaa", "did:plc:bbb", "did:plc:ccc"] {
             f.state
                 .writers
@@ -902,7 +914,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_notify_stores_an_expiring_registration() {
-        let f = fixture(AppAccess::Open, &[]);
+        let f = fixture(None, &[]);
         let token = credential_for(&f.state);
         let path = "/xrpc/com.atproto.space.registerNotify";
         let body = serde_json::json!({
@@ -947,7 +959,7 @@ mod tests {
 
     #[tokio::test]
     async fn notify_write_updates_writers_and_fans_out() {
-        let mut f = fixture(AppAccess::Open, &[]);
+        let mut f = fixture(None, &[MEMBER]);
         f.state
             .registrations
             .register(
@@ -960,7 +972,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let aud = format!("{}#atproto_space_host", f.state.authority.authority_did());
+        let aud = format!("{}#atproto_pds", f.state.authority.authority_did());
         let token = member_service_jwt(&aud, NOTIFY_WRITE_LXM);
         let path = "/xrpc/com.atproto.space.notifyWrite";
         let body = serde_json::json!({
@@ -989,7 +1001,7 @@ mod tests {
 
     #[tokio::test]
     async fn notify_write_auth_failures() {
-        let f = fixture(AppAccess::Open, &[]);
+        let f = fixture(None, &[]);
         let path = "/xrpc/com.atproto.space.notifyWrite";
         let authority_did = f.state.authority.authority_did().to_string();
         let body = serde_json::json!({
@@ -1055,11 +1067,11 @@ mod tests {
 
     #[tokio::test]
     async fn notify_write_store_failure_is_internal_error() {
-        let f = fixture(AppAccess::Open, &[]);
+        let f = fixture(None, &[MEMBER]);
         let mut broken = f.state.clone();
         broken.writers = Arc::new(BrokenWriters);
         let token = member_service_jwt(
-            &format!("{}#atproto_space_host", broken.authority.authority_did()),
+            &format!("{}#atproto_pds", broken.authority.authority_did()),
             NOTIFY_WRITE_LXM,
         );
         let body = serde_json::json!({

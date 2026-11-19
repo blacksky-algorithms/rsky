@@ -188,6 +188,7 @@ fn jwt_typ(token: &str) -> Option<String> {
 pub struct SpaceCredentialAuth {
     pub space_uri: String,
     pub authority: String,
+    pub jti: String,
 }
 
 async fn verify_space_credential_token(
@@ -223,10 +224,31 @@ async fn verify_space_credential_token(
     let bound_jkt =
         credential::verify_space_credential(token, &space_uri, &authority, &did_key, now_secs())
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let jti = decoded.claims.jti.clone();
+    if actor_store.exists(&authority).await.unwrap_or(false) {
+        let blob_factory = req
+            .guard::<&State<crate::actor_store::blobstore::BlobstoreFactory>>()
+            .await
+            .expect("BlobstoreFactory managed");
+        if let Ok(reader) = actor_store
+            .read(authority.clone(), blob_factory.blobstore(authority.clone()))
+            .await
+        {
+            if reader
+                .space
+                .credential_revoked(&space_uri, &jti)
+                .await
+                .unwrap_or(false)
+            {
+                bail!("space credential has been revoked");
+            }
+        }
+    }
     verify_bound_proof(req, token, &bound_jkt).await?;
     Ok(SpaceCredentialAuth {
         space_uri,
         authority,
+        jti,
     })
 }
 
@@ -419,7 +441,7 @@ pub fn mint_delegation_token(keypair: &Keypair, user_did: &str, space: &SpaceId)
     let claims = SpaceClaims {
         iss: user_did.to_string(),
         sub: space.uri(),
-        aud: Some(format!("{}#atproto_space_host", space.authority)),
+        aud: Some(format!("{}#atproto_pds", space.authority)),
         iat: now,
         exp: now + DELEGATION_TTL_SECS,
         jti: get_random_str(),
@@ -774,7 +796,7 @@ mod tests {
         let token = mint_space_service_token(
             &keypair,
             "did:plc:writer",
-            "did:plc:auth#atproto_space_host",
+            "did:plc:auth#atproto_pds",
             NOTIFY_WRITE_LXM,
         )
         .unwrap();
@@ -788,7 +810,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(claims.iss, "did:plc:writer");
-        assert_eq!(claims.aud, "did:plc:auth#atproto_space_host");
+        assert_eq!(claims.aud, "did:plc:auth#atproto_pds");
 
         // wrong lxm
         let err = verify_space_service_token(
