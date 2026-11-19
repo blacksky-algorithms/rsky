@@ -45,9 +45,10 @@ pub async fn space_get_blob(
         false,
     )
     .await?;
+    // Tombstone gate only. An unreferenced blob yields `BlobNotFound` below.
     reader
         .space
-        .live_repo_state(&space_id.uri())
+        .readable_repo_state(&space_id.uri())
         .await
         .map_err(space_error)?;
     let referenced = reader
