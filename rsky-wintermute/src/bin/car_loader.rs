@@ -410,11 +410,12 @@ async fn run_full_load(args: Args, pool: Pool) -> Result<()> {
     let _ = state_thread.join();
 
     tracing::info!(
-        "done: repos done={}, failed={}, records={}, record failures={}",
+        "done: repos done={}, failed={}, records={}, record failures={}, repeated likes skipped={}",
         counters.repos_done.load(Ordering::Relaxed),
         counters.repos_failed.load(Ordering::Relaxed),
         counters.records_written.load(Ordering::Relaxed),
         counters.records_failed.load(Ordering::Relaxed),
+        rsky_wintermute::metrics::INDEXER_REPEATED_LIKES_TOTAL.get(),
     );
     Ok(())
 }

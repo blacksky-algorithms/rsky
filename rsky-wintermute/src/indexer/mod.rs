@@ -3718,6 +3718,9 @@ impl IndexerManager {
             }
         }
 
+        let repeated = bulk::drop_repeated_likes(&mut like_data);
+        metrics::INDEXER_REPEATED_LIKES_TOTAL.inc_by(repeated as u64);
+
         // The notification insert is independent of the like rows (ungated,
         // deduped), so it runs on its own connection concurrently with the
         // bulk insert instead of serially extending the worker's cycle.

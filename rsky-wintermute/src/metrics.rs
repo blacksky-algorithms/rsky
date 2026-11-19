@@ -342,6 +342,14 @@ pub static INDEXER_LIKE_EVENTS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
     .unwrap()
 });
 
+pub static INDEXER_REPEATED_LIKES_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "indexer_repeated_likes_total",
+        "Likes not written because their batch already held one for the same subject and creator"
+    )
+    .unwrap()
+});
+
 pub static INDEXER_REPOST_EVENTS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
     register_int_counter!(
         "indexer_repost_events_total",

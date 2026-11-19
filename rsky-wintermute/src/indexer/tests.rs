@@ -2736,6 +2736,120 @@ mod indexer_tests {
     }
 
     #[tokio::test]
+    async fn a_bulk_batch_without_the_like_constraint_keeps_one_row_per_subject() {
+        use crate::types::IndexJob;
+
+        // A `like` table with no `(subject, creator)` constraint, ahead of the
+        // real one on this pool's search path only.
+        let pool = setup_test_pool();
+        pool.get()
+            .await
+            .unwrap()
+            .batch_execute(
+                "CREATE SCHEMA IF NOT EXISTS likes_without_unique;
+                 CREATE TABLE IF NOT EXISTS likes_without_unique.\"like\"
+                   (LIKE public.\"like\" INCLUDING DEFAULTS INCLUDING GENERATED);
+                 CREATE UNIQUE INDEX IF NOT EXISTS like_uri_idx
+                   ON likes_without_unique.\"like\" (uri);",
+            )
+            .await
+            .unwrap();
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://postgres:postgres@localhost:5432/bsky_test".to_owned()
+        });
+        let separator = if database_url.contains('?') { '&' } else { '?' };
+        let unconstrained = crate::config::create_pg_pool(
+            &format!(
+                "{database_url}{separator}options=-csearch_path%3Dlikes_without_unique,public"
+            ),
+            crate::config::pg_pool_config(16),
+        )
+        .expect("test pool builds");
+
+        let liker = "did:plc:wintermute-test-repeated-liker";
+        cleanup_test_data(&pool, liker).await;
+        let client = pool.get().await.unwrap();
+        client
+            .execute(
+                "DELETE FROM likes_without_unique.\"like\" WHERE creator = $1",
+                &[&liker],
+            )
+            .await
+            .unwrap();
+        let post = "at://did:plc:wintermute-test-repeated-author/app.bsky.feed.post/p1";
+        let cid = "bafyreihhl5mpvjkrhnnagen2fomozzhnhhdq2jr6cego2nzbvmwewv5rd4";
+        let ts = "2026-11-18T00:00:00.000Z";
+        let like = |rkey: &str, subject: &str| {
+            let uri = format!("at://{liker}/app.bsky.feed.like/{rkey}");
+            let job = IndexJob {
+                uri: uri.clone(),
+                cid: cid.to_owned(),
+                action: WriteAction::Create,
+                record: Some(serde_json::json!({
+                    "$type": "app.bsky.feed.like",
+                    "subject": {"uri": subject, "cid": cid},
+                    "createdAt": ts,
+                })),
+                indexed_at: ts.to_owned(),
+                rev: "3repeated".to_owned(),
+                provenance: None,
+            };
+            (uri.into_bytes(), job)
+        };
+        let jobs = vec![
+            like("first", post),
+            like("second", post),
+            like("empty1", ""),
+            like("empty2", ""),
+        ];
+
+        let (results, batch_failed) =
+            IndexerManager::process_jobs_batch(&unconstrained, &jobs, true, false).await;
+
+        assert!(!batch_failed, "{results:?}");
+        assert!(results.iter().all(|(_, r)| r.is_ok()), "{results:?}");
+        let rows: Vec<(String, String)> = client
+            .query(
+                "SELECT uri, subject FROM likes_without_unique.\"like\" \
+                 WHERE creator = $1 ORDER BY uri",
+                &[&liker],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    format!("at://{liker}/app.bsky.feed.like/empty1"),
+                    String::new()
+                ),
+                (
+                    format!("at://{liker}/app.bsky.feed.like/first"),
+                    post.to_owned()
+                ),
+            ]
+        );
+        let records: i64 = client
+            .query_one("SELECT count(*) FROM record WHERE did = $1", &[&liker])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(records, 4);
+
+        client
+            .execute(
+                "DELETE FROM likes_without_unique.\"like\" WHERE creator = $1",
+                &[&liker],
+            )
+            .await
+            .unwrap();
+        cleanup_test_data(&pool, liker).await;
+    }
+
+    #[tokio::test]
     async fn batch_toggle_sequence_keeps_final_like_and_exact_counts() {
         use crate::indexer::bulk::PostCopyRow;
         use crate::types::{IndexJob, WriteAction};

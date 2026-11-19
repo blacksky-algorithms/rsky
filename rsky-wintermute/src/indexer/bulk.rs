@@ -194,6 +194,22 @@ pub struct SubjectRecordRow {
     pub via_cid: Option<String>,
 }
 
+/// Drops every like after a batch's first for the same `(subject, creator)`
+/// and returns how many were dropped. The like kept is the one the unique
+/// constraint keeps, so a table loaded before that constraint is built holds
+/// the same rows as one loaded after.
+pub fn drop_repeated_likes(rows: &mut Vec<SubjectRecordRow>) -> usize {
+    let mut seen = std::collections::HashSet::with_capacity(rows.len());
+    let mut first: Vec<bool> = rows
+        .iter()
+        .map(|row| seen.insert((row.subject.as_str(), row.creator.as_str())))
+        .collect();
+    first.reverse();
+    let before = rows.len();
+    rows.retain(|_| first.pop().unwrap_or(true));
+    before - rows.len()
+}
+
 /// A follow row for bulk `COPY`: DID subject plus optional via attribution.
 pub struct FollowCopyRow {
     pub uri: String,
@@ -455,7 +471,7 @@ pub async fn copy_insert_records(
             .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
-    sink.send(bytes::Bytes::from(buffer)).await?;
+    send_copy(sink.as_mut(), buffer).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
@@ -535,7 +551,7 @@ pub async fn copy_ensure_actors(
             .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
-    sink.send(bytes::Bytes::from(buffer)).await?;
+    send_copy(sink.as_mut(), buffer).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
@@ -618,7 +634,7 @@ pub async fn copy_insert_posts(
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
-    sink.send(bytes::Bytes::from(buffer)).await?;
+    send_copy(sink.as_mut(), buffer).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
@@ -728,7 +744,7 @@ pub async fn copy_insert_feed_items(
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
-    sink.send(bytes::Bytes::from(buffer)).await?;
+    send_copy(sink.as_mut(), buffer).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
@@ -807,7 +823,7 @@ pub async fn copy_insert_likes(
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
-    sink.send(bytes::Bytes::from(buffer)).await?;
+    send_copy(sink.as_mut(), buffer).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
@@ -903,7 +919,7 @@ pub async fn copy_insert_follows(
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
-    sink.send(bytes::Bytes::from(buffer)).await?;
+    send_copy(sink.as_mut(), buffer).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
@@ -1024,7 +1040,7 @@ pub async fn copy_insert_reposts(
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
-    sink.send(bytes::Bytes::from(buffer)).await?;
+    send_copy(sink.as_mut(), buffer).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
@@ -1116,7 +1132,7 @@ pub async fn copy_insert_quotes(
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
-    sink.send(bytes::Bytes::from(buffer)).await?;
+    send_copy(sink.as_mut(), buffer).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
@@ -1202,7 +1218,7 @@ pub async fn copy_insert_blocks(
         .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
-    sink.send(bytes::Bytes::from(buffer)).await?;
+    send_copy(sink.as_mut(), buffer).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
@@ -1276,7 +1292,7 @@ pub async fn copy_insert_post_embed_images(
             .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
-    sink.send(bytes::Bytes::from(buffer)).await?;
+    send_copy(sink.as_mut(), buffer).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
@@ -1352,7 +1368,7 @@ pub async fn copy_insert_post_embed_videos(
             .map_err(|e| WintermuteError::Other(format!("buffer write error: {e}")))?;
     }
 
-    sink.send(bytes::Bytes::from(buffer)).await?;
+    send_copy(sink.as_mut(), buffer).await?;
     sink.close().await?;
     let copy_ms = copy_start.elapsed().as_millis();
 
@@ -1385,8 +1401,122 @@ pub async fn copy_insert_post_embed_videos(
     Ok(())
 }
 
+/// Most COPY bytes sent as one protocol message; the server ends the
+/// connection on a message of 1 GiB or more.
+const COPY_CHUNK_BYTES: usize = 64 * 1024 * 1024;
+
+fn copy_chunks(buffer: Vec<u8>, max: usize) -> impl Iterator<Item = bytes::Bytes> {
+    let bytes = bytes::Bytes::from(buffer);
+    (0..bytes.len())
+        .step_by(max)
+        .map(move |start| bytes.slice(start..bytes.len().min(start + max)))
+}
+
+async fn send_copy(
+    mut sink: std::pin::Pin<&mut tokio_postgres::CopyInSink<bytes::Bytes>>,
+    buffer: Vec<u8>,
+) -> Result<(), tokio_postgres::Error> {
+    for chunk in copy_chunks(buffer, COPY_CHUNK_BYTES) {
+        sink.send(chunk).await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{SubjectRecordRow, copy_chunks, drop_repeated_likes};
+
+    fn like(rkey: &str, creator: &str, subject: &str) -> SubjectRecordRow {
+        SubjectRecordRow {
+            uri: format!("at://{creator}/app.bsky.feed.like/{rkey}"),
+            cid: String::new(),
+            creator: creator.to_owned(),
+            subject: subject.to_owned(),
+            subject_cid: String::new(),
+            created_at: String::new(),
+            indexed_at: String::new(),
+            via: None,
+            via_cid: None,
+        }
+    }
+
+    fn rkeys(rows: &[SubjectRecordRow]) -> Vec<&str> {
+        rows.iter()
+            .map(|row| row.uri.rsplit('/').next().unwrap_or(""))
+            .collect()
+    }
+
+    #[test]
+    fn the_first_like_of_a_subject_and_creator_is_the_one_kept() {
+        let post = "at://did:plc:author/app.bsky.feed.post/1";
+        let other = "at://did:plc:author/app.bsky.feed.post/2";
+        let mut rows = vec![
+            like("a", "did:plc:one", post),
+            like("b", "did:plc:one", other),
+            like("c", "did:plc:one", post),
+            like("d", "did:plc:two", post),
+            like("e", "did:plc:one", post),
+            like("f", "did:plc:two", post),
+        ];
+
+        assert_eq!(drop_repeated_likes(&mut rows), 3);
+        assert_eq!(rkeys(&rows), vec!["a", "b", "d"]);
+    }
+
+    #[test]
+    fn likes_without_a_subject_repeat_like_any_other() {
+        let mut rows = vec![
+            like("a", "did:plc:one", ""),
+            like("b", "did:plc:one", ""),
+            like("c", "did:plc:two", ""),
+        ];
+
+        assert_eq!(drop_repeated_likes(&mut rows), 1);
+        assert_eq!(rkeys(&rows), vec!["a", "c"]);
+    }
+
+    #[test]
+    fn distinct_likes_are_all_kept() {
+        let mut rows = vec![
+            like(
+                "a",
+                "did:plc:one",
+                "at://did:plc:author/app.bsky.feed.post/1",
+            ),
+            like(
+                "b",
+                "did:plc:one",
+                "at://did:plc:author/app.bsky.feed.post/2",
+            ),
+        ];
+
+        assert_eq!(drop_repeated_likes(&mut rows), 0);
+        assert_eq!(rkeys(&rows), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn copy_chunks_split_a_buffer_in_order() {
+        let chunks: Vec<_> = copy_chunks(b"abcdefgh".to_vec(), 3).collect();
+        assert_eq!(chunks, vec![&b"abc"[..], &b"def"[..], &b"gh"[..]]);
+    }
+
+    #[test]
+    fn copy_chunks_keep_an_exact_multiple_whole() {
+        let chunks: Vec<_> = copy_chunks(b"abcdef".to_vec(), 3).collect();
+        assert_eq!(chunks, vec![&b"abc"[..], &b"def"[..]]);
+    }
+
+    #[test]
+    fn copy_chunks_pass_a_small_buffer_through() {
+        let chunks: Vec<_> = copy_chunks(b"ab".to_vec(), 3).collect();
+        assert_eq!(chunks, vec![&b"ab"[..]]);
+    }
+
+    #[test]
+    fn copy_chunks_of_nothing_are_none() {
+        assert_eq!(copy_chunks(Vec::new(), 3).count(), 0);
+    }
+
     // A table truncated but not declared fails on a fresh connection, not in review.
     #[test]
     fn every_truncated_staging_table_is_declared() {
