@@ -4,6 +4,7 @@ use crate::account_manager::helpers::auth::{
 };
 use crate::account_manager::AccountManager;
 use crate::apis::ApiError;
+use crate::config::service_did;
 use crate::permission_set::SharedPermissionSets;
 use crate::xrpc_server::auth::{verify_jwt as verify_service_jwt_server, ServiceJwtPayload};
 use crate::SharedIdResolver;
@@ -196,7 +197,7 @@ impl<'r> FromRequest<'r> for Refresh {
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
         let options = SessionVerifyOptions {
-            audience: Some(env::var("PDS_SERVICE_DID").unwrap()),
+            audience: Some(service_did()),
             allow_expired: false,
         };
 
@@ -631,7 +632,7 @@ impl<'r> FromRequest<'r> for RevokeRefreshToken {
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
         // a session may be deleted with an expired refresh token
         let options = SessionVerifyOptions {
-            audience: Some(env::var("PDS_SERVICE_DID").unwrap()),
+            audience: Some(service_did()),
             allow_expired: true,
         };
 
@@ -665,7 +666,7 @@ async fn verify_user_service_jwt(req: &Request<'_>) -> Result<VerifiedServiceJwt
         req,
         id_resolver,
         ServiceJwtOpts {
-            aud: Some(env::var("PDS_SERVICE_DID").unwrap()),
+            aud: Some(service_did()),
             iss: None,
         },
     )
@@ -814,7 +815,7 @@ impl<'r> FromRequest<'r> for ModService {
             .await
             {
                 Ok(payload)
-                    if Some(payload.aud.clone()) != env_str("PDS_SERVICE_DID")
+                    if payload.aud != service_did()
                         && (env_str("PDS_ENTRYWAY_DID").is_none()
                             || Some(payload.aud.clone()) != env_str("PDS_ENTRYWAY_DID")) =>
                 {
@@ -986,7 +987,7 @@ pub async fn validate_bearer_access_token(
     scopes: Vec<AuthScope>,
 ) -> Result<AccessOutput> {
     let options = SessionVerifyOptions {
-        audience: Some(env::var("PDS_SERVICE_DID")?),
+        audience: Some(service_did()),
         allow_expired: false,
     };
 
@@ -1179,7 +1180,7 @@ async fn validate_dpop_access_token(
             granted_scopes: Some(granted_scopes),
             did: Some(verified.did),
             scope: Some(scope),
-            audience: Some(env::var("PDS_SERVICE_DID")?),
+            audience: Some(service_did()),
             token_id: Some(verified.token_id),
             aud: None,
             iss: None,
@@ -1245,7 +1246,7 @@ pub async fn validate_access_token(
         return validate_dpop_access_token(request, token, scopes, opts).await;
     }
     let options = SessionVerifyOptions {
-        audience: Some(env::var("PDS_SERVICE_DID")?),
+        audience: Some(service_did()),
         allow_expired: false,
     };
 

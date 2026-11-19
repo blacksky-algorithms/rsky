@@ -19,7 +19,7 @@ pub async fn describe_server(
     let contact_email_address = env_str("PDS_CONTACT_EMAIL_ADDRESS");
 
     Ok(Json(DescribeServerOutput {
-        did: env_str("PDS_SERVICE_DID").unwrap(),
+        did: cfg.service.did.clone(),
         available_user_domains,
         invite_code_required,
         phone_verification_required: None,

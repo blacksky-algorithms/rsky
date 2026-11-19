@@ -8,6 +8,7 @@ use crate::account_manager::helpers::invite::CodeDetail;
 use crate::account_manager::helpers::password::{AppPassDescript, UpdateUserPasswordOpts};
 use crate::account_manager::helpers::repo;
 use crate::auth_verifier::AuthScope;
+use crate::config::service_did;
 use crate::db::sqlite::Db;
 use crate::models::models::EmailTokenPurpose;
 use anyhow::Result;
@@ -25,7 +26,6 @@ use rsky_common::RFC3339_VARIANT;
 use rsky_lexicon::com::atproto::admin::StatusAttr;
 use rsky_lexicon::com::atproto::server::{AccountCodes, CreateAppPasswordOutput};
 use std::collections::BTreeMap;
-use std::env;
 use std::time::SystemTime;
 
 fn format_micros(micros: i64) -> Result<String> {
@@ -169,7 +169,7 @@ impl AccountManager {
 
         let (access_jwt, refresh_jwt) = auth::create_tokens(CreateTokensOpts {
             did: did.clone(),
-            service_did: env::var("PDS_SERVICE_DID").unwrap(),
+            service_did: service_did(),
             scope: Some(AuthScope::Access),
             jti: None,
             expires_in_secs: None,
@@ -309,7 +309,7 @@ impl AccountManager {
         let scope = auth::format_scope(app_password.as_ref(), is_soft_deleted);
         let (access_jwt, refresh_jwt) = auth::create_tokens(CreateTokensOpts {
             did,
-            service_did: env::var("PDS_SERVICE_DID").unwrap(),
+            service_did: service_did(),
             scope: Some(scope),
             jti: None,
             expires_in_secs: None,
@@ -360,7 +360,7 @@ impl AccountManager {
 
         let (access_jwt, refresh_jwt) = auth::create_tokens(CreateTokensOpts {
             did: token.did,
-            service_did: env::var("PDS_SERVICE_DID").unwrap(),
+            service_did: service_did(),
             scope: Some(auth::format_scope(token.app_password.as_ref(), false)),
             jti: Some(next_id.clone()),
             expires_in_secs: None,
