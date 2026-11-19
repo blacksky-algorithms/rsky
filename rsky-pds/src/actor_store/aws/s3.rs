@@ -1,5 +1,5 @@
 // based on https://github.com/bluesky-social/atproto/blob/main/packages/aws/src/s3.ts
-use crate::actor_store::blobstore::{BlobStore, DeleteError, ObjectKind};
+use crate::actor_store::blobstore::{BlobStore, BoxedBlobStream, DeleteError, ObjectKind};
 use crate::blob_attempts::{AttemptJournal, AttemptOutcome};
 use anyhow::Result;
 use aws_config::retry::RetryConfig;
@@ -491,8 +491,12 @@ impl BlobStore for S3BlobStore {
         Box::pin(S3BlobStore::get_bytes(self, cid))
     }
 
-    fn get_stream(&self, cid: Cid) -> BoxFuture<'_, Result<ByteStream>> {
-        Box::pin(S3BlobStore::get_stream(self, cid))
+    fn get_stream(&self, cid: Cid) -> BoxFuture<'_, Result<BoxedBlobStream>> {
+        Box::pin(async move {
+            S3BlobStore::get_stream(self, cid)
+                .await
+                .map(|body| rsky_blobstore::boxed_read_stream(body.into_async_read()))
+        })
     }
 
     fn has_temp(&self, key: String) -> BoxFuture<'_, Result<bool>> {
@@ -684,5 +688,7 @@ mod tests {
         assert!(bare.delete_many(vec![cid]).await.is_err());
         assert!(bare.make_permanent("k".to_owned(), cid).await.is_err());
         assert!(bare.quarantine(cid).await.is_err());
+        // the streamed body is boxed through the crate's adapter
+        assert!(BlobStore::get_stream(&store, cid).await.is_err());
     }
 }
