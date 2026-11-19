@@ -194,6 +194,22 @@ pub struct SubjectRecordRow {
     pub via_cid: Option<String>,
 }
 
+/// Drops every like after a batch's first for the same `(subject, creator)`
+/// and returns how many were dropped. The like kept is the one the unique
+/// constraint keeps, so a table loaded before that constraint is built holds
+/// the same rows as one loaded after.
+pub fn drop_repeated_likes(rows: &mut Vec<SubjectRecordRow>) -> usize {
+    let mut seen = std::collections::HashSet::with_capacity(rows.len());
+    let mut first: Vec<bool> = rows
+        .iter()
+        .map(|row| seen.insert((row.subject.as_str(), row.creator.as_str())))
+        .collect();
+    first.reverse();
+    let before = rows.len();
+    rows.retain(|_| first.pop().unwrap_or(true));
+    before - rows.len()
+}
+
 /// A follow row for bulk `COPY`: DID subject plus optional via attribution.
 pub struct FollowCopyRow {
     pub uri: String,
@@ -1408,7 +1424,75 @@ async fn send_copy(
 
 #[cfg(test)]
 mod tests {
-    use super::copy_chunks;
+    use super::{SubjectRecordRow, copy_chunks, drop_repeated_likes};
+
+    fn like(rkey: &str, creator: &str, subject: &str) -> SubjectRecordRow {
+        SubjectRecordRow {
+            uri: format!("at://{creator}/app.bsky.feed.like/{rkey}"),
+            cid: String::new(),
+            creator: creator.to_owned(),
+            subject: subject.to_owned(),
+            subject_cid: String::new(),
+            created_at: String::new(),
+            indexed_at: String::new(),
+            via: None,
+            via_cid: None,
+        }
+    }
+
+    fn rkeys(rows: &[SubjectRecordRow]) -> Vec<&str> {
+        rows.iter()
+            .map(|row| row.uri.rsplit('/').next().unwrap_or(""))
+            .collect()
+    }
+
+    #[test]
+    fn the_first_like_of_a_subject_and_creator_is_the_one_kept() {
+        let post = "at://did:plc:author/app.bsky.feed.post/1";
+        let other = "at://did:plc:author/app.bsky.feed.post/2";
+        let mut rows = vec![
+            like("a", "did:plc:one", post),
+            like("b", "did:plc:one", other),
+            like("c", "did:plc:one", post),
+            like("d", "did:plc:two", post),
+            like("e", "did:plc:one", post),
+            like("f", "did:plc:two", post),
+        ];
+
+        assert_eq!(drop_repeated_likes(&mut rows), 3);
+        assert_eq!(rkeys(&rows), vec!["a", "b", "d"]);
+    }
+
+    #[test]
+    fn likes_without_a_subject_repeat_like_any_other() {
+        let mut rows = vec![
+            like("a", "did:plc:one", ""),
+            like("b", "did:plc:one", ""),
+            like("c", "did:plc:two", ""),
+        ];
+
+        assert_eq!(drop_repeated_likes(&mut rows), 1);
+        assert_eq!(rkeys(&rows), vec!["a", "c"]);
+    }
+
+    #[test]
+    fn distinct_likes_are_all_kept() {
+        let mut rows = vec![
+            like(
+                "a",
+                "did:plc:one",
+                "at://did:plc:author/app.bsky.feed.post/1",
+            ),
+            like(
+                "b",
+                "did:plc:one",
+                "at://did:plc:author/app.bsky.feed.post/2",
+            ),
+        ];
+
+        assert_eq!(drop_repeated_likes(&mut rows), 0);
+        assert_eq!(rkeys(&rows), vec!["a", "b"]);
+    }
 
     #[test]
     fn copy_chunks_split_a_buffer_in_order() {

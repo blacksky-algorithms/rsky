@@ -2736,6 +2736,79 @@ mod indexer_tests {
     }
 
     #[tokio::test]
+    async fn a_bulk_batch_keeps_every_like_record_and_one_like_row_per_subject() {
+        use crate::types::IndexJob;
+
+        let pool = setup_test_pool();
+        let liker = "did:plc:wintermute-test-repeated-liker";
+        cleanup_test_data(&pool, liker).await;
+        let post = "at://did:plc:wintermute-test-repeated-author/app.bsky.feed.post/p1";
+        let cid = "bafyreihhl5mpvjkrhnnagen2fomozzhnhhdq2jr6cego2nzbvmwewv5rd4";
+        let ts = "2026-11-18T00:00:00.000Z";
+        let like = |rkey: &str, subject: &str| {
+            let uri = format!("at://{liker}/app.bsky.feed.like/{rkey}");
+            let job = IndexJob {
+                uri: uri.clone(),
+                cid: cid.to_owned(),
+                action: WriteAction::Create,
+                record: Some(serde_json::json!({
+                    "$type": "app.bsky.feed.like",
+                    "subject": {"uri": subject, "cid": cid},
+                    "createdAt": ts,
+                })),
+                indexed_at: ts.to_owned(),
+                rev: "3repeated".to_owned(),
+                provenance: None,
+            };
+            (uri.into_bytes(), job)
+        };
+        let jobs = vec![
+            like("first", post),
+            like("second", post),
+            like("empty1", ""),
+            like("empty2", ""),
+        ];
+
+        let (results, batch_failed) =
+            IndexerManager::process_jobs_batch(&pool, &jobs, true, false).await;
+
+        assert!(!batch_failed);
+        assert!(results.iter().all(|(_, r)| r.is_ok()), "{results:?}");
+        let client = pool.get().await.unwrap();
+        let rows: Vec<(String, String)> = client
+            .query(
+                "SELECT uri, subject FROM \"like\" WHERE creator = $1 ORDER BY uri",
+                &[&liker],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    format!("at://{liker}/app.bsky.feed.like/empty1"),
+                    String::new()
+                ),
+                (
+                    format!("at://{liker}/app.bsky.feed.like/first"),
+                    post.to_owned()
+                ),
+            ]
+        );
+        let records: i64 = client
+            .query_one("SELECT count(*) FROM record WHERE did = $1", &[&liker])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(records, 4);
+
+        cleanup_test_data(&pool, liker).await;
+    }
+
+    #[tokio::test]
     async fn batch_toggle_sequence_keeps_final_like_and_exact_counts() {
         use crate::indexer::bulk::PostCopyRow;
         use crate::types::{IndexJob, WriteAction};

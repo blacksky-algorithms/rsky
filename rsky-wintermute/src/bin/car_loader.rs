@@ -109,7 +109,6 @@ struct ParsedRepo {
     did: String,
     jobs: Vec<IndexJob>,
     record_failures: Vec<RecordFailure>,
-    repeated_likes: usize,
 }
 
 struct RecordFailure {
@@ -136,7 +135,6 @@ struct Counters {
     repos_failed: AtomicU64,
     records_written: AtomicU64,
     records_failed: AtomicU64,
-    repeated_likes: AtomicU64,
 }
 
 #[tokio::main]
@@ -264,37 +262,11 @@ async fn parse_repo_to_jobs(
         }
     }
 
-    let repeated_likes = drop_repeated_like_subjects(&mut jobs);
-
     Ok(ParsedRepo {
         did,
         jobs,
         record_failures,
-        repeated_likes,
     })
-}
-
-/// Drops every like after a repo's first for the same subject and returns how
-/// many were dropped. A repo holds every like its actor made, so this is the
-/// whole of what the `(subject, creator)` unique constraint would reject; jobs
-/// arrive in record-key order, so the like kept is the one the constraint keeps.
-fn drop_repeated_like_subjects(jobs: &mut Vec<IndexJob>) -> usize {
-    let mut seen = std::collections::HashSet::new();
-    let before = jobs.len();
-    jobs.retain(|job| {
-        if uri_collection(&job.uri) != Some("app.bsky.feed.like") {
-            return true;
-        }
-        let subject = job
-            .record
-            .as_ref()
-            .and_then(|record| record.get("subject"))
-            .and_then(|subject| subject.get("uri"))
-            .and_then(|uri| uri.as_str())
-            .unwrap_or("");
-        subject.is_empty() || seen.insert(subject.to_owned())
-    });
-    before - jobs.len()
 }
 
 /// Run the full load: enqueue repos from the manifest, parse them in worker tasks, and write the
@@ -341,9 +313,6 @@ async fn run_full_load(args: Args, pool: Pool) -> Result<()> {
                         .await;
                 match parse_result {
                     Ok(Ok(mut parsed)) => {
-                        counters
-                            .repeated_likes
-                            .fetch_add(parsed.repeated_likes as u64, Ordering::Relaxed);
                         let failures = std::mem::take(&mut parsed.record_failures);
                         if !failures.is_empty() {
                             counters
@@ -441,12 +410,12 @@ async fn run_full_load(args: Args, pool: Pool) -> Result<()> {
     let _ = state_thread.join();
 
     tracing::info!(
-        "done: repos done={}, failed={}, records={}, record failures={}, repeated likes dropped={}",
+        "done: repos done={}, failed={}, records={}, record failures={}, repeated likes skipped={}",
         counters.repos_done.load(Ordering::Relaxed),
         counters.repos_failed.load(Ordering::Relaxed),
         counters.records_written.load(Ordering::Relaxed),
         counters.records_failed.load(Ordering::Relaxed),
-        counters.repeated_likes.load(Ordering::Relaxed),
+        rsky_wintermute::metrics::INDEXER_REPEATED_LIKES_TOTAL.get(),
     );
     Ok(())
 }
@@ -837,10 +806,9 @@ async fn load_single_repo(args: &Args, pool: &Pool, did: &str) -> Result<()> {
     tracing::info!("processing {did} from {}", row.path);
     let parsed = parse_repo_to_jobs(&args.car_dump_dir, &row).await?;
     tracing::info!(
-        "parsed {} records, {} record failures, {} repeated likes dropped",
+        "parsed {} records, {} record failures",
         parsed.jobs.len(),
-        parsed.record_failures.len(),
-        parsed.repeated_likes
+        parsed.record_failures.len()
     );
     for f in &parsed.record_failures {
         tracing::warn!("record failure {}: {}", f.uri, f.error);
@@ -868,78 +836,7 @@ async fn load_single_repo(args: &Args, pool: &Pool, did: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        collection_tables, drop_repeated_like_subjects, manifest_rev_is_newer, uri_collection,
-    };
-    use rsky_wintermute::types::{IndexJob, WriteAction};
-
-    fn job(uri: &str, record: Option<serde_json::Value>) -> IndexJob {
-        IndexJob {
-            uri: uri.to_owned(),
-            cid: String::new(),
-            action: WriteAction::Create,
-            record,
-            indexed_at: String::new(),
-            rev: String::new(),
-            provenance: None,
-        }
-    }
-
-    fn like(rkey: &str, subject: &str) -> IndexJob {
-        job(
-            &format!("at://did:plc:liker/app.bsky.feed.like/{rkey}"),
-            Some(serde_json::json!({ "subject": { "uri": subject, "cid": "bafy" } })),
-        )
-    }
-
-    fn uris(jobs: &[IndexJob]) -> Vec<&str> {
-        jobs.iter().map(|job| job.uri.as_str()).collect()
-    }
-
-    #[test]
-    fn the_first_like_of_a_subject_is_the_one_kept() {
-        let mut jobs = vec![
-            like("3aaa", "at://did:plc:a/app.bsky.feed.post/1"),
-            like("3bbb", "at://did:plc:a/app.bsky.feed.post/2"),
-            like("3ccc", "at://did:plc:a/app.bsky.feed.post/1"),
-            like("3ddd", "at://did:plc:a/app.bsky.feed.post/1"),
-        ];
-
-        assert_eq!(drop_repeated_like_subjects(&mut jobs), 2);
-        assert_eq!(
-            uris(&jobs),
-            vec![
-                "at://did:plc:liker/app.bsky.feed.like/3aaa",
-                "at://did:plc:liker/app.bsky.feed.like/3bbb",
-            ]
-        );
-    }
-
-    #[test]
-    fn only_likes_with_a_subject_are_compared() {
-        let subject = "at://did:plc:a/app.bsky.feed.post/1";
-        let repost = |rkey: &str| {
-            job(
-                &format!("at://did:plc:liker/app.bsky.feed.repost/{rkey}"),
-                Some(serde_json::json!({ "subject": { "uri": subject } })),
-            )
-        };
-        let mut jobs = vec![
-            like("3aaa", subject),
-            repost("3bbb"),
-            repost("3ccc"),
-            like("3ddd", ""),
-            like("3eee", ""),
-            job("at://did:plc:liker/app.bsky.feed.like/3fff", None),
-            job(
-                "at://did:plc:liker/app.bsky.feed.like/3ggg",
-                Some(serde_json::json!({ "subject": "not an object" })),
-            ),
-        ];
-
-        assert_eq!(drop_repeated_like_subjects(&mut jobs), 0);
-        assert_eq!(jobs.len(), 7);
-    }
+    use super::{collection_tables, manifest_rev_is_newer, uri_collection};
 
     #[test]
     fn rev_compare_decides_delta_load() {
