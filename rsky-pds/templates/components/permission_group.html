@@ -1,4 +1,4 @@
-<div class="description-card permission-group" role="listitem">
+<div class="description-card permission-group{% if !group.nsid.is_empty() %} permission-group--{{ group.set_slug() }}{% endif %}"{% if !group.nsid.is_empty() %} data-permission-set="{{ group.nsid }}"{% endif %} role="listitem">
   <span class="avatar avatar-sm">{% if group.icon == "mail" %}{% include "icons/mail.svg.html" %}{% else if group.icon == "id-card" %}{% include "icons/id-card.svg.html" %}{% else if group.icon == "user" %}{% include "icons/user.svg.html" %}{% else if group.icon == "layout-grid" %}{% include "icons/layout-grid.svg.html" %}{% else if group.icon == "message-circle-more" %}{% include "icons/message-circle-more.svg.html" %}{% else if group.icon == "badge-check" %}{% include "icons/badge-check.svg.html" %}{% else if group.icon == "book-open" %}{% include "icons/book-open.svg.html" %}{% else %}{% include "icons/atom.svg.html" %}{% endif %}</span>
   <div class="description-body">
     <div class="row between top">

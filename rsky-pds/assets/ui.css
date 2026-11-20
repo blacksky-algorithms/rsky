@@ -354,6 +354,7 @@ a.item:hover, button.item:hover { background: var(--muted); }
 
 .permission-groups { display: flex; flex-direction: column; gap: 0.5rem; }
 .permission-group { display: flex; flex-direction: column; align-items: stretch; gap: 0.5rem; }
+.permission-group[data-permission-set] { position: relative; }
 .permission-intro { color: var(--muted-foreground); font-size: 0.8125rem; }
 .table-wrap { width: 100%; overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-lg); }
 .table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; }
