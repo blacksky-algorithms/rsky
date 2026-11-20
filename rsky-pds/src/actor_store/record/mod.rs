@@ -143,6 +143,16 @@ pub fn index_record_in(
     } else if rkey.is_empty() {
         bail!("Expected indexed URI to contain a record key")
     }
+    // Whether this uri already had a row decides the collection counter below:
+    // a create names a new record, while an update (or a replayed create) does
+    // not change which collections the repo has.
+    let previous_collection: Option<String> = conn
+        .query_row(
+            "SELECT collection FROM record WHERE uri = ?1",
+            [uri.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
     conn.execute(
         "INSERT INTO record (uri, cid, collection, rkey, \"repoRev\", \"indexedAt\") \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
@@ -159,6 +169,13 @@ pub fn index_record_in(
             indexed_at
         ],
     )?;
+    if matches!(action, WriteOpAction::Create) && previous_collection.is_none() {
+        conn.execute(
+            "INSERT INTO collection_count (collection, n) VALUES (?1, 1) \
+             ON CONFLICT (collection) DO UPDATE SET n = n + 1",
+            rusqlite::params![collection],
+        )?;
+    }
     if let Some(record) = record {
         let backlinks = get_backlinks(uri, record)?;
         // an update recreates the record's backlinks from scratch, so a
@@ -174,7 +191,21 @@ pub fn index_record_in(
 /// Removes a record and its backlinks on a connection inside a transaction.
 pub fn delete_record_in(conn: &rusqlite::Connection, uri: &AtUri) -> Result<()> {
     tracing::debug!("deleting indexed record {uri}");
-    conn.execute("DELETE FROM record WHERE uri = ?1", [uri.to_string()])?;
+    let collection = uri.get_collection();
+    let removed = conn.execute("DELETE FROM record WHERE uri = ?1", [uri.to_string()])?;
+    // A delete of a row that was not there must not decrement the counter, and a
+    // collection that loses its last record must leave the list `describeRepo`
+    // returns rather than sit there at zero.
+    if removed > 0 {
+        conn.execute(
+            "UPDATE collection_count SET n = n - 1 WHERE collection = ?1",
+            rusqlite::params![collection],
+        )?;
+        conn.execute(
+            "DELETE FROM collection_count WHERE collection = ?1 AND n <= 0",
+            rusqlite::params![collection],
+        )?;
+    }
     conn.execute("DELETE FROM backlink WHERE uri = ?1", [uri.to_string()])?;
     Ok(())
 }
@@ -210,7 +241,12 @@ impl RecordReader {
     pub async fn list_collections(&mut self) -> Result<Vec<String>> {
         self.db
             .run(|conn| {
-                let mut stmt = conn.prepare("SELECT collection FROM record GROUP BY collection")?;
+                // Reads the counter the write path maintains instead of grouping
+                // `record`: that GROUP BY is a full index scan, which on a store
+                // of a few hundred thousand records is tens of seconds.
+                let mut stmt = conn.prepare(
+                    "SELECT collection FROM collection_count WHERE n > 0 ORDER BY collection",
+                )?;
                 let collections = stmt
                     .query_map([], |row| row.get::<_, String>(0))?
                     .collect::<Result<Vec<String>, rusqlite::Error>>()?;
@@ -693,6 +729,50 @@ mod tests {
             .await
             .unwrap();
         cid
+    }
+
+    // `describeRepo` serves this list, and on a store with hundreds of thousands
+    // of records grouping `record` is a full index scan. The counter that
+    // replaces it must stay exact across creates, replayed creates and deletes.
+    #[tokio::test]
+    async fn collection_count_tracks_creates_replays_and_deletes() {
+        let (_dir, mut reader) = test_reader().await;
+        let post = "at://did:example:alice/app.bsky.feed.post/3jt5vlkorlk2v";
+        let like = "at://did:example:alice/app.bsky.feed.like/3jt5vlkorlk2w";
+
+        index_with_block(&reader, post, post_record("hello"), "rev-1").await;
+        index_with_block(&reader, like, like_record(post), "rev-1").await;
+        assert_eq!(
+            reader.list_collections().await.unwrap(),
+            ["app.bsky.feed.like", "app.bsky.feed.post"]
+        );
+
+        // a replayed create of the same uri must not inflate the count
+        index_with_block(&reader, post, post_record("hello"), "rev-2").await;
+        assert_eq!(reader.record_count().await.unwrap(), 2);
+        assert_eq!(reader.list_collections().await.unwrap().len(), 2);
+
+        reader.delete_record(&at_uri(post)).await.unwrap();
+        assert_eq!(
+            reader.list_collections().await.unwrap(),
+            ["app.bsky.feed.like"]
+        );
+
+        reader.delete_record(&at_uri(like)).await.unwrap();
+        assert!(reader.list_collections().await.unwrap().is_empty());
+        // a collection that lost its last record leaves no zero row behind
+        let remaining: i64 = reader
+            .db
+            .run(|conn| {
+                Ok(
+                    conn.query_row("SELECT count(*) FROM collection_count", [], |row| {
+                        row.get(0)
+                    })?,
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0);
     }
 
     #[tokio::test]
