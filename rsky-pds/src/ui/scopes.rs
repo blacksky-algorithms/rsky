@@ -6,8 +6,9 @@
 
 use crate::oauth_scope::{
     parse_account_scope, parse_blob_scope, parse_identity_scope, parse_repo_scope, parse_rpc_scope,
-    AccountAction, OAuthScope, RepoAction,
+    AccountAction, OAuthScope, RepoAction, INCLUDE_PREFIX,
 };
+use crate::permission_set::IncludeScope;
 use crate::space_scope::SpaceScope;
 use std::collections::BTreeMap;
 
@@ -403,11 +404,69 @@ const INTRO_ON_BEHALF: &str =
 const INTRO_REPO: &str = "Your repository contains all the data publicly available on the AT Protocol network, such as posts, likes, and follows. It also contains data created through other apps you've signed into using this account. The application requests the permissions necessary to publish the following changes to your repository:";
 const INTRO_RPC: &str = "The AT Protocol network uses an authentication mechanism that allows to uniquely identify users when communicating with external services. This is typically used to retrieve or update data linked to your account, such as chat messages, feeds or moderation content. The application requests the permissions necessary to perform the following authenticated actions on your behalf:";
 
-/// Build the grouped view. `include_sets` maps each `include:<nsid>` token in
-/// `scopes` to its resolved set; a token missing from the map is shown by its
-/// NSID (the caller has already decided resolution failures abort the flow).
-/// `first_party` suppresses the identity-takeover warning, as the reference
-/// does for clients that are both trusted and the deployment's own.
+/// One `include:` scope as the card that describes it: the set's own prose and
+/// the grants its definition carries, or the NSID when the caller resolved no
+/// set for it.
+///
+/// The card names the set, so `nsid` is always the bare NSID: a token that
+/// carries the audience it was included with (`include:<nsid>?aud=...`) is
+/// parsed apart rather than shown, so `data-permission-set` and the per-set
+/// styling hook identify the set and not the grant it was issued in.
+fn included_set_card(
+    scope: &str,
+    include_sets: &BTreeMap<String, IncludeSetView>,
+) -> Option<PermissionGroup> {
+    // The map is keyed by the token after `include:` -- an NSID possibly
+    // followed by `?aud=...`, since the audience can narrow the grants the
+    // table below lists. A direct caller may key it by the bare NSID instead.
+    let raw = scope.strip_prefix(INCLUDE_PREFIX)?;
+    let nsid = &IncludeScope::parse(raw).ok()?.nsid;
+    let set = include_sets.get(raw).or_else(|| include_sets.get(nsid));
+    let icon = if nsid.starts_with("app.bsky.") {
+        "layout-grid"
+    } else if nsid.starts_with("chat.bsky.") {
+        "message-circle-more"
+    } else if nsid.starts_with("com.atproto.moderation.") {
+        "hand"
+    } else {
+        "atom"
+    };
+    let (title, description) = match set.and_then(|s| s.title.clone()) {
+        Some(title) => (
+            escape(&title),
+            set.and_then(|s| s.detail.clone())
+                .map(|d| escape(&d))
+                .unwrap_or_else(|| escape(nsid)),
+        ),
+        None => (
+            escape(nsid),
+            set.and_then(|s| s.detail.clone())
+                .map(|d| escape(&d))
+                .unwrap_or_default(),
+        ),
+    };
+    let inner = set
+        .map(|s| Permissions::from_scopes(&s.scopes))
+        .unwrap_or_default();
+    Some(PermissionGroup {
+        icon,
+        title,
+        description,
+        intro: Some(INTRO_ON_BEHALF.to_string()),
+        rpc_table: inner.rpc_table(),
+        repo_table: inner.repo_table(),
+        nsid: nsid.clone(),
+        ..PermissionGroup::default()
+    })
+}
+
+/// Build the grouped view. `include_sets` maps the token after `include:` in
+/// `scopes` -- an NSID, or `nsid?aud=...` when the include names an audience --
+/// to its resolved set, falling back to the bare NSID as key; a token missing
+/// from the map is shown by its NSID (the caller has already decided
+/// resolution failures abort the flow). `first_party` suppresses the
+/// identity-takeover warning, as the reference does for clients that are both
+/// trusted and the deployment's own.
 pub fn permission_groups(
     scopes: &[String],
     include_sets: &BTreeMap<String, IncludeSetView>,
@@ -513,44 +572,8 @@ pub fn permission_groups(
 
     // Included permission sets
     for scope in scopes {
-        if let OAuthScope::Include(nsid) = OAuthScope::parse(scope) {
-            let set = include_sets.get(scope).or_else(|| include_sets.get(&nsid));
-            let icon = if nsid.starts_with("app.bsky.") {
-                "layout-grid"
-            } else if nsid.starts_with("chat.bsky.") {
-                "message-circle-more"
-            } else if nsid.starts_with("com.atproto.moderation.") {
-                "hand"
-            } else {
-                "atom"
-            };
-            let (title, description) = match set.and_then(|s| s.title.clone()) {
-                Some(title) => (
-                    escape(&title),
-                    set.and_then(|s| s.detail.clone())
-                        .map(|d| escape(&d))
-                        .unwrap_or_else(|| escape(&nsid)),
-                ),
-                None => (
-                    escape(&nsid),
-                    set.and_then(|s| s.detail.clone())
-                        .map(|d| escape(&d))
-                        .unwrap_or_default(),
-                ),
-            };
-            let inner = set
-                .map(|s| Permissions::from_scopes(&s.scopes))
-                .unwrap_or_default();
-            grouping.groups.push(PermissionGroup {
-                icon,
-                title,
-                description,
-                intro: Some(INTRO_ON_BEHALF.to_string()),
-                rpc_table: inner.rpc_table(),
-                repo_table: inner.repo_table(),
-                nsid: nsid.clone(),
-                ..PermissionGroup::default()
-            });
+        if let Some(card) = included_set_card(scope, include_sets) {
+            grouping.groups.push(card);
         }
     }
 
@@ -829,7 +852,7 @@ mod tests {
     fn included_sets_render_from_their_definition() {
         let mut sets = BTreeMap::new();
         sets.insert(
-            "include:app.bulleted.spaceAccess".to_string(),
+            "app.bulleted.spaceAccess".to_string(),
             IncludeSetView {
                 title: Some("Bulleted <spaces>".into()),
                 detail: Some("Read the outlines.".into()),
@@ -892,6 +915,53 @@ mod tests {
         assert_eq!(g.groups[0].icon, "layout-grid");
         assert_eq!(g.groups[0].title, "Full");
         assert_eq!(g.groups[0].description, "app.bsky.authFull");
+    }
+
+    /// The card names the set. The audience it was included with selects which
+    /// grants resolve, but `data-permission-set` and the per-set styling hook
+    /// are built from the bare NSID, so a deployment can style the set rather
+    /// than one particular grant of it.
+    #[test]
+    fn an_included_sets_audience_never_reaches_the_card() {
+        let mut sets = BTreeMap::new();
+        sets.insert(
+            "app.bulleted.spaceAccess?aud=did:web:x%23y".to_string(),
+            IncludeSetView {
+                title: Some("Bulleted spaces".into()),
+                detail: None,
+                scopes: scopes(&["repo:app.bulleted.note?action=create"]),
+            },
+        );
+        let g = permission_groups(
+            &scopes(&[
+                "atproto",
+                "include:app.bulleted.spaceAccess?aud=did:web:x%23y",
+            ]),
+            &sets,
+            false,
+            None,
+        );
+        assert_eq!(g.groups[0].title, "Bulleted spaces");
+        assert_eq!(g.groups[0].nsid, "app.bulleted.spaceAccess");
+        assert_eq!(g.groups[0].set_slug(), "app-bulleted-spaceaccess");
+        assert_eq!(
+            g.groups[0].repo_table.as_ref().unwrap().rows[0].collection,
+            "app.bulleted.note"
+        );
+
+        // An unresolved set is shown by its bare NSID too, not by the token.
+        let g = permission_groups(
+            &scopes(&[
+                "atproto",
+                "include:app.bulleted.spaceAccess?aud=did:web:x%23y",
+            ]),
+            &BTreeMap::new(),
+            false,
+            None,
+        );
+        assert_eq!(g.groups[0].title, "app.bulleted.spaceAccess");
+        assert_eq!(g.groups[0].description, "");
+        assert_eq!(g.groups[0].set_slug(), "app-bulleted-spaceaccess");
     }
 
     #[test]

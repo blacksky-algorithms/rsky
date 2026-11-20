@@ -54,6 +54,8 @@ pub struct OAuthRequestInfo {
     pub uri: String,
     pub dpop_headers: Vec<String>,
     pub user_agent: Option<String>,
+    /// The browser's `Accept-Language`, used to pick permission-set prose.
+    pub accept_language: Option<String>,
     pub ip_address: String,
     /// The request carries fetch metadata or an Origin naming another site
     pub cross_site: bool,
@@ -95,6 +97,7 @@ impl<'r> FromRequest<'r> for OAuthRequestInfo {
             uri: format!("{}{}", cfg.service.public_url, req.uri()),
             dpop_headers: req.headers().get("dpop").map(String::from).collect(),
             user_agent: req.headers().get_one("user-agent").map(String::from),
+            accept_language: req.headers().get_one("accept-language").map(String::from),
             ip_address: req
                 .client_ip()
                 .map(|ip| ip.to_string())
@@ -526,6 +529,7 @@ fn reactivate_page(
 async fn include_sets(
     sets: &SharedPermissionSets,
     scopes: &[String],
+    language: Option<&str>,
 ) -> Result<BTreeMap<String, IncludeSetView>, String> {
     let mut views = BTreeMap::new();
     for nsid in scopes.iter().filter_map(|s| s.strip_prefix(INCLUDE_PREFIX)) {
@@ -534,7 +538,7 @@ async fn include_sets(
         }
         let set = sets
             .resolver
-            .try_resolved_set(nsid)
+            .try_resolved_set(nsid, language)
             .await
             .map_err(|error| {
                 tracing::warn!(%error, nsid, "permission set could not be resolved for consent");
@@ -559,9 +563,10 @@ async fn consent_page(
     session: &DeviceSession,
     account: &AccountInfo,
     session_token: Option<String>,
+    language: Option<&str>,
 ) -> Result<ConsentPage, HtmlPage> {
     let shell = &ui.shell;
-    let include_sets = include_sets(sets, &page.scopes)
+    let include_sets = include_sets(sets, &page.scopes, language)
         .await
         .map_err(|message| render_error(shell, Status::BadRequest, message))?;
     let first_party = page.client_trusted && ui.is_first_party_client(&page.client_id);
@@ -607,6 +612,7 @@ async fn account_page(
     session: &DeviceSession,
     account: &AccountInfo,
     session_token: Option<String>,
+    language: Option<&str>,
 ) -> Result<HtmlPage, HtmlPage> {
     if account.deactivated {
         return Ok(render_page(
@@ -615,7 +621,7 @@ async fn account_page(
             &reactivate_page(ui, page, session, account, session_token, None),
         ));
     }
-    let consent = consent_page(ui, sets, page, session, account, session_token).await?;
+    let consent = consent_page(ui, sets, page, session, account, session_token, language).await?;
     Ok(render_page(Status::Ok, &ui.shell, &consent))
 }
 
@@ -888,6 +894,7 @@ pub async fn oauth_authorize(
     let otp_hint = query.otp_hint.filter(|hint| !hint.is_empty());
     let gated = otp_error || auth_error || otp_hint.is_some();
     let view = query.view.as_deref();
+    let language = info.accept_language.as_deref();
     if !gated {
         if let Some(selected) = page.selected_did.as_deref() {
             if let Some(info) = page
@@ -896,7 +903,7 @@ pub async fn oauth_authorize(
                 .find(|info| info.account.did == selected && !info.login_required)
             {
                 return Err(either(
-                    account_page(ui, sets, &page, &session, &info.account, None).await,
+                    account_page(ui, sets, &page, &session, &info.account, None, language).await,
                 ));
             }
         }
@@ -1066,6 +1073,7 @@ pub async fn oauth_authorize_sign_in(
                 &session,
                 &result.account,
                 result.ephemeral_token,
+                info.accept_language.as_deref(),
             )
             .await,
         )),
@@ -1191,7 +1199,16 @@ pub async fn oauth_authorize_select(
         ));
     }
     Err(either(
-        account_page(ui, sets, &page, &session, &account, None).await,
+        account_page(
+            ui,
+            sets,
+            &page,
+            &session,
+            &account,
+            None,
+            info.accept_language.as_deref(),
+        )
+        .await,
     ))
 }
 
@@ -1538,6 +1555,7 @@ pub async fn oauth_authorize_reactivate(
             &session,
             &account,
             form.session_token.clone(),
+            info.accept_language.as_deref(),
         )
         .await,
     ))
@@ -1605,6 +1623,7 @@ mod tests {
                 "include:app.example.set".into(),
                 "include:app.example.set?aud=did:web:x%23y".into(),
             ],
+            None,
         )
         .await
         .unwrap();
@@ -1628,10 +1647,67 @@ mod tests {
             views["app.example.set?aud=did:web:x%23y"].title.as_deref(),
             Some("Example set")
         );
-        let error = include_sets(&sets, &["include:invalid.example.nothing".into()])
+        let error = include_sets(&sets, &["include:invalid.example.nothing".into()], None)
             .await
             .unwrap_err();
         assert_eq!(error, PERMISSION_SETS_UNAVAILABLE);
+
+        // The browser's language picks the set's prose.
+        sets.resolver
+            .prime_localized(
+                "app.example.localized",
+                Some("English"),
+                &[("ht", "Aksè a kont ou")],
+                None,
+                &[],
+                vec![],
+            )
+            .await;
+        let views = include_sets(&sets, &["include:app.example.localized".into()], Some("ht"))
+            .await
+            .unwrap();
+        assert_eq!(
+            views["app.example.localized"].title.as_deref(),
+            Some("Aksè a kont ou")
+        );
+
+        // A record whose `defs.main` is not a permission set refuses the
+        // page, as an unresolvable set does.
+        sets.resolver
+            .prime_invalid(
+                "app.example.notASet",
+                "defs.main is a record, not a permission-set",
+            )
+            .await;
+        let error = include_sets(&sets, &["include:app.example.notASet".into()], None)
+            .await
+            .unwrap_err();
+        assert_eq!(error, PERMISSION_SETS_UNAVAILABLE);
+    }
+
+    #[rocket::get("/probe-accept-language")]
+    fn probe_accept_language(info: OAuthRequestInfo) -> String {
+        info.accept_language.unwrap_or_default()
+    }
+
+    /// The request guard captures the header the prose is chosen from, so the
+    /// consent page's language is the browser's own preference list.
+    #[tokio::test]
+    async fn request_info_captures_accept_language() {
+        let rocket = rocket::build()
+            .manage(crate::config::env_to_cfg())
+            .mount("/", rocket::routes![probe_accept_language]);
+        let client = rocket::local::asynchronous::Client::untracked(rocket)
+            .await
+            .unwrap();
+        let body = client
+            .get("/probe-accept-language")
+            .header(Header::new("accept-language", "fr-CH, ht;q=0.9, en;q=0.8"))
+            .dispatch()
+            .await
+            .into_string()
+            .await;
+        assert_eq!(body.as_deref(), Some("fr-CH, ht;q=0.9, en;q=0.8"));
     }
 
     #[test]

@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "accept-language"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f27d075294830fcab6f66e320dab524bc6d048f4a151698e153205559113772"
+
+[[package]]
 name = "addr2line"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8433,8 +8439,9 @@ dependencies = [
 
 [[package]]
 name = "rsky-pds"
-version = "1.14.20"
+version = "1.15.0"
 dependencies = [
+ "accept-language",
  "anyhow",
  "argon2",
  "askama",
