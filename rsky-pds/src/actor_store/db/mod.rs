@@ -225,14 +225,18 @@ pub const ACTOR_DB_MIGRATIONS: &[Migration] = &[
     // records that GROUP BY is a full index scan: measured at 72s on a 17GB
     // store, against 5 rows here. The backfill below pays that scan once, when
     // the migration runs.
+    //
+    // Only the writer's open path migrates an actor store, and `describeRepo`
+    // is a read, so `list_collections` also creates and backfills the table
+    // itself; the two paths have to stay idempotent for either to go first.
     Migration {
         name: "006",
         sql: "\
-    CREATE TABLE collection_count (\
+    CREATE TABLE IF NOT EXISTS collection_count (\
         collection TEXT PRIMARY KEY, \
         n INTEGER NOT NULL\
     );\
-    INSERT INTO collection_count (collection, n) \
+    INSERT OR REPLACE INTO collection_count (collection, n) \
         SELECT collection, count(*) FROM record GROUP BY collection;",
     },
 ];

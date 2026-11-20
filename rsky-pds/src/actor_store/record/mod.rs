@@ -244,6 +244,28 @@ impl RecordReader {
                 // Reads the counter the write path maintains instead of grouping
                 // `record`: that GROUP BY is a full index scan, which on a store
                 // of a few hundred thousand records is tens of seconds.
+                //
+                // This is a read path, and reads open the store without running
+                // migrations (only the writer migrates), so on a store this
+                // binary has never written to the table may not exist yet. Create
+                // it and backfill it here, once, rather than failing the call.
+                conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS collection_count (\
+                         collection TEXT PRIMARY KEY, \
+                         n INTEGER NOT NULL\
+                     );",
+                )?;
+                let empty: bool = conn.query_row(
+                    "SELECT NOT EXISTS (SELECT 1 FROM collection_count)",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if empty {
+                    conn.execute_batch(
+                        "INSERT OR REPLACE INTO collection_count (collection, n) \
+                             SELECT collection, count(*) FROM record GROUP BY collection;",
+                    )?;
+                }
                 let mut stmt = conn.prepare(
                     "SELECT collection FROM collection_count WHERE n > 0 ORDER BY collection",
                 )?;
@@ -773,6 +795,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(remaining, 0);
+    }
+
+    // Reads open the actor store without running migrations, so a store this
+    // binary has never written to has no counter table yet. `describeRepo` must
+    // build it (and its backfill) rather than 500 on "no such table".
+    #[tokio::test]
+    async fn list_collections_builds_the_counter_when_it_is_missing() {
+        let (_dir, mut reader) = test_reader().await;
+        let uri = "at://did:example:alice/app.bsky.feed.post/3jt5vlkorlk2v";
+        index_with_block(&reader, uri, post_record("hello"), "rev-1").await;
+
+        reader
+            .db
+            .run(|conn| {
+                conn.execute_batch("DROP TABLE collection_count;")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            reader.list_collections().await.unwrap(),
+            ["app.bsky.feed.post"]
+        );
     }
 
     #[tokio::test]
