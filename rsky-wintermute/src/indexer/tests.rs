@@ -4282,7 +4282,8 @@ mod indexer_tests {
         let author = "did:plc:wintermute-test-subpost-author";
         let posts_only = "did:plc:wintermute-test-subpost-posts";
         let with_replies = "did:plc:wintermute-test-subpost-replies";
-        let dids = [author, posts_only, with_replies];
+        let non_follower = "did:plc:wintermute-test-subpost-nonfollower";
+        let dids = [author, posts_only, with_replies, non_follower];
         let client = pool.get().await.unwrap();
         let cleanup = || async {
             for did in dids {
@@ -4298,7 +4299,11 @@ mod indexer_tests {
         };
         cleanup().await;
 
-        for (creator, key, reply) in [(posts_only, "k1", false), (with_replies, "k2", true)] {
+        for (creator, key, reply) in [
+            (posts_only, "k1", false),
+            (with_replies, "k2", true),
+            (non_follower, "k3", true),
+        ] {
             client
                 .execute(
                     "INSERT INTO activity_subscription (creator, \"subjectDid\", key, \"indexedAt\", post, reply) \
@@ -4308,6 +4313,43 @@ mod indexer_tests {
                 .await
                 .unwrap();
         }
+        let follow = |creator: &'static str, subject: &'static str| {
+            let client = &client;
+            async move {
+                client
+                    .execute(
+                        "INSERT INTO follow (uri, cid, creator, \"subjectDid\", \"createdAt\", \"indexedAt\") \
+                         VALUES ($1, 'bafyfollow', $2, $3, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                        &[
+                            &format!("at://{creator}/app.bsky.graph.follow/{}", subject.len()),
+                            &creator,
+                            &subject,
+                        ],
+                    )
+                    .await
+                    .unwrap();
+            }
+        };
+        follow(posts_only, author).await;
+        follow(with_replies, author).await;
+        follow(author, with_replies).await;
+        let declare = |allow: &'static str| {
+            let client = &client;
+            async move {
+                client
+                    .execute(
+                        "INSERT INTO record (uri, cid, did, json, \"indexedAt\") VALUES ($1, 'bafydecl', $2, $3, '2026-01-01T00:00:00Z') \
+                         ON CONFLICT (uri) DO UPDATE SET json = EXCLUDED.json",
+                        &[
+                            &format!("at://{author}/app.bsky.notification.declaration/self"),
+                            &author,
+                            &format!(r#"{{"$type":"app.bsky.notification.declaration","allowSubscriptions":"{allow}"}}"#),
+                        ],
+                    )
+                    .await
+                    .unwrap();
+            }
+        };
 
         let now = chrono::Utc::now()
             .format("%Y-%m-%dT%H:%M:%S%.3fZ")
@@ -4381,6 +4423,18 @@ mod indexer_tests {
             .unwrap();
         assert_eq!(recipients("single").await, vec![posts_only, with_replies]);
         assert_eq!(recipients("single-reply").await, vec![with_replies]);
+
+        declare("mutuals").await;
+        IndexerManager::process_job(&pool, &job("mutuals", &now, None), false)
+            .await
+            .unwrap();
+        assert_eq!(recipients("mutuals").await, vec![with_replies]);
+
+        declare("none").await;
+        IndexerManager::process_job(&pool, &job("none", &now, None), false)
+            .await
+            .unwrap();
+        assert_eq!(recipients("none").await, Vec::<String>::new());
 
         cleanup().await;
     }

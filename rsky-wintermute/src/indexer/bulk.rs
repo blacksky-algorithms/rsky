@@ -430,7 +430,10 @@ pub struct SubscribedPostSeed {
 
 /// Notify every activity subscriber of each post's author. Replies only reach
 /// subscribers who opted into replies. Posts older than a day are skipped so
-/// replays and backfills do not push stale posts to subscribers.
+/// replays and backfills do not push stale posts to subscribers. The author's
+/// `allowSubscriptions` declaration (default and unknown values: followers) is
+/// enforced here because subscriptions are never revalidated after an unfollow
+/// or a declaration change.
 pub async fn write_subscribed_post_notifications_bulk(
     client: &deadpool_postgres::Client,
     seeds: &[SubscribedPostSeed],
@@ -451,9 +454,23 @@ pub async fn write_subscribed_post_notifications_bulk(
              FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::bool[])
                  AS s(did, uri, cid, sort_at, is_reply)
              JOIN activity_subscription a ON a.\"subjectDid\" = s.did
+             LEFT JOIN record r
+                 ON r.uri = 'at://' || s.did || '/app.bsky.notification.declaration/self'
              WHERE CASE WHEN s.is_reply THEN a.reply ELSE a.post END
                AND a.creator <> s.did
                AND s.sort_at > to_char(now() AT TIME ZONE 'UTC' - interval '1 day', 'YYYY-MM-DD\"T\"HH24:MI:SS')
+               AND EXISTS (
+                   SELECT 1 FROM follow f
+                   WHERE f.creator = a.creator AND f.\"subjectDid\" = s.did
+               )
+               AND CASE substring(r.json FROM '\"allowSubscriptions\":\\s*\"([a-z]+)\"')
+                   WHEN 'none' THEN false
+                   WHEN 'mutuals' THEN EXISTS (
+                       SELECT 1 FROM follow f
+                       WHERE f.creator = s.did AND f.\"subjectDid\" = a.creator
+                   )
+                   ELSE true
+               END
              ORDER BY 1, 3
              ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
             &[&dids, &uris, &cids, &sort_ats, &is_replies],

@@ -3535,7 +3535,12 @@ impl IndexerManager {
                 let conn = pool.get().await.map_err(WintermuteError::Pool)?;
                 bulk::copy_insert_notifications(&conn, &notif_rows).await?;
                 bulk::write_reply_notifications_bulk(&conn, &reply_posts).await?;
-                bulk::write_subscribed_post_notifications_bulk(&conn, &subscribed_seeds).await
+                if let Err(e) =
+                    bulk::write_subscribed_post_notifications_bulk(&conn, &subscribed_seeds).await
+                {
+                    tracing::warn!("failed to insert subscribed-post notifications: {e}");
+                }
+                Ok(())
             }
         );
         embed_result?;
@@ -4247,7 +4252,7 @@ impl IndexerManager {
                 .await?;
         }
 
-        bulk::write_subscribed_post_notifications_bulk(
+        if let Err(e) = bulk::write_subscribed_post_notifications_bulk(
             client,
             &[bulk::SubscribedPostSeed {
                 did: did.to_owned(),
@@ -4257,7 +4262,10 @@ impl IndexerManager {
                 is_reply: reply_parent.is_some(),
             }],
         )
-        .await?;
+        .await
+        {
+            tracing::warn!("failed to insert subscribed-post notifications for {uri}: {e}");
+        }
 
         // Handle embed.record (quote posts)
         if let Some(embed) = record.get("embed") {
