@@ -3567,6 +3567,177 @@ mod indexer_tests {
         }
     }
 
+    #[test]
+    fn notification_sort_at_is_the_earlier_timestamp() {
+        let earlier = "2024-01-02T03:04:05.000Z";
+        let later = "2026-08-04T00:00:00.000Z";
+        assert_eq!(
+            IndexerManager::notification_sort_at(earlier, later),
+            earlier
+        );
+        assert_eq!(
+            IndexerManager::notification_sort_at(later, earlier),
+            earlier
+        );
+        assert_eq!(IndexerManager::notification_sort_at(later, later), later);
+    }
+
+    #[tokio::test]
+    async fn subject_notifications_sort_at_record_time_on_both_paths() {
+        use crate::types::{IndexJob, WriteAction};
+
+        let pool = setup_test_pool();
+        let author = "did:plc:wintermute-test-sortat-author";
+        let reposter = "did:plc:wintermute-test-sortat-reposter";
+        let actor = "did:plc:wintermute-test-sortat-actor";
+        for did in [author, reposter, actor] {
+            cleanup_test_data(&pool, did).await;
+        }
+        let client = pool.get().await.unwrap();
+        for did in [author, reposter, actor] {
+            client
+                .execute(
+                    "INSERT INTO actor (did, \"indexedAt\") VALUES ($1, NOW()) \
+                     ON CONFLICT (did) DO NOTHING",
+                    &[&did],
+                )
+                .await
+                .unwrap();
+        }
+        drop(client);
+
+        let cid = "bafyreihhl5mpvjkrhnnagen2fomozzhnhhdq2jr6cego2nzbvmwewv5rd4";
+        let created = "2024-01-02T03:04:05.000Z";
+        let indexed = "2026-08-04T00:00:00.000Z";
+        let via = format!("at://{reposter}/app.bsky.feed.repost/sortatvia");
+        let job = |collection: &str, rkey: &str, record: serde_json::Value| IndexJob {
+            uri: format!("at://{actor}/{collection}/{rkey}"),
+            cid: cid.to_owned(),
+            action: WriteAction::Create,
+            record: Some(record),
+            indexed_at: indexed.to_owned(),
+            rev: "3a".to_owned(),
+            provenance: None,
+        };
+        let subject_record = |kind: &str, post: &str| {
+            serde_json::json!({
+                "$type": kind,
+                "subject": {"uri": format!("at://{author}/app.bsky.feed.post/{post}"), "cid": cid},
+                "via": {"uri": via, "cid": cid},
+                "createdAt": created
+            })
+        };
+        let follow_record = |subject: &str| {
+            serde_json::json!({
+                "$type": "app.bsky.graph.follow", "subject": subject, "createdAt": created
+            })
+        };
+
+        for single in [
+            job(
+                "app.bsky.feed.like",
+                "single",
+                subject_record("app.bsky.feed.like", "one"),
+            ),
+            job(
+                "app.bsky.feed.repost",
+                "single",
+                subject_record("app.bsky.feed.repost", "one"),
+            ),
+            job("app.bsky.graph.follow", "single", follow_record(author)),
+        ] {
+            IndexerManager::process_job(&pool, &single, true)
+                .await
+                .unwrap();
+        }
+
+        let batch = vec![
+            (
+                b"b1".to_vec(),
+                job(
+                    "app.bsky.feed.like",
+                    "batch",
+                    subject_record("app.bsky.feed.like", "two"),
+                ),
+            ),
+            (
+                b"b2".to_vec(),
+                job(
+                    "app.bsky.feed.repost",
+                    "batch",
+                    subject_record("app.bsky.feed.repost", "two"),
+                ),
+            ),
+            (
+                b"b3".to_vec(),
+                job("app.bsky.graph.follow", "batch", follow_record(reposter)),
+            ),
+        ];
+        let (results, batch_failed) =
+            IndexerManager::process_jobs_batch(&pool, &batch, false, true).await;
+        assert!(!batch_failed);
+        for (_, r) in &results {
+            assert!(r.is_ok(), "job failed: {r:?}");
+        }
+
+        let client = pool.get().await.unwrap();
+        let rows = client
+            .query(
+                "SELECT \"recordUri\", did, reason, \"sortAt\" FROM notification \
+                 WHERE author = $1 ORDER BY \"recordUri\", reason",
+                &[&actor],
+            )
+            .await
+            .unwrap();
+        let got: Vec<(String, String, String, String)> = rows
+            .iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
+            .collect();
+        let uri = |collection: &str, rkey: &str| format!("at://{actor}/{collection}/{rkey}");
+        let row = |record_uri: String, did: &str, reason: &str| {
+            (
+                record_uri,
+                did.to_owned(),
+                reason.to_owned(),
+                created.to_owned(),
+            )
+        };
+        let expected = vec![
+            row(uri("app.bsky.feed.like", "batch"), author, "like"),
+            row(
+                uri("app.bsky.feed.like", "batch"),
+                reposter,
+                "like-via-repost",
+            ),
+            row(uri("app.bsky.feed.like", "single"), author, "like"),
+            row(
+                uri("app.bsky.feed.like", "single"),
+                reposter,
+                "like-via-repost",
+            ),
+            row(uri("app.bsky.feed.repost", "batch"), author, "repost"),
+            row(
+                uri("app.bsky.feed.repost", "batch"),
+                reposter,
+                "repost-via-repost",
+            ),
+            row(uri("app.bsky.feed.repost", "single"), author, "repost"),
+            row(
+                uri("app.bsky.feed.repost", "single"),
+                reposter,
+                "repost-via-repost",
+            ),
+            row(uri("app.bsky.graph.follow", "batch"), reposter, "follow"),
+            row(uri("app.bsky.graph.follow", "single"), author, "follow"),
+        ];
+        assert_eq!(got, expected);
+        drop(client);
+
+        for did in [author, reposter, actor] {
+            cleanup_test_data(&pool, did).await;
+        }
+    }
+
     #[tokio::test]
     async fn skip_boilerplate_omits_record_rows_with_exact_effects() {
         use crate::types::{IndexJob, WriteAction};

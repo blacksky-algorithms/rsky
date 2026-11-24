@@ -3711,7 +3711,7 @@ impl IndexerManager {
                     &uri,
                     &pj.job.cid,
                     subject_uri,
-                    &pj.job.indexed_at,
+                    Self::notification_sort_at(created_at, &pj.job.indexed_at),
                     "like",
                     "like-via-repost",
                 );
@@ -3781,7 +3781,7 @@ impl IndexerManager {
         uri: &str,
         cid: &str,
         subject_uri: &str,
-        indexed_at: &str,
+        sort_at: &str,
         reason: &'static str,
         via_reason: &'static str,
     ) {
@@ -3800,7 +3800,7 @@ impl IndexerManager {
                 record_cid: cid.to_owned(),
                 reason,
                 reason_subject: Some(subject_uri.to_owned()),
-                sort_at: indexed_at.to_owned(),
+                sort_at: sort_at.to_owned(),
             });
         }
         let via_uri_str = record
@@ -3818,10 +3818,18 @@ impl IndexerManager {
                         record_cid: cid.to_owned(),
                         reason: via_reason,
                         reason_subject: Some(via_uri_str.to_owned()),
-                        sort_at: indexed_at.to_owned(),
+                        sort_at: sort_at.to_owned(),
                     });
                 }
             }
+        }
+    }
+
+    fn notification_sort_at<'a>(created_at: &'a str, indexed_at: &'a str) -> &'a str {
+        if indexed_at < created_at {
+            indexed_at
+        } else {
+            created_at
         }
     }
 
@@ -3858,7 +3866,8 @@ impl IndexerManager {
                         record_cid: pj.job.cid.clone(),
                         reason: "follow",
                         reason_subject: None,
-                        sort_at: pj.job.indexed_at.clone(),
+                        sort_at: Self::notification_sort_at(created_at, &pj.job.indexed_at)
+                            .to_owned(),
                     });
                 }
 
@@ -3933,7 +3942,7 @@ impl IndexerManager {
                     &uri,
                     &pj.job.cid,
                     subject_uri,
-                    &pj.job.indexed_at,
+                    &sort_at,
                     "repost",
                     "repost-via-repost",
                 );
@@ -4686,6 +4695,7 @@ impl IndexerManager {
             .get("createdAt")
             .and_then(|v| v.as_str())
             .unwrap_or(indexed_at);
+        let sort_at = Self::notification_sort_at(created_at, indexed_at);
 
         let via = record
             .get("via")
@@ -4714,7 +4724,7 @@ impl IndexerManager {
                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                              VALUES ($1, $2, $3, $4, $5, $6, $7)
                              ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
-                            &[&subject_author, &did, &uri, &cid, &"like", &Some(subject), &indexed_at],
+                            &[&subject_author, &did, &uri, &cid, &"like", &Some(subject), &sort_at],
                         )
                         .await
                     {
@@ -4733,7 +4743,7 @@ impl IndexerManager {
                                         "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                                          VALUES ($1, $2, $3, $4, $5, $6, $7)
                                          ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
-                                        &[&reposter, &did, &uri, &cid, &"like-via-repost", &Some(via_uri_str), &indexed_at],
+                                        &[&reposter, &did, &uri, &cid, &"like-via-repost", &Some(via_uri_str), &sort_at],
                                     )
                                     .await,
                             );
@@ -4803,6 +4813,7 @@ impl IndexerManager {
             .get("createdAt")
             .and_then(|v| v.as_str())
             .unwrap_or(indexed_at);
+        let sort_at = Self::notification_sort_at(created_at, indexed_at);
         let (via, via_cid) = Self::extract_via(record);
 
         // Ensure the follow subject also has an actor row (cached)
@@ -4828,7 +4839,7 @@ impl IndexerManager {
                     "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                      VALUES ($1, $2, $3, $4, $5, $6, $7)
                      ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
-                    &[&subject, &did, &uri, &cid, &"follow", &None::<String>, &indexed_at],
+                    &[&subject, &did, &uri, &cid, &"follow", &None::<String>, &sort_at],
                 )
                 .await
             {
@@ -4970,7 +4981,7 @@ impl IndexerManager {
                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                              VALUES ($1, $2, $3, $4, $5, $6, $7)
                              ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
-                            &[&subject_author, &did, &uri, &cid, &"repost", &Some(subject), &indexed_at],
+                            &[&subject_author, &did, &uri, &cid, &"repost", &Some(subject), &sort_at],
                         )
                         .await
                     {
@@ -4989,7 +5000,7 @@ impl IndexerManager {
                                         "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                                          VALUES ($1, $2, $3, $4, $5, $6, $7)
                                          ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
-                                        &[&original_reposter, &did, &uri, &cid, &"repost-via-repost", &Some(via_uri_str), &indexed_at],
+                                        &[&original_reposter, &did, &uri, &cid, &"repost-via-repost", &Some(via_uri_str), &sort_at],
                                     )
                                     .await,
                             );
