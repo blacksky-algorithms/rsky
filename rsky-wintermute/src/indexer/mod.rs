@@ -24,6 +24,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use rsky_identity::IdResolver;
 use rsky_identity::types::IdentityResolverOpts;
 use rsky_syntax::aturi::AtUri;
+use rsky_syntax::datetime::normalize_datetime_always;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -3698,10 +3699,7 @@ impl IndexerManager {
                     .and_then(|s| s.get("cid"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let created_at = record
-                    .get("createdAt")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&pj.job.indexed_at);
+                let (created_at, sort_at) = Self::created_and_sort_at(record, &pj.job.indexed_at);
                 let (via, via_cid) = Self::extract_via(record);
 
                 Self::collect_subject_notifications(
@@ -3711,7 +3709,7 @@ impl IndexerManager {
                     &uri,
                     &pj.job.cid,
                     subject_uri,
-                    &Self::notification_sort_at(created_at, &pj.job.indexed_at),
+                    &sort_at,
                     "like",
                     "like-via-repost",
                 );
@@ -3722,7 +3720,7 @@ impl IndexerManager {
                     creator: pj.did.clone(),
                     subject: subject_uri.to_owned(),
                     subject_cid: subject_cid.to_owned(),
-                    created_at: created_at.to_owned(),
+                    created_at,
                     indexed_at: pj.job.indexed_at.clone(),
                     via,
                     via_cid,
@@ -3825,15 +3823,17 @@ impl IndexerManager {
         }
     }
 
-    fn notification_sort_at(created_at: &str, indexed_at: &str) -> String {
-        let created_at = calendar::normalize_datetime(created_at)
-            .or_else(|| calendar::normalize_datetime(&format!("{created_at}Z")))
-            .unwrap_or_else(|| "1970-01-01T00:00:00.000Z".to_owned());
-        if indexed_at < created_at.as_str() {
+    fn created_and_sort_at(record: &serde_json::Value, indexed_at: &str) -> (String, String) {
+        let created_at = record
+            .get("createdAt")
+            .and_then(|v| v.as_str())
+            .map_or_else(|| indexed_at.to_owned(), normalize_datetime_always);
+        let sort_at = if indexed_at < created_at.as_str() {
             indexed_at.to_owned()
         } else {
-            created_at
-        }
+            created_at.clone()
+        };
+        (created_at, sort_at)
     }
 
     async fn copy_batch_insert_follows(
@@ -3855,10 +3855,7 @@ impl IndexerManager {
             if let Some(record) = &pj.job.record {
                 let uri = pj.uri.to_string();
                 let subject = record.get("subject").and_then(|v| v.as_str()).unwrap_or("");
-                let created_at = record
-                    .get("createdAt")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&pj.job.indexed_at);
+                let (created_at, sort_at) = Self::created_and_sort_at(record, &pj.job.indexed_at);
                 let (via, via_cid) = Self::extract_via(record);
 
                 if !subject.is_empty() {
@@ -3869,7 +3866,7 @@ impl IndexerManager {
                         record_cid: pj.job.cid.clone(),
                         reason: "follow",
                         reason_subject: None,
-                        sort_at: Self::notification_sort_at(created_at, &pj.job.indexed_at),
+                        sort_at,
                     });
                 }
 
@@ -3878,7 +3875,7 @@ impl IndexerManager {
                     cid: pj.job.cid.clone(),
                     creator: pj.did.clone(),
                     subject_did: subject.to_owned(),
-                    created_at: created_at.to_owned(),
+                    created_at,
                     indexed_at: pj.job.indexed_at.clone(),
                     via,
                     via_cid,
@@ -3925,16 +3922,7 @@ impl IndexerManager {
                     .and_then(|s| s.get("cid"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let created_at = record
-                    .get("createdAt")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&pj.job.indexed_at)
-                    .to_owned();
-                let sort_at = if pj.job.indexed_at < created_at {
-                    pj.job.indexed_at.clone()
-                } else {
-                    created_at.clone()
-                };
+                let (created_at, sort_at) = Self::created_and_sort_at(record, &pj.job.indexed_at);
                 let (via, via_cid) = Self::extract_via(record);
 
                 Self::collect_subject_notifications(
@@ -3944,7 +3932,7 @@ impl IndexerManager {
                     &uri,
                     &pj.job.cid,
                     subject_uri,
-                    &Self::notification_sort_at(&created_at, &pj.job.indexed_at),
+                    &sort_at,
                     "repost",
                     "repost-via-repost",
                 );
@@ -4693,11 +4681,7 @@ impl IndexerManager {
             .and_then(|v| v.get("cid"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let created_at = record
-            .get("createdAt")
-            .and_then(|v| v.as_str())
-            .unwrap_or(indexed_at);
-        let sort_at = Self::notification_sort_at(created_at, indexed_at);
+        let (created_at, sort_at) = Self::created_and_sort_at(record, indexed_at);
 
         let via = record
             .get("via")
@@ -4811,11 +4795,7 @@ impl IndexerManager {
             .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
         let uri = uri_obj.to_string();
         let subject = record.get("subject").and_then(|v| v.as_str()).unwrap_or("");
-        let created_at = record
-            .get("createdAt")
-            .and_then(|v| v.as_str())
-            .unwrap_or(indexed_at);
-        let sort_at = Self::notification_sort_at(created_at, indexed_at);
+        let (created_at, sort_at) = Self::created_and_sort_at(record, indexed_at);
         let (via, via_cid) = Self::extract_via(record);
 
         // Ensure the follow subject also has an actor row (cached)
@@ -4934,10 +4914,7 @@ impl IndexerManager {
             .and_then(|v| v.get("cid"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let created_at = record
-            .get("createdAt")
-            .and_then(|v| v.as_str())
-            .unwrap_or(indexed_at);
+        let (created_at, sort_at) = Self::created_and_sort_at(record, indexed_at);
 
         let via = record
             .get("via")
@@ -4957,13 +4934,6 @@ impl IndexerManager {
             )
             .await?;
 
-        // sortAt is the earlier of indexedAt and createdAt
-        let sort_at = if indexed_at < created_at {
-            indexed_at
-        } else {
-            created_at
-        };
-
         // feed_item for repost: postUri is the subject (reposted post)
         client
             .execute(
@@ -4975,7 +4945,6 @@ impl IndexerManager {
             .await?;
 
         if row_count > 0 && !subject.is_empty() {
-            let notif_sort_at = Self::notification_sort_at(created_at, indexed_at);
             if let Ok(subject_uri) = AtUri::new(subject.to_owned(), None) {
                 let subject_author = subject_uri.get_hostname();
                 if subject_author != did {
@@ -4984,7 +4953,7 @@ impl IndexerManager {
                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                              VALUES ($1, $2, $3, $4, $5, $6, $7)
                              ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
-                            &[&subject_author, &did, &uri, &cid, &"repost", &Some(subject), &notif_sort_at],
+                            &[&subject_author, &did, &uri, &cid, &"repost", &Some(subject), &sort_at],
                         )
                         .await
                     {
@@ -5003,7 +4972,7 @@ impl IndexerManager {
                                         "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                                          VALUES ($1, $2, $3, $4, $5, $6, $7)
                                          ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
-                                        &[&original_reposter, &did, &uri, &cid, &"repost-via-repost", &Some(via_uri_str), &notif_sort_at],
+                                        &[&original_reposter, &did, &uri, &cid, &"repost-via-repost", &Some(via_uri_str), &sort_at],
                                     )
                                     .await,
                             );

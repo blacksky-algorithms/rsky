@@ -135,6 +135,14 @@ mod indexer_tests {
 
         drop(
             client
+                .execute(
+                    "DELETE FROM feed_item WHERE \"originatorDid\" = $1",
+                    &[&did],
+                )
+                .await,
+        );
+        drop(
+            client
                 .execute("DELETE FROM record WHERE did = $1", &[&did])
                 .await,
         );
@@ -3568,42 +3576,62 @@ mod indexer_tests {
     }
 
     #[test]
-    fn notification_sort_at_is_the_earlier_timestamp() {
+    fn sort_at_is_the_earlier_of_created_at_and_indexed_at() {
         let earlier = "2024-01-02T03:04:05.000Z";
         let later = "2026-08-04T00:00:00.000Z";
+        let times = |created: &str, indexed: &str| {
+            IndexerManager::created_and_sort_at(&serde_json::json!({"createdAt": created}), indexed)
+        };
         assert_eq!(
-            IndexerManager::notification_sort_at(earlier, later),
-            earlier
+            times(earlier, later),
+            (earlier.to_owned(), earlier.to_owned())
         );
         assert_eq!(
-            IndexerManager::notification_sort_at(later, earlier),
-            earlier
+            times(later, earlier),
+            (later.to_owned(), earlier.to_owned())
         );
-        assert_eq!(IndexerManager::notification_sort_at(later, later), later);
+        assert_eq!(times(later, later), (later.to_owned(), later.to_owned()));
+        assert_eq!(
+            IndexerManager::created_and_sort_at(&serde_json::json!({}), later),
+            (later.to_owned(), later.to_owned())
+        );
     }
 
     #[test]
-    fn notification_sort_at_normalizes_created_at() {
+    fn created_at_is_normalized_before_it_is_compared() {
         let indexed = "2026-08-04T00:00:00.000Z";
-        let sort_at = |created: &str| IndexerManager::notification_sort_at(created, indexed);
+        let times = |created: &str| {
+            IndexerManager::created_and_sort_at(&serde_json::json!({"createdAt": created}), indexed)
+        };
+        let both = |value: &str| (value.to_owned(), value.to_owned());
         assert_eq!(
-            sort_at("2024-01-02T12:04:05+09:00"),
-            "2024-01-02T03:04:05.000Z"
+            times("2024-01-02T12:04:05+09:00"),
+            both("2024-01-02T03:04:05.000Z")
         );
         assert_eq!(
-            sort_at("2024-01-02T03:04:05.123456Z"),
-            "2024-01-02T03:04:05.123Z"
+            times("2024-01-02T03:04:05.123456Z"),
+            both("2024-01-02T03:04:05.123Z")
         );
-        assert_eq!(sort_at("2024-01-02T03:04:05"), "2024-01-02T03:04:05.000Z");
-        assert_eq!(sort_at("2026-08-03T23:30:00-05:00"), indexed);
+        assert_eq!(
+            times("2024-01-02T03:04:05"),
+            both("2024-01-02T03:04:05.000Z")
+        );
+        assert_eq!(
+            times("Tue, 02 Jan 2024 03:04:05 GMT"),
+            both("2024-01-02T03:04:05.000Z")
+        );
+        assert_eq!(
+            times("2026-08-03T23:30:00-05:00"),
+            ("2026-08-04T04:30:00.000Z".to_owned(), indexed.to_owned())
+        );
         for malformed in ["", "!x", "next tuesday"] {
-            assert_eq!(sort_at(malformed), "1970-01-01T00:00:00.000Z");
+            assert_eq!(times(malformed), both("1970-01-01T00:00:00.000Z"));
         }
     }
 
     #[tokio::test]
-    async fn subject_notifications_sort_at_record_time_on_both_paths() {
-        assert_subject_notifications_sort_at(
+    async fn subject_records_sort_at_record_time_on_both_paths() {
+        assert_subject_records_sort_at(
             "sortat",
             "2024-01-02T03:04:05.000Z",
             "2024-01-02T03:04:05.000Z",
@@ -3612,22 +3640,17 @@ mod indexer_tests {
     }
 
     #[tokio::test]
-    async fn subject_notifications_normalize_created_at_on_both_paths() {
-        assert_subject_notifications_sort_at(
+    async fn subject_records_normalize_created_at_on_both_paths() {
+        assert_subject_records_sort_at(
             "sortat-offset",
             "2024-01-02T12:04:05+09:00",
             "2024-01-02T03:04:05.000Z",
         )
         .await;
-        assert_subject_notifications_sort_at("sortat-malformed", "!x", "1970-01-01T00:00:00.000Z")
-            .await;
+        assert_subject_records_sort_at("sortat-malformed", "!x", "1970-01-01T00:00:00.000Z").await;
     }
 
-    async fn assert_subject_notifications_sort_at(
-        tag: &str,
-        created: &str,
-        expected_sort_at: &str,
-    ) {
+    async fn assert_subject_records_sort_at(tag: &str, created: &str, expected_sort_at: &str) {
         use crate::types::{IndexJob, WriteAction};
 
         let pool = setup_test_pool();
@@ -3774,6 +3797,31 @@ mod indexer_tests {
             row(uri("app.bsky.graph.follow", "single"), author, "follow"),
         ];
         assert_eq!(got, expected);
+
+        for table in ["\"like\"", "repost", "follow"] {
+            let created_ats: Vec<String> = client
+                .query(
+                    &format!("SELECT \"createdAt\" FROM {table} WHERE creator = $1"),
+                    &[&actor],
+                )
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| r.get(0))
+                .collect();
+            assert_eq!(created_ats, vec![expected_sort_at; 2], "{table}");
+        }
+        let feed_sort_ats: Vec<String> = client
+            .query(
+                "SELECT \"sortAt\" FROM feed_item WHERE \"originatorDid\" = $1 AND type = 'repost'",
+                &[&actor],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        assert_eq!(feed_sort_ats, vec![expected_sort_at; 2]);
         drop(client);
 
         for did in [author, reposter, actor] {
