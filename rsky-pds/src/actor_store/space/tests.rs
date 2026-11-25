@@ -767,6 +767,109 @@ async fn a_store_from_before_the_sequenced_writer_set_is_migrated_on_use() {
     assert!(writers[1].space_rev > writers[0].space_rev);
 }
 
+/// A store at the schema before policies became JSON (every migration up to
+/// 005), as an account created under an older rsky-pds has.
+async fn store_before_json_policies() -> (tempfile::TempDir, ActorDb) {
+    use crate::actor_store::db::{get_db, ACTOR_DB_MIGRATIONS};
+    use crate::db::migrator::{migrate_to_latest, MigrationSet};
+    let dir = tempfile::tempdir().unwrap();
+    let db = get_db(dir.path().join("store.sqlite")).unwrap();
+    migrate_to_latest(
+        &db,
+        MigrationSet {
+            shared: &ACTOR_DB_MIGRATIONS[..1],
+            local: &ACTOR_DB_MIGRATIONS[1..5],
+            legacy: None,
+        },
+    )
+    .await
+    .unwrap();
+    (dir, db)
+}
+
+fn managed_def(uri: &str) -> SpaceDefRow {
+    SpaceDefRow {
+        space_uri: uri.to_string(),
+        space_type: SPACE_TYPE.to_string(),
+        skey: SKEY.to_string(),
+        policy: SpacePolicy::Managedspace(rsky_lexicon::com::atproto::managedspace::Policy {
+            managing_app: "did:web:app.example.com#managing_app".to_string(),
+            publish_policy: None,
+        }),
+        deleted: false,
+    }
+}
+
+#[tokio::test]
+async fn a_policy_already_in_json_survives_migration_006() {
+    use crate::actor_store::db::ACTOR_DB_MIGRATION_SET;
+    use crate::db::migrator::migrate_to_latest;
+    let (_dir, db) = store_before_json_policies().await;
+    // One row as the old code wrote it, one already holding a JSON policy (as
+    // a write through a store opened for reading leaves it).
+    let json_uri = space().uri();
+    let old_uri = SpaceId::new(AUTHORITY, SPACE_TYPE, "old").uri();
+    let json_policy = serde_json::to_string(&managed_def(&json_uri).policy).unwrap();
+    let (j, o) = (json_uri.clone(), old_uri.clone());
+    db.run(move |conn| {
+        conn.execute(
+            "INSERT INTO space_def (space_uri, space_type, skey, policy, deleted, created_at) \
+             VALUES (?1, ?2, ?3, ?4, 0, '2026-11-24T19:00:52Z')",
+            params![j, SPACE_TYPE, SKEY, json_policy],
+        )?;
+        conn.execute(
+            "INSERT INTO space_def \
+             (space_uri, space_type, skey, policy, managing_app, deleted, created_at) \
+             VALUES (?1, ?2, 'old', 'managing-app', 'did:web:app.example.com#managing_app', 0, \
+             '2026-11-24T19:00:52Z')",
+            params![o, SPACE_TYPE],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    migrate_to_latest(&db, ACTOR_DB_MIGRATION_SET)
+        .await
+        .unwrap();
+
+    let store = SpaceStore::new(DID.to_string(), db);
+    // The JSON policy is kept, not replaced by a plain memberspace ...
+    assert_eq!(
+        store.live_space_def(&json_uri).await.unwrap(),
+        managed_def(&json_uri)
+    );
+    // ... and the old enum is still converted.
+    assert_eq!(
+        store.live_space_def(&old_uri).await.unwrap().policy,
+        managed_def(&old_uri).policy
+    );
+}
+
+#[tokio::test]
+async fn writing_a_policy_migrates_an_older_store_first() {
+    let (_dir, db) = store_before_json_policies().await;
+    let store = SpaceStore::new(DID.to_string(), db.clone());
+    let uri = space().uri();
+
+    store.create_space_def(managed_def(&uri)).await.unwrap();
+
+    // The JSON policy went into a store already at the JSON schema, so no
+    // later migration can rewrite it.
+    let applied = db
+        .run(|conn| {
+            let mut stmt = conn.prepare("SELECT name FROM migrations")?;
+            let names = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<String>, rusqlite::Error>>()?;
+            Ok(names)
+        })
+        .await
+        .unwrap();
+    assert!(applied.contains(&"006".to_string()), "applied: {applied:?}");
+    assert_eq!(store.live_space_def(&uri).await.unwrap(), managed_def(&uri));
+}
+
 #[tokio::test]
 async fn writers_notify_registrations_and_jti() {
     let (_dir, store) = store().await;
