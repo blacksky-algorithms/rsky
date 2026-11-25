@@ -24,6 +24,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use rsky_identity::IdResolver;
 use rsky_identity::types::IdentityResolverOpts;
 use rsky_syntax::aturi::AtUri;
+use rsky_syntax::datetime::normalize_datetime_always;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -3698,10 +3699,7 @@ impl IndexerManager {
                     .and_then(|s| s.get("cid"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let created_at = record
-                    .get("createdAt")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&pj.job.indexed_at);
+                let (created_at, sort_at) = Self::created_and_sort_at(record, &pj.job.indexed_at);
                 let (via, via_cid) = Self::extract_via(record);
 
                 Self::collect_subject_notifications(
@@ -3711,7 +3709,7 @@ impl IndexerManager {
                     &uri,
                     &pj.job.cid,
                     subject_uri,
-                    &pj.job.indexed_at,
+                    &sort_at,
                     "like",
                     "like-via-repost",
                 );
@@ -3722,7 +3720,7 @@ impl IndexerManager {
                     creator: pj.did.clone(),
                     subject: subject_uri.to_owned(),
                     subject_cid: subject_cid.to_owned(),
-                    created_at: created_at.to_owned(),
+                    created_at,
                     indexed_at: pj.job.indexed_at.clone(),
                     via,
                     via_cid,
@@ -3781,7 +3779,7 @@ impl IndexerManager {
         uri: &str,
         cid: &str,
         subject_uri: &str,
-        indexed_at: &str,
+        sort_at: &str,
         reason: &'static str,
         via_reason: &'static str,
     ) {
@@ -3800,7 +3798,7 @@ impl IndexerManager {
                 record_cid: cid.to_owned(),
                 reason,
                 reason_subject: Some(subject_uri.to_owned()),
-                sort_at: indexed_at.to_owned(),
+                sort_at: sort_at.to_owned(),
             });
         }
         let via_uri_str = record
@@ -3818,11 +3816,24 @@ impl IndexerManager {
                         record_cid: cid.to_owned(),
                         reason: via_reason,
                         reason_subject: Some(via_uri_str.to_owned()),
-                        sort_at: indexed_at.to_owned(),
+                        sort_at: sort_at.to_owned(),
                     });
                 }
             }
         }
+    }
+
+    fn created_and_sort_at(record: &serde_json::Value, indexed_at: &str) -> (String, String) {
+        let created_at = record
+            .get("createdAt")
+            .and_then(|v| v.as_str())
+            .map_or_else(|| indexed_at.to_owned(), normalize_datetime_always);
+        let sort_at = if indexed_at < created_at.as_str() {
+            indexed_at.to_owned()
+        } else {
+            created_at.clone()
+        };
+        (created_at, sort_at)
     }
 
     async fn copy_batch_insert_follows(
@@ -3844,10 +3855,7 @@ impl IndexerManager {
             if let Some(record) = &pj.job.record {
                 let uri = pj.uri.to_string();
                 let subject = record.get("subject").and_then(|v| v.as_str()).unwrap_or("");
-                let created_at = record
-                    .get("createdAt")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&pj.job.indexed_at);
+                let (created_at, sort_at) = Self::created_and_sort_at(record, &pj.job.indexed_at);
                 let (via, via_cid) = Self::extract_via(record);
 
                 if !subject.is_empty() {
@@ -3858,7 +3866,7 @@ impl IndexerManager {
                         record_cid: pj.job.cid.clone(),
                         reason: "follow",
                         reason_subject: None,
-                        sort_at: pj.job.indexed_at.clone(),
+                        sort_at,
                     });
                 }
 
@@ -3867,7 +3875,7 @@ impl IndexerManager {
                     cid: pj.job.cid.clone(),
                     creator: pj.did.clone(),
                     subject_did: subject.to_owned(),
-                    created_at: created_at.to_owned(),
+                    created_at,
                     indexed_at: pj.job.indexed_at.clone(),
                     via,
                     via_cid,
@@ -3914,16 +3922,7 @@ impl IndexerManager {
                     .and_then(|s| s.get("cid"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let created_at = record
-                    .get("createdAt")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&pj.job.indexed_at)
-                    .to_owned();
-                let sort_at = if pj.job.indexed_at < created_at {
-                    pj.job.indexed_at.clone()
-                } else {
-                    created_at.clone()
-                };
+                let (created_at, sort_at) = Self::created_and_sort_at(record, &pj.job.indexed_at);
                 let (via, via_cid) = Self::extract_via(record);
 
                 Self::collect_subject_notifications(
@@ -3933,7 +3932,7 @@ impl IndexerManager {
                     &uri,
                     &pj.job.cid,
                     subject_uri,
-                    &pj.job.indexed_at,
+                    &sort_at,
                     "repost",
                     "repost-via-repost",
                 );
@@ -4682,10 +4681,7 @@ impl IndexerManager {
             .and_then(|v| v.get("cid"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let created_at = record
-            .get("createdAt")
-            .and_then(|v| v.as_str())
-            .unwrap_or(indexed_at);
+        let (created_at, sort_at) = Self::created_and_sort_at(record, indexed_at);
 
         let via = record
             .get("via")
@@ -4714,7 +4710,7 @@ impl IndexerManager {
                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                              VALUES ($1, $2, $3, $4, $5, $6, $7)
                              ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
-                            &[&subject_author, &did, &uri, &cid, &"like", &Some(subject), &indexed_at],
+                            &[&subject_author, &did, &uri, &cid, &"like", &Some(subject), &sort_at],
                         )
                         .await
                     {
@@ -4733,7 +4729,7 @@ impl IndexerManager {
                                         "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                                          VALUES ($1, $2, $3, $4, $5, $6, $7)
                                          ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
-                                        &[&reposter, &did, &uri, &cid, &"like-via-repost", &Some(via_uri_str), &indexed_at],
+                                        &[&reposter, &did, &uri, &cid, &"like-via-repost", &Some(via_uri_str), &sort_at],
                                     )
                                     .await,
                             );
@@ -4799,10 +4795,7 @@ impl IndexerManager {
             .map_err(|e| WintermuteError::Other(format!("invalid uri: {e}")))?;
         let uri = uri_obj.to_string();
         let subject = record.get("subject").and_then(|v| v.as_str()).unwrap_or("");
-        let created_at = record
-            .get("createdAt")
-            .and_then(|v| v.as_str())
-            .unwrap_or(indexed_at);
+        let (created_at, sort_at) = Self::created_and_sort_at(record, indexed_at);
         let (via, via_cid) = Self::extract_via(record);
 
         // Ensure the follow subject also has an actor row (cached)
@@ -4828,7 +4821,7 @@ impl IndexerManager {
                     "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                      VALUES ($1, $2, $3, $4, $5, $6, $7)
                      ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
-                    &[&subject, &did, &uri, &cid, &"follow", &None::<String>, &indexed_at],
+                    &[&subject, &did, &uri, &cid, &"follow", &None::<String>, &sort_at],
                 )
                 .await
             {
@@ -4921,10 +4914,7 @@ impl IndexerManager {
             .and_then(|v| v.get("cid"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let created_at = record
-            .get("createdAt")
-            .and_then(|v| v.as_str())
-            .unwrap_or(indexed_at);
+        let (created_at, sort_at) = Self::created_and_sort_at(record, indexed_at);
 
         let via = record
             .get("via")
@@ -4943,13 +4933,6 @@ impl IndexerManager {
                 &[&uri, &cid, &did, &subject, &subject_cid, &via, &via_cid, &created_at, &indexed_at],
             )
             .await?;
-
-        // sortAt is the earlier of indexedAt and createdAt
-        let sort_at = if indexed_at < created_at {
-            indexed_at
-        } else {
-            created_at
-        };
 
         // feed_item for repost: postUri is the subject (reposted post)
         client
@@ -4970,7 +4953,7 @@ impl IndexerManager {
                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                              VALUES ($1, $2, $3, $4, $5, $6, $7)
                              ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
-                            &[&subject_author, &did, &uri, &cid, &"repost", &Some(subject), &indexed_at],
+                            &[&subject_author, &did, &uri, &cid, &"repost", &Some(subject), &sort_at],
                         )
                         .await
                     {
@@ -4989,7 +4972,7 @@ impl IndexerManager {
                                         "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                                          VALUES ($1, $2, $3, $4, $5, $6, $7)
                                          ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
-                                        &[&original_reposter, &did, &uri, &cid, &"repost-via-repost", &Some(via_uri_str), &indexed_at],
+                                        &[&original_reposter, &did, &uri, &cid, &"repost-via-repost", &Some(via_uri_str), &sort_at],
                                     )
                                     .await,
                             );
