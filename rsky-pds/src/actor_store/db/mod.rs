@@ -225,7 +225,9 @@ pub const ACTOR_DB_MIGRATIONS: &[Migration] = &[
     // pre-migration rows map 'public' onto a fully public memberspace (the
     // old code tracked every writer), 'member-list' onto a plain memberspace
     // (preserving allowed_clients as allowedApps), and 'managing-app' onto a
-    // managedspace.
+    // managedspace. A row that already holds a JSON policy is kept: one can be
+    // written before this migration runs, through a store opened for reading
+    // (none of the legacy scalars is valid JSON).
     Migration {
         name: "006",
         sql: "\
@@ -233,6 +235,7 @@ pub const ACTOR_DB_MIGRATIONS: &[Migration] = &[
     ALTER TABLE space_member ADD COLUMN write INTEGER NOT NULL DEFAULT 1;\
     UPDATE space_def SET policy = \
     CASE \
+        WHEN json_valid(policy) THEN policy \
         WHEN policy = 'managing-app' AND managing_app IS NOT NULL \
             THEN json_set('{\"$type\":\"com.atproto.managedspace.policy\"}', '$.managingApp', managing_app) \
         WHEN app_access = 'allow-list' AND allowed_clients IS NOT NULL \

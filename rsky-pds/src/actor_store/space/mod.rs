@@ -724,6 +724,7 @@ impl SpaceStore {
     // ---- space-host role: definitions, members, writers, syncers, jti ----
 
     pub async fn create_space_def(&self, def: SpaceDefRow) -> Result<()> {
+        self.ensure_json_policies().await?;
         let created_at = rsky_common::now();
         self.db
             .run(move |conn| {
@@ -807,6 +808,7 @@ impl SpaceStore {
     }
 
     pub async fn update_space_def(&self, def: SpaceDefRow) -> Result<()> {
+        self.ensure_json_policies().await?;
         self.db
             .run(move |conn| {
                 let n = conn.execute(
@@ -1216,20 +1218,38 @@ impl SpaceStore {
     /// rsky-only table, which no other implementation reads; the migration runs
     /// through the ordinary migrator, so it is recorded as on any write.
     async fn ensure_sequenced_writer_set(&self) -> Result<()> {
-        let sequenced = self
+        self.migrate_unless_column("space_writer", "space_rev")
+            .await
+    }
+
+    /// Bring the policy schema up to the JSON one (migration 006) if this
+    /// store predates it, before a policy is written.
+    ///
+    /// Space definitions are written through the authority's store opened for
+    /// reading too. A JSON policy written into an older store would otherwise
+    /// sit under the legacy schema until something else migrated the store
+    /// (e.g. the writer set above), and 006 would then convert it a second
+    /// time.
+    async fn ensure_json_policies(&self) -> Result<()> {
+        self.migrate_unless_column("space_member", "read").await
+    }
+
+    /// Run the actor-store migrations if `table` lacks `column`, the mark of
+    /// the migration a caller needs.
+    async fn migrate_unless_column(&self, table: &'static str, column: &'static str) -> Result<()> {
+        let current = self
             .db
-            .run(|conn| {
-                let mut stmt =
-                    conn.prepare("SELECT name FROM pragma_table_info('space_writer')")?;
+            .run(move |conn| {
+                let mut stmt = conn.prepare("SELECT name FROM pragma_table_info(?1)")?;
                 let has = stmt
-                    .query_map([], |row| row.get::<_, String>(0))?
+                    .query_map([table], |row| row.get::<_, String>(0))?
                     .collect::<Result<Vec<String>, rusqlite::Error>>()?
                     .iter()
-                    .any(|name| name == "space_rev");
+                    .any(|name| name == column);
                 Ok(has)
             })
             .await?;
-        if !sequenced {
+        if !current {
             crate::db::migrator::migrate_to_latest(
                 &self.db,
                 crate::actor_store::db::ACTOR_DB_MIGRATION_SET,
