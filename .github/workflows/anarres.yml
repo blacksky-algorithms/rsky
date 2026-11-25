@@ -109,7 +109,7 @@ jobs:
           ANARRES_BASE_URL: ${{ secrets.ANARRES_BASE_URL }}
           ANARRES_GATEWAY_KEY: ${{ secrets.ANARRES_GATEWAY_KEY }}
         run: |
-          if curl -fs -m 20 -o /dev/null -H "Authorization: Bearer $ANARRES_GATEWAY_KEY" "$ANARRES_BASE_URL/models"; then
+          if curl -fs -m 10 --retry 6 --retry-delay 10 --retry-all-errors --retry-max-time 120 -o /dev/null -H "Authorization: Bearer $ANARRES_GATEWAY_KEY" "$ANARRES_BASE_URL/models"; then
             echo "online=true" >> "$GITHUB_OUTPUT"
           else
             echo "::notice::Anarres is offline; skipping"
