@@ -3582,14 +3582,58 @@ mod indexer_tests {
         assert_eq!(IndexerManager::notification_sort_at(later, later), later);
     }
 
+    #[test]
+    fn notification_sort_at_normalizes_created_at() {
+        let indexed = "2026-08-04T00:00:00.000Z";
+        let sort_at = |created: &str| IndexerManager::notification_sort_at(created, indexed);
+        assert_eq!(
+            sort_at("2024-01-02T12:04:05+09:00"),
+            "2024-01-02T03:04:05.000Z"
+        );
+        assert_eq!(
+            sort_at("2024-01-02T03:04:05.123456Z"),
+            "2024-01-02T03:04:05.123Z"
+        );
+        assert_eq!(sort_at("2024-01-02T03:04:05"), "2024-01-02T03:04:05.000Z");
+        assert_eq!(sort_at("2026-08-03T23:30:00-05:00"), indexed);
+        for malformed in ["", "!x", "next tuesday"] {
+            assert_eq!(sort_at(malformed), "1970-01-01T00:00:00.000Z");
+        }
+    }
+
     #[tokio::test]
     async fn subject_notifications_sort_at_record_time_on_both_paths() {
+        assert_subject_notifications_sort_at(
+            "sortat",
+            "2024-01-02T03:04:05.000Z",
+            "2024-01-02T03:04:05.000Z",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn subject_notifications_normalize_created_at_on_both_paths() {
+        assert_subject_notifications_sort_at(
+            "sortat-offset",
+            "2024-01-02T12:04:05+09:00",
+            "2024-01-02T03:04:05.000Z",
+        )
+        .await;
+        assert_subject_notifications_sort_at("sortat-malformed", "!x", "1970-01-01T00:00:00.000Z")
+            .await;
+    }
+
+    async fn assert_subject_notifications_sort_at(
+        tag: &str,
+        created: &str,
+        expected_sort_at: &str,
+    ) {
         use crate::types::{IndexJob, WriteAction};
 
         let pool = setup_test_pool();
-        let author = "did:plc:wintermute-test-sortat-author";
-        let reposter = "did:plc:wintermute-test-sortat-reposter";
-        let actor = "did:plc:wintermute-test-sortat-actor";
+        let author = &format!("did:plc:wintermute-test-{tag}-author");
+        let reposter = &format!("did:plc:wintermute-test-{tag}-reposter");
+        let actor = &format!("did:plc:wintermute-test-{tag}-actor");
         for did in [author, reposter, actor] {
             cleanup_test_data(&pool, did).await;
         }
@@ -3607,7 +3651,6 @@ mod indexer_tests {
         drop(client);
 
         let cid = "bafyreihhl5mpvjkrhnnagen2fomozzhnhhdq2jr6cego2nzbvmwewv5rd4";
-        let created = "2024-01-02T03:04:05.000Z";
         let indexed = "2026-08-04T00:00:00.000Z";
         let via = format!("at://{reposter}/app.bsky.feed.repost/sortatvia");
         let job = |collection: &str, rkey: &str, record: serde_json::Value| IndexJob {
@@ -3699,7 +3742,7 @@ mod indexer_tests {
                 record_uri,
                 did.to_owned(),
                 reason.to_owned(),
-                created.to_owned(),
+                expected_sort_at.to_owned(),
             )
         };
         let expected = vec![

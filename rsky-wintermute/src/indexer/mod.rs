@@ -3711,7 +3711,7 @@ impl IndexerManager {
                     &uri,
                     &pj.job.cid,
                     subject_uri,
-                    Self::notification_sort_at(created_at, &pj.job.indexed_at),
+                    &Self::notification_sort_at(created_at, &pj.job.indexed_at),
                     "like",
                     "like-via-repost",
                 );
@@ -3825,9 +3825,12 @@ impl IndexerManager {
         }
     }
 
-    fn notification_sort_at<'a>(created_at: &'a str, indexed_at: &'a str) -> &'a str {
-        if indexed_at < created_at {
-            indexed_at
+    fn notification_sort_at(created_at: &str, indexed_at: &str) -> String {
+        let created_at = calendar::normalize_datetime(created_at)
+            .or_else(|| calendar::normalize_datetime(&format!("{created_at}Z")))
+            .unwrap_or_else(|| "1970-01-01T00:00:00.000Z".to_owned());
+        if indexed_at < created_at.as_str() {
+            indexed_at.to_owned()
         } else {
             created_at
         }
@@ -3866,8 +3869,7 @@ impl IndexerManager {
                         record_cid: pj.job.cid.clone(),
                         reason: "follow",
                         reason_subject: None,
-                        sort_at: Self::notification_sort_at(created_at, &pj.job.indexed_at)
-                            .to_owned(),
+                        sort_at: Self::notification_sort_at(created_at, &pj.job.indexed_at),
                     });
                 }
 
@@ -3942,7 +3944,7 @@ impl IndexerManager {
                     &uri,
                     &pj.job.cid,
                     subject_uri,
-                    &sort_at,
+                    &Self::notification_sort_at(&created_at, &pj.job.indexed_at),
                     "repost",
                     "repost-via-repost",
                 );
@@ -4973,6 +4975,7 @@ impl IndexerManager {
             .await?;
 
         if row_count > 0 && !subject.is_empty() {
+            let notif_sort_at = Self::notification_sort_at(created_at, indexed_at);
             if let Ok(subject_uri) = AtUri::new(subject.to_owned(), None) {
                 let subject_author = subject_uri.get_hostname();
                 if subject_author != did {
@@ -4981,7 +4984,7 @@ impl IndexerManager {
                             "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                              VALUES ($1, $2, $3, $4, $5, $6, $7)
                              ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
-                            &[&subject_author, &did, &uri, &cid, &"repost", &Some(subject), &sort_at],
+                            &[&subject_author, &did, &uri, &cid, &"repost", &Some(subject), &notif_sort_at],
                         )
                         .await
                     {
@@ -5000,7 +5003,7 @@ impl IndexerManager {
                                         "INSERT INTO notification (did, author, \"recordUri\", \"recordCid\", reason, \"reasonSubject\", \"sortAt\")
                                          VALUES ($1, $2, $3, $4, $5, $6, $7)
                                          ON CONFLICT (did, \"recordUri\", reason) DO NOTHING",
-                                        &[&original_reposter, &did, &uri, &cid, &"repost-via-repost", &Some(via_uri_str), &sort_at],
+                                        &[&original_reposter, &did, &uri, &cid, &"repost-via-repost", &Some(via_uri_str), &notif_sort_at],
                                     )
                                     .await,
                             );
