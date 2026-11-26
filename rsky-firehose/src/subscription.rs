@@ -1,4 +1,5 @@
 use futures::{Sink, SinkExt, Stream, StreamExt};
+use std::io;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::{
@@ -9,6 +10,9 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use url::Url;
 
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+pub const MIN_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
+pub const MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const KEEPALIVES_PER_IDLE_TIMEOUT: u32 = 3;
 
 #[derive(Debug, thiserror::Error)]
@@ -21,29 +25,28 @@ pub enum Disconnect {
     Socket(#[from] WsError),
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum ConnectError {
-    #[error("handshake did not complete within {}s", .0.as_secs())]
-    Timeout(Duration),
-    #[error(transparent)]
-    Socket(#[from] WsError),
-}
-
 pub fn idle_timeout(configured_secs: Option<&str>) -> Duration {
     configured_secs
         .and_then(|secs| secs.parse::<u64>().ok())
         .filter(|secs| *secs > 0)
-        .map_or(DEFAULT_IDLE_TIMEOUT, Duration::from_secs)
+        .map_or(DEFAULT_IDLE_TIMEOUT, |secs| {
+            Duration::from_secs(secs).min(MAX_IDLE_TIMEOUT)
+        })
 }
 
 pub async fn connect(
     url: &Url,
     handshake_timeout: Duration,
-) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, ConnectError> {
+) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, WsError> {
     match timeout(handshake_timeout, connect_async(url)).await {
-        Ok(Ok((socket, _response))) => Ok(socket),
-        Ok(Err(error)) => Err(ConnectError::Socket(error)),
-        Err(_) => Err(ConnectError::Timeout(handshake_timeout)),
+        Ok(connected) => connected.map(|(socket, _response)| socket),
+        Err(_) => Err(WsError::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "handshake did not complete within {}s",
+                handshake_timeout.as_secs()
+            ),
+        ))),
     }
 }
 
@@ -52,7 +55,6 @@ pub struct Subscription<R, W> {
     writer: W,
     idle_timeout: Duration,
     keepalive: Interval,
-    deadline: Instant,
 }
 
 impl<R, W> Subscription<R, W>
@@ -61,36 +63,37 @@ where
     W: Sink<Message, Error = WsError> + Unpin,
 {
     pub fn new(reader: R, writer: W, idle_timeout: Duration) -> Self {
+        let idle_timeout = idle_timeout.clamp(MIN_IDLE_TIMEOUT, MAX_IDLE_TIMEOUT);
         let keepalive_period = idle_timeout / KEEPALIVES_PER_IDLE_TIMEOUT;
-        let now = Instant::now();
-        let mut keepalive = interval_at(now + keepalive_period, keepalive_period);
+        let mut keepalive = interval_at(Instant::now() + keepalive_period, keepalive_period);
         keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
         Self {
             reader,
             writer,
             idle_timeout,
             keepalive,
-            deadline: now + idle_timeout,
         }
     }
 
     /// Any inbound frame, pongs included, proves the peer is alive and resets the idle deadline.
+    /// The deadline only runs while this is awaited, so a slow caller is never mistaken for a dead peer.
     pub async fn next_binary(&mut self) -> Result<Vec<u8>, Disconnect> {
+        let mut deadline = Instant::now() + self.idle_timeout;
         loop {
             tokio::select! {
                 biased;
                 frame = self.reader.next() => {
                     let message = frame.ok_or(Disconnect::Closed)??;
-                    self.deadline = Instant::now() + self.idle_timeout;
+                    deadline = Instant::now() + self.idle_timeout;
                     match message {
                         Message::Binary(payload) => return Ok(payload),
                         Message::Close(_) => return Err(Disconnect::Closed),
                         _ => {}
                     }
                 }
-                () = sleep_until(self.deadline) => return Err(Disconnect::Idle(self.idle_timeout)),
+                () = sleep_until(deadline) => return Err(Disconnect::Idle(self.idle_timeout)),
                 _ = self.keepalive.tick() => {
-                    timeout_at(self.deadline, self.writer.send(Message::Ping(Vec::new())))
+                    timeout_at(deadline, self.writer.send(Message::Ping(Vec::new())))
                         .await
                         .map_err(|_| Disconnect::Idle(self.idle_timeout))??;
                 }
@@ -136,6 +139,20 @@ mod tests {
         assert_eq!(idle_timeout(Some("abc")), DEFAULT_IDLE_TIMEOUT);
         assert_eq!(idle_timeout(Some("0")), DEFAULT_IDLE_TIMEOUT);
         assert_eq!(idle_timeout(Some("15")), Duration::from_secs(15));
+        assert_eq!(idle_timeout(Some("86401")), MAX_IDLE_TIMEOUT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn out_of_range_idle_timeouts_do_not_panic() {
+        let never = u64::MAX.to_string();
+        for idle in [idle_timeout(Some(&never)), Duration::MAX, Duration::ZERO] {
+            let (inbound, reader) = mpsc::unbounded();
+            let (writer, _outbound) = mpsc::unbounded();
+            let writer = writer.sink_map_err(closed as fn(mpsc::SendError) -> WsError);
+            let mut subscription = Subscription::new(reader, writer, idle);
+            deliver(&inbound, Message::Binary(vec![1]));
+            assert_eq!(subscription.next_binary().await.unwrap(), vec![1]);
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -210,6 +227,21 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn caller_pause_past_the_idle_timeout_is_not_idle() {
+        let (inbound, _outbound, mut subscription) = subscription();
+        tokio::time::advance(Duration::from_secs(100)).await;
+        let resumed = Instant::now();
+        let peer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            deliver(&inbound, Message::Binary(vec![5]));
+            inbound
+        });
+        assert_eq!(subscription.next_binary().await.unwrap(), vec![5]);
+        assert_eq!(resumed.elapsed(), Duration::from_secs(30));
+        drop(peer.await.unwrap());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn pongs_keep_a_quiet_subscription_alive() {
         let (inbound, _outbound, mut subscription) = subscription();
         let started = Instant::now();
@@ -277,8 +309,11 @@ mod tests {
         let (_listener, url) = listener().await;
         let handshake_timeout = Duration::from_millis(200);
         let error = connect(&url, handshake_timeout).await.unwrap_err();
-        assert!(matches!(error, ConnectError::Timeout(elapsed) if elapsed == handshake_timeout));
-        assert_eq!(error.to_string(), "handshake did not complete within 0s");
+        assert!(matches!(&error, WsError::Io(io) if io.kind() == io::ErrorKind::TimedOut));
+        assert_eq!(
+            error.to_string(),
+            "IO error: handshake did not complete within 0s"
+        );
     }
 
     #[tokio::test]
@@ -286,6 +321,6 @@ mod tests {
         let (listener, url) = listener().await;
         drop(listener);
         let error = connect(&url, IDLE).await.unwrap_err();
-        assert!(matches!(error, ConnectError::Socket(WsError::Io(_))));
+        assert!(matches!(&error, WsError::Io(io) if io.kind() == io::ErrorKind::ConnectionRefused));
     }
 }

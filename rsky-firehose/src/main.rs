@@ -384,7 +384,7 @@ async fn main() {
     );
 
     loop {
-        match subscription::connect(&ws_url, idle_timeout).await {
+        match subscription::connect(&ws_url, subscription::HANDSHAKE_TIMEOUT).await {
             Ok(socket) => {
                 println!("Connected to {}", subscriber_base_path);
                 let (writer, reader) = socket.split();
