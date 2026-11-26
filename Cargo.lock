@@ -8358,7 +8358,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-labeler"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "atrium-api 0.24.10",
@@ -8376,6 +8376,7 @@ dependencies = [
  "reqwest 0.12.23",
  "retry",
  "rsky-common",
+ "rsky-firehose",
  "rsky-lexicon",
  "serde",
  "serde_bytes",
