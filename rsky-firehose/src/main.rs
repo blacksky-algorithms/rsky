@@ -395,7 +395,7 @@ async fn main() {
     let semaphore = Arc::new(Semaphore::new(CONCURRENT_TASKS as usize));
 
     loop {
-        let resume_from = cursor.get();
+        let resume_from = cursor.checkpoint();
         let ws_url = websocket_url(&subscriber_base_path, &subscriber_endpoint, resume_from);
         match subscription::connect(ws_url.as_str(), subscription::HANDSHAKE_TIMEOUT).await {
             Ok(socket) => {

@@ -52,24 +52,37 @@ pub fn idle_timeout(configured_secs: Option<&str>) -> Duration {
         })
 }
 
-/// Highest sequence number seen so far, sent as the cursor on reconnect so no events are skipped.
-pub struct ResumeCursor(AtomicI64);
+/// Cursor for the next connect: the highest sequence seen on the last connection that delivered
+/// events. A lower value replaces a higher one, so a relay whose sequence restarted is followed.
+pub struct ResumeCursor {
+    resume_from: AtomicI64,
+    seen: AtomicI64,
+}
 
 impl ResumeCursor {
     pub fn new(configured: Option<i64>) -> Self {
-        Self(AtomicI64::new(configured.unwrap_or(NO_SEQ)))
+        Self {
+            resume_from: AtomicI64::new(configured.unwrap_or(NO_SEQ)),
+            seen: AtomicI64::new(NO_SEQ),
+        }
     }
 
     pub fn observe(&self, seq: i64) {
-        self.0.fetch_max(seq, Ordering::Relaxed);
+        self.seen.fetch_max(seq, Ordering::Relaxed);
     }
 
     pub fn reset(&self) {
-        self.0.store(NO_SEQ, Ordering::Relaxed);
+        self.resume_from.store(NO_SEQ, Ordering::Relaxed);
+        self.seen.store(NO_SEQ, Ordering::Relaxed);
     }
 
-    pub fn get(&self) -> Option<i64> {
-        let seq = self.0.load(Ordering::Relaxed);
+    /// Call once before each connect, after frames from the previous connection have finished.
+    pub fn checkpoint(&self) -> Option<i64> {
+        let seen = self.seen.swap(NO_SEQ, Ordering::Relaxed);
+        if seen > NO_SEQ {
+            self.resume_from.store(seen, Ordering::Relaxed);
+        }
+        let seq = self.resume_from.load(Ordering::Relaxed);
         (seq > NO_SEQ).then_some(seq)
     }
 }
@@ -212,19 +225,34 @@ mod tests {
     }
 
     #[test]
-    fn resume_cursor_tracks_the_highest_sequence_seen() {
+    fn resume_cursor_checkpoints_the_highest_sequence_of_each_connection() {
         let cursor = ResumeCursor::new(None);
-        assert_eq!(cursor.get(), None);
+        assert_eq!(cursor.checkpoint(), None);
         cursor.observe(7);
         cursor.observe(5);
-        assert_eq!(cursor.get(), Some(7));
-        cursor.reset();
-        assert_eq!(cursor.get(), None);
+        assert_eq!(cursor.checkpoint(), Some(7));
+        assert_eq!(cursor.checkpoint(), Some(7));
 
         let configured = ResumeCursor::new(Some(0));
-        assert_eq!(configured.get(), Some(0));
+        assert_eq!(configured.checkpoint(), Some(0));
         configured.observe(3);
-        assert_eq!(configured.get(), Some(3));
+        assert_eq!(configured.checkpoint(), Some(3));
+    }
+
+    #[test]
+    fn resume_cursor_follows_a_relay_whose_sequence_restarted() {
+        let cursor = ResumeCursor::new(Some(1_000));
+        cursor.observe(4);
+        cursor.observe(6);
+        assert_eq!(cursor.checkpoint(), Some(6));
+    }
+
+    #[test]
+    fn resume_cursor_reset_forgets_everything() {
+        let cursor = ResumeCursor::new(Some(1_000));
+        cursor.observe(1_001);
+        cursor.reset();
+        assert_eq!(cursor.checkpoint(), None);
     }
 
     #[tokio::test(start_paused = true)]
