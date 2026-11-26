@@ -367,11 +367,13 @@ async fn main() {
         env::var("FEEDGEN_SUBSCRIPTION_PATH").unwrap_or_else(|_| "wss://bsky.network".to_string());
     let subscriber_endpoint = env::var("FEEDGEN_SUBSCRIPTION_ENDPOINT")
         .unwrap_or_else(|_| "com.atproto.sync.subscribeRepos".to_string());
-    let cursor = Arc::new(ResumeCursor::new(
-        env::var("FEEDGEN_SUBSCRIPTION_CURSOR")
-            .ok()
-            .and_then(|configured| configured.parse().ok()),
-    ));
+    let configured_cursor =
+        subscription::configured_cursor(env::var("FEEDGEN_SUBSCRIPTION_CURSOR").ok().as_deref())
+            .unwrap_or_else(|error| {
+                eprintln!("FEEDGEN_SUBSCRIPTION_CURSOR: {error}");
+                std::process::exit(1);
+            });
+    let cursor = Arc::new(ResumeCursor::new(configured_cursor));
     let idle_timeout = subscription::idle_timeout(
         env::var("FEEDGEN_SUBSCRIPTION_IDLE_TIMEOUT_SECS")
             .ok()

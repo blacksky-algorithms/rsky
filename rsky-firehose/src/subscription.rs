@@ -26,6 +26,23 @@ pub enum Disconnect {
     Socket(#[from] WsError),
 }
 
+#[derive(Debug, PartialEq, thiserror::Error)]
+#[error("cursor must be a non-negative integer, got {0:?}")]
+pub struct InvalidCursor(String);
+
+pub fn configured_cursor(configured: Option<&str>) -> Result<Option<i64>, InvalidCursor> {
+    match configured
+        .map(str::trim)
+        .filter(|cursor| !cursor.is_empty())
+    {
+        None => Ok(None),
+        Some(cursor) => match cursor.parse::<i64>() {
+            Ok(seq) if seq > NO_SEQ => Ok(Some(seq)),
+            _ => Err(InvalidCursor(cursor.to_string())),
+        },
+    }
+}
+
 pub fn idle_timeout(configured_secs: Option<&str>) -> Duration {
     configured_secs
         .and_then(|secs| secs.parse::<u64>().ok())
@@ -172,6 +189,25 @@ mod tests {
             let mut subscription = Subscription::new(reader, writer, idle);
             deliver(&inbound, Message::Binary(vec![1].into()));
             assert_eq!(subscription.next_binary().await.unwrap(), vec![1]);
+        }
+    }
+
+    #[test]
+    fn configured_cursor_rejects_values_a_relay_cannot_resume_from() {
+        assert_eq!(configured_cursor(None), Ok(None));
+        assert_eq!(configured_cursor(Some(" ")), Ok(None));
+        assert_eq!(configured_cursor(Some("0")), Ok(Some(0)));
+        assert_eq!(
+            configured_cursor(Some(" 35876714667\n")),
+            Ok(Some(35876714667))
+        );
+        for invalid in ["abc", "-1", "1.5", "99999999999999999999"] {
+            let error = configured_cursor(Some(invalid)).unwrap_err();
+            assert_eq!(error, InvalidCursor(invalid.to_string()));
+            assert_eq!(
+                error.to_string(),
+                format!("cursor must be a non-negative integer, got {invalid:?}")
+            );
         }
     }
 
