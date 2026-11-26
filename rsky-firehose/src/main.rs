@@ -3,6 +3,7 @@
 use dotenvy::dotenv;
 use futures::StreamExt as _;
 use lexicon_cid::Cid;
+use rsky_firehose::subscription::{self, Subscription};
 use rsky_lexicon::app::bsky::feed::like::Like;
 use rsky_lexicon::app::bsky::feed::Post;
 use rsky_lexicon::app::bsky::graph::follow::Follow;
@@ -15,8 +16,6 @@ use std::sync::Arc;
 use std::{thread, time::Duration};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
 
@@ -357,6 +356,12 @@ async fn main() {
     let subscriber_endpoint = env::var("FEEDGEN_SUBSCRIPTION_ENDPOINT")
         .unwrap_or_else(|_| "com.atproto.sync.subscribeRepos".to_string());
     let subscriber_cursor = env::var("FEEDGEN_SUBSCRIPTION_CURSOR").ok();
+    let idle_timeout = subscription::idle_timeout(
+        env::var("FEEDGEN_SUBSCRIPTION_IDLE_TIMEOUT_SECS")
+            .ok()
+            .as_deref(),
+    );
+    println!("Idle timeout: {}s", idle_timeout.as_secs());
 
     // Configure the reqwest client with connection pooling settings
     let client = Arc::new(
@@ -379,62 +384,47 @@ async fn main() {
     );
 
     loop {
-        // Attempt to establish a WebSocket connection
-        match connect_async(&ws_url).await {
-            Ok((mut socket, _response)) => {
+        match subscription::connect(&ws_url, idle_timeout).await {
+            Ok(socket) => {
                 println!("Connected to {}", subscriber_base_path);
+                let (writer, reader) = socket.split();
+                let mut subscription = Subscription::new(reader, writer, idle_timeout);
 
-                // Listen for incoming messages
-                while let Some(msg_result) = socket.next().await {
-                    match msg_result {
-                        Ok(Message::Binary(message)) => {
-                            let client = Arc::clone(&client);
-                            let semaphore = Arc::clone(&semaphore);
-
-                            // Acquire a permit before spawning a new task
-                            let permit = match semaphore.clone().acquire_owned().await {
-                                Ok(permit) => permit,
-                                Err(_) => {
-                                    eprintln!("Semaphore closed");
-                                    break;
-                                }
-                            };
-
-                            // Spawn a new asynchronous task to process the message
-                            tokio::spawn(async move {
-                                // The permit is held for the duration of the task
-                                let subscriber_endpoint = env::var("FEEDGEN_SUBSCRIPTION_ENDPOINT")
-                                    .unwrap_or_else(|_| {
-                                        "com.atproto.sync.subscribeRepos".to_string()
-                                    });
-
-                                match subscriber_endpoint.as_str() {
-                                    "com.atproto.sync.subscribeRepos" => {
-                                        process(message, &client).await
-                                    }
-                                    "com.atproto.label.subscribeLabels" => {
-                                        process_labels(message, &client).await
-                                    }
-                                    _ => panic!(
-                                        "Unexpected subscription endpoint: {subscriber_endpoint}"
-                                    ),
-                                };
-                                // Permit is automatically released when it goes out of scope
-                                drop(permit);
-                            });
-                        }
-                        Ok(Message::Close(_)) => {
-                            println!("WebSocket connection closed by server.");
+                loop {
+                    let message = match subscription.next_binary().await {
+                        Ok(message) => message,
+                        Err(reason) => {
+                            eprintln!("{reason}");
                             break;
                         }
-                        Ok(_) => {
-                            // Handle other message types if necessary
-                        }
-                        Err(e) => {
-                            eprintln!("WebSocket error: {}", e);
+                    };
+                    let client = Arc::clone(&client);
+
+                    // Acquire a permit before spawning a new task
+                    let permit = match semaphore.clone().acquire_owned().await {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            eprintln!("Semaphore closed");
                             break;
                         }
-                    }
+                    };
+
+                    // Spawn a new asynchronous task to process the message
+                    tokio::spawn(async move {
+                        // The permit is held for the duration of the task
+                        let subscriber_endpoint = env::var("FEEDGEN_SUBSCRIPTION_ENDPOINT")
+                            .unwrap_or_else(|_| "com.atproto.sync.subscribeRepos".to_string());
+
+                        match subscriber_endpoint.as_str() {
+                            "com.atproto.sync.subscribeRepos" => process(message, &client).await,
+                            "com.atproto.label.subscribeLabels" => {
+                                process_labels(message, &client).await
+                            }
+                            _ => panic!("Unexpected subscription endpoint: {subscriber_endpoint}"),
+                        };
+                        // Permit is automatically released when it goes out of scope
+                        drop(permit);
+                    });
                 }
             }
             Err(error) => {

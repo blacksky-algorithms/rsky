@@ -7,3 +7,4 @@ extern crate serde_json;
 pub mod car;
 pub mod firehose;
 pub mod models;
+pub mod subscription;
