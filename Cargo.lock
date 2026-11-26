@@ -8289,7 +8289,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-firehose"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -8312,7 +8312,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
- "tokio-tungstenite 0.18.0",
+ "tokio-tungstenite 0.26.2",
  "url",
 ]
 
@@ -8358,7 +8358,7 @@ dependencies = [
 
 [[package]]
 name = "rsky-labeler"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "atrium-api 0.24.10",
@@ -8376,6 +8376,7 @@ dependencies = [
  "reqwest 0.12.23",
  "retry",
  "rsky-common",
+ "rsky-firehose",
  "rsky-lexicon",
  "serde",
  "serde_bytes",

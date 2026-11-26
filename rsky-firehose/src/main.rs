@@ -3,6 +3,8 @@
 use dotenvy::dotenv;
 use futures::StreamExt as _;
 use lexicon_cid::Cid;
+use rsky_firehose::firehose::{read_error, FUTURE_CURSOR};
+use rsky_firehose::subscription::{self, ResumeCursor, Subscription};
 use rsky_lexicon::app::bsky::feed::like::Like;
 use rsky_lexicon::app::bsky::feed::Post;
 use rsky_lexicon::app::bsky::graph::follow::Follow;
@@ -15,8 +17,7 @@ use std::sync::Arc;
 use std::{thread, time::Duration};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::protocol::Message;
+use tokio_tungstenite::tungstenite::Bytes;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
 
@@ -89,7 +90,21 @@ async fn update_cursor(
     Ok(())
 }
 
-async fn process(message: Vec<u8>, client: &reqwest::Client) {
+const CONCURRENT_TASKS: u32 = 100;
+
+fn report_unreadable(message: &[u8], error: &anyhow::Error, cursor: &ResumeCursor) {
+    match read_error(message) {
+        Some(frame) => {
+            eprintln!("@LOG: Subscription error frame: {frame:?}");
+            if frame.error == FUTURE_CURSOR {
+                cursor.reset();
+            }
+        }
+        None => eprintln!("@LOG: Error unwrapping message and header: {error}"),
+    }
+}
+
+async fn process(message: Bytes, client: &reqwest::Client, cursor: &ResumeCursor) {
     let default_queue_path =
         env::var("FEEDGEN_QUEUE_ENDPOINT").unwrap_or("https://[::1]:8081".into());
     let subscriber_base_path =
@@ -97,6 +112,7 @@ async fn process(message: Vec<u8>, client: &reqwest::Client) {
 
     match rsky_firehose::firehose::read(&message) {
         Ok(Some((_header, body))) => {
+            cursor.observe(rsky_firehose::firehose::seq(&body));
             let mut posts_to_delete = Vec::new();
             let mut posts_to_create = Vec::new();
             let mut likes_to_delete = Vec::new();
@@ -269,14 +285,11 @@ async fn process(message: Vec<u8>, client: &reqwest::Client) {
             }
         }
         Ok(None) => (),
-        Err(error) => eprintln!(
-            "@LOG: Error unwrapping message and header: {}",
-            error.to_string()
-        ),
+        Err(error) => report_unreadable(&message, &error, cursor),
     }
 }
 
-async fn process_labels(message: Vec<u8>, client: &reqwest::Client) {
+async fn process_labels(message: Bytes, client: &reqwest::Client, cursor: &ResumeCursor) {
     let default_queue_path =
         env::var("FEEDGEN_QUEUE_ENDPOINT").unwrap_or("https://[::1]:8081".into());
     let subscriber_base_path =
@@ -284,6 +297,7 @@ async fn process_labels(message: Vec<u8>, client: &reqwest::Client) {
 
     match rsky_firehose::firehose::read_labels(&message) {
         Ok((_header, body)) => {
+            cursor.observe(body.seq);
             let mut labels_to_create = Vec::new();
 
             // update stored cursor every 20 events or so
@@ -325,17 +339,14 @@ async fn process_labels(message: Vec<u8>, client: &reqwest::Client) {
                 };
             }
         }
-        Err(error) => eprintln!(
-            "@LOG: Error unwrapping message and header: {}",
-            error.to_string()
-        ),
+        Err(error) => report_unreadable(&message, &error, cursor),
     }
 }
 
 fn websocket_url(
     subscriber_base_path: &str,
     subscriber_endpoint: &str,
-    subscriber_cursor: Option<&str>,
+    subscriber_cursor: Option<i64>,
 ) -> Url {
     let url = format!("{}/xrpc/{}", subscriber_base_path, subscriber_endpoint);
     let mut ws_url = Url::parse(&url).expect("Invalid WebSocket URL");
@@ -356,7 +367,19 @@ async fn main() {
         env::var("FEEDGEN_SUBSCRIPTION_PATH").unwrap_or_else(|_| "wss://bsky.network".to_string());
     let subscriber_endpoint = env::var("FEEDGEN_SUBSCRIPTION_ENDPOINT")
         .unwrap_or_else(|_| "com.atproto.sync.subscribeRepos".to_string());
-    let subscriber_cursor = env::var("FEEDGEN_SUBSCRIPTION_CURSOR").ok();
+    let configured_cursor =
+        subscription::configured_cursor(env::var("FEEDGEN_SUBSCRIPTION_CURSOR").ok().as_deref())
+            .unwrap_or_else(|error| {
+                eprintln!("FEEDGEN_SUBSCRIPTION_CURSOR: {error}");
+                std::process::exit(1);
+            });
+    let cursor = Arc::new(ResumeCursor::new(configured_cursor));
+    let idle_timeout = subscription::idle_timeout(
+        env::var("FEEDGEN_SUBSCRIPTION_IDLE_TIMEOUT_SECS")
+            .ok()
+            .as_deref(),
+    );
+    println!("Idle timeout: {}s", idle_timeout.as_secs());
 
     // Configure the reqwest client with connection pooling settings
     let client = Arc::new(
@@ -369,73 +392,62 @@ async fn main() {
     );
 
     // Create a semaphore to limit the number of concurrent processing tasks
-    let semaphore = Arc::new(Semaphore::new(100)); // Adjust the limit as needed
-
-    // Construct the WebSocket URL
-    let ws_url = websocket_url(
-        &subscriber_base_path,
-        &subscriber_endpoint,
-        subscriber_cursor.as_deref(),
-    );
+    let semaphore = Arc::new(Semaphore::new(CONCURRENT_TASKS as usize));
 
     loop {
-        // Attempt to establish a WebSocket connection
-        match connect_async(&ws_url).await {
-            Ok((mut socket, _response)) => {
+        let resume_from = cursor.checkpoint();
+        let ws_url = websocket_url(&subscriber_base_path, &subscriber_endpoint, resume_from);
+        match subscription::connect(ws_url.as_str(), subscription::HANDSHAKE_TIMEOUT).await {
+            Ok(socket) => {
                 println!("Connected to {}", subscriber_base_path);
-
-                // Listen for incoming messages
-                while let Some(msg_result) = socket.next().await {
-                    match msg_result {
-                        Ok(Message::Binary(message)) => {
-                            let client = Arc::clone(&client);
-                            let semaphore = Arc::clone(&semaphore);
-
-                            // Acquire a permit before spawning a new task
-                            let permit = match semaphore.clone().acquire_owned().await {
-                                Ok(permit) => permit,
-                                Err(_) => {
-                                    eprintln!("Semaphore closed");
-                                    break;
-                                }
-                            };
-
-                            // Spawn a new asynchronous task to process the message
-                            tokio::spawn(async move {
-                                // The permit is held for the duration of the task
-                                let subscriber_endpoint = env::var("FEEDGEN_SUBSCRIPTION_ENDPOINT")
-                                    .unwrap_or_else(|_| {
-                                        "com.atproto.sync.subscribeRepos".to_string()
-                                    });
-
-                                match subscriber_endpoint.as_str() {
-                                    "com.atproto.sync.subscribeRepos" => {
-                                        process(message, &client).await
-                                    }
-                                    "com.atproto.label.subscribeLabels" => {
-                                        process_labels(message, &client).await
-                                    }
-                                    _ => panic!(
-                                        "Unexpected subscription endpoint: {subscriber_endpoint}"
-                                    ),
-                                };
-                                // Permit is automatically released when it goes out of scope
-                                drop(permit);
-                            });
-                        }
-                        Ok(Message::Close(_)) => {
-                            println!("WebSocket connection closed by server.");
-                            break;
-                        }
-                        Ok(_) => {
-                            // Handle other message types if necessary
-                        }
-                        Err(e) => {
-                            eprintln!("WebSocket error: {}", e);
-                            break;
-                        }
-                    }
+                if let Some(seq) = resume_from {
+                    println!("Resuming from cursor {seq}");
                 }
+                let (writer, reader) = socket.split();
+                let mut subscription = Subscription::new(reader, writer, idle_timeout);
+
+                loop {
+                    let message = match subscription.next_binary().await {
+                        Ok(message) => message,
+                        Err(reason) => {
+                            eprintln!("{reason}");
+                            break;
+                        }
+                    };
+                    let client = Arc::clone(&client);
+                    let cursor = Arc::clone(&cursor);
+
+                    // Acquire a permit before spawning a new task
+                    let permit = match semaphore.clone().acquire_owned().await {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            eprintln!("Semaphore closed");
+                            break;
+                        }
+                    };
+
+                    // Spawn a new asynchronous task to process the message
+                    tokio::spawn(async move {
+                        // The permit is held for the duration of the task
+                        let subscriber_endpoint = env::var("FEEDGEN_SUBSCRIPTION_ENDPOINT")
+                            .unwrap_or_else(|_| "com.atproto.sync.subscribeRepos".to_string());
+
+                        match subscriber_endpoint.as_str() {
+                            "com.atproto.sync.subscribeRepos" => {
+                                process(message, &client, &cursor).await
+                            }
+                            "com.atproto.label.subscribeLabels" => {
+                                process_labels(message, &client, &cursor).await
+                            }
+                            _ => panic!("Unexpected subscription endpoint: {subscriber_endpoint}"),
+                        };
+                        // Permit is automatically released when it goes out of scope
+                        drop(permit);
+                    });
+                }
+
+                // Frames already received must finish before the resume cursor is read.
+                drop(semaphore.acquire_many(CONCURRENT_TASKS).await);
             }
             Err(error) => {
                 eprintln!(

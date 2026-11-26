@@ -29,6 +29,7 @@ use dotenvy::dotenv;
 use futures::StreamExt as _;
 use rsky_common::env::{env_bool, env_list};
 use rsky_common::explicit_slurs::contains_explicit_slurs;
+use rsky_firehose::subscription::{self, Subscription};
 use rsky_labeler::APP_USER_AGENT;
 use rsky_lexicon::app::bsky::actor::Profile;
 use rsky_lexicon::app::bsky::feed::Post;
@@ -39,9 +40,6 @@ use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::protocol::Message;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "$type")]
@@ -421,66 +419,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a semaphore to limit the number of concurrent processing tasks
     let semaphore = Arc::new(Semaphore::new(100)); // Adjust the limit as needed
 
+    let idle_timeout = subscription::idle_timeout(
+        env::var("FEEDGEN_SUBSCRIPTION_IDLE_TIMEOUT_SECS")
+            .ok()
+            .as_deref(),
+    );
+    println!("Idle timeout: {}s", idle_timeout.as_secs());
+    let ws_url = format!("{}/xrpc/{}", subscriber_base_path, subscriber_endpoint);
+
     loop {
-        // Construct the WebSocket URL
-        let ws_url = format!("{}/xrpc/{}", subscriber_base_path, subscriber_endpoint)
-            .into_client_request()?;
-
-        // Attempt to establish a WebSocket connection
-        match connect_async(ws_url).await {
-            Ok((mut socket, _response)) => {
+        match subscription::connect(&ws_url, subscription::HANDSHAKE_TIMEOUT).await {
+            Ok(socket) => {
                 println!("Connected to {}", subscriber_base_path);
+                let (writer, reader) = socket.split();
+                let mut subscription = Subscription::new(reader, writer, idle_timeout);
 
-                // Listen for incoming messages
-                while let Some(msg_result) = socket.next().await {
-                    match msg_result {
-                        Ok(Message::Binary(message)) => {
-                            let agent = Arc::clone(&agent);
-                            let semaphore = Arc::clone(&semaphore);
-
-                            // Acquire a permit before spawning a new task
-                            let permit = match semaphore.clone().acquire_owned().await {
-                                Ok(permit) => permit,
-                                Err(_) => {
-                                    eprintln!("Semaphore closed");
-                                    break;
-                                }
-                            };
-
-                            // Spawn a new asynchronous task to process the message
-                            tokio::spawn(async move {
-                                // The permit is held for the duration of the task
-                                let subscriber_endpoint = env::var("FEEDGEN_SUBSCRIPTION_ENDPOINT")
-                                    .unwrap_or_else(|_| {
-                                        "com.atproto.sync.subscribeRepos".to_string()
-                                    });
-
-                                match subscriber_endpoint.as_str() {
-                                    "com.atproto.sync.subscribeRepos" => {
-                                        process(message.to_vec(), &agent)
-                                            .await
-                                            .expect("Should have failed gracefully")
-                                    }
-                                    _ => panic!(
-                                        "Unexpected subscription endpoint: {subscriber_endpoint}"
-                                    ),
-                                };
-                                // Permit is automatically released when it goes out of scope
-                                drop(permit);
-                            });
-                        }
-                        Ok(Message::Close(_)) => {
-                            println!("WebSocket connection closed by server.");
+                loop {
+                    let message = match subscription.next_binary().await {
+                        Ok(message) => message,
+                        Err(reason) => {
+                            eprintln!("{reason}");
                             break;
                         }
-                        Ok(_) => {
-                            // Handle other message types if necessary
-                        }
-                        Err(e) => {
-                            eprintln!("WebSocket error: {}", e);
+                    };
+                    let agent = Arc::clone(&agent);
+
+                    // Acquire a permit before spawning a new task
+                    let permit = match semaphore.clone().acquire_owned().await {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            eprintln!("Semaphore closed");
                             break;
                         }
-                    }
+                    };
+
+                    // Spawn a new asynchronous task to process the message
+                    tokio::spawn(async move {
+                        // The permit is held for the duration of the task
+                        let subscriber_endpoint = env::var("FEEDGEN_SUBSCRIPTION_ENDPOINT")
+                            .unwrap_or_else(|_| "com.atproto.sync.subscribeRepos".to_string());
+
+                        match subscriber_endpoint.as_str() {
+                            "com.atproto.sync.subscribeRepos" => process(message.to_vec(), &agent)
+                                .await
+                                .expect("Should have failed gracefully"),
+                            _ => panic!("Unexpected subscription endpoint: {subscriber_endpoint}"),
+                        };
+                        // Permit is automatically released when it goes out of scope
+                        drop(permit);
+                    });
                 }
             }
             Err(error) => {
