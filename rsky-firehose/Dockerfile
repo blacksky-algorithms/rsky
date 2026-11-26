@@ -10,6 +10,10 @@ RUN git clone --depth 1 https://github.com/blacksky-algorithms/rsky.git .
 # RUN git clone --depth 1 https://github.com/blacksky-algorithms/rsky.git . && \
 #     git checkout <TBD when we have stronger versioning>
 
+# Manifests come from the build context so dependency changes build before they reach the default branch
+COPY Cargo.toml Cargo.lock ./
+COPY rsky-firehose/Cargo.toml rsky-firehose/Cargo.toml
+
 # Create an empty src directory to trick Cargo into thinking it's a valid Rust project
 RUN mkdir -p rsky-firehose/src && echo "fn main() {}" > rsky-firehose/src/main.rs
 
