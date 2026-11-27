@@ -3,7 +3,7 @@
 # dependencies first. Pass --list to print the plan without publishing.
 set -euo pipefail
 
-CRATES=(rsky-common rsky-crypto rsky-syntax rsky-identity rsky-lexicon rsky-repo rsky-oauth rsky-space)
+CRATES=(rsky-common rsky-crypto rsky-syntax rsky-blobstore rsky-identity rsky-lexicon rsky-repo rsky-oauth rsky-space)
 list_only=${1:-}
 
 metadata=$(cargo metadata --no-deps --format-version 1)

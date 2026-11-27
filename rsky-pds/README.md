@@ -20,8 +20,11 @@ is:
 `<shard>` is the first two hex chars of the sha256 of the DID. Each database
 location can also be overridden individually (see below).
 
-Blobs are stored either on local disk (`PDS_BLOBSTORE_DISK_LOCATION`) or in S3
-(`PDS_BLOBSTORE_S3_BUCKET`); setting both is an error.
+Blobs are stored on local disk (`PDS_BLOBSTORE_DISK_LOCATION`), in S3
+(`PDS_BLOBSTORE_S3_BUCKET`), or through an opendal-supported service
+(`PDS_BLOBSTORE_OPENDAL_KIND` with `PDS_BLOBSTORE_OPENDAL_BUCKET`); configuring
+more than one of them is an error. The opendal store is compiled only into a
+build that passes `--features opendal`.
 
 ## Running
 
@@ -82,6 +85,8 @@ Mount a volume at `PDS_DATA_DIRECTORY` to persist data.
 | `PDS_BLOBSTORE_S3_ENDPOINT` | S3-compatible endpoint URL (`AWS_ENDPOINT` is honoured as well) |
 | `PDS_BLOBSTORE_S3_FORCE_PATH_STYLE` | Address the bucket in the path rather than the host |
 | `PDS_BLOBSTORE_S3_ACCESS_KEY_ID`, `PDS_BLOBSTORE_S3_SECRET_ACCESS_KEY` | Static credentials; both or neither, otherwise the SDK's default chain |
+| `PDS_BLOBSTORE_OPENDAL_KIND` | opendal service for blobs (`fs` or `s3`); both opendal variables or neither, and needs `--features opendal` |
+| `PDS_BLOBSTORE_OPENDAL_BUCKET` | opendal bucket, or root directory for the `fs` service (mutually exclusive with disk and S3) |
 
 ### Keys and secrets
 

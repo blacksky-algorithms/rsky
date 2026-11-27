@@ -41,6 +41,11 @@ pub enum BlobstoreConfig {
         tmp_location: Option<String>,
     },
     S3(S3Config),
+    #[cfg(feature = "opendal")]
+    Opendal {
+        operator_kind: String,
+        bucket: String,
+    },
 }
 
 /// The `PDS_BLOBSTORE_*` variables as read from the environment.
@@ -49,21 +54,59 @@ pub struct BlobstoreEnv {
     pub disk_location: Option<String>,
     pub disk_tmp_location: Option<String>,
     pub s3: S3Config,
+    pub opendal_kind: Option<String>,
+    pub opendal_bucket: Option<String>,
 }
 
 pub fn blobstore_cfg_from(env: BlobstoreEnv) -> Result<BlobstoreConfig> {
+    let opendal = match (env.opendal_kind, env.opendal_bucket) {
+        (Some(kind), Some(bucket)) => Some((kind, bucket)),
+        (None, None) => None,
+        _ => bail!(
+            "Must specify both PDS_BLOBSTORE_OPENDAL_KIND and PDS_BLOBSTORE_OPENDAL_BUCKET blobstore env vars"
+        ),
+    };
     if env.disk_location.is_some() && env.s3.bucket.is_some() {
         bail!("Cannot set both S3 and disk blobstore env vars");
     }
+    if opendal.is_some() && (env.disk_location.is_some() || env.s3.bucket.is_some()) {
+        bail!("Cannot combine the opendal blobstore env vars with disk or S3 ones");
+    }
     if env.s3.access_key_id.is_some() != env.s3.secret_access_key.is_some() {
         bail!("Must specify both S3 access key id and secret access key blobstore env vars");
+    }
+    if let Some((kind, bucket)) = opendal {
+        #[cfg(feature = "opendal")]
+        return Ok(BlobstoreConfig::Opendal {
+            operator_kind: kind,
+            bucket,
+        });
+        #[cfg(not(feature = "opendal"))]
+        {
+            let _ = (kind, bucket);
+            bail!(
+                "opendal blobstore requires the `opendal` feature; rebuild rsky-pds with `--features opendal`"
+            )
+        }
     }
     match env.disk_location {
         Some(location) => Ok(BlobstoreConfig::Disk {
             location,
             tmp_location: env.disk_tmp_location,
         }),
-        None => Ok(BlobstoreConfig::S3(env.s3)),
+        None => {
+            #[cfg(feature = "aws-s3")]
+            {
+                Ok(BlobstoreConfig::S3(env.s3))
+            }
+            #[cfg(not(feature = "aws-s3"))]
+            {
+                let _ = env.s3;
+                bail!(
+                    "S3 blobstore requires the `aws-s3` feature; set PDS_BLOBSTORE_DISK_LOCATION or rebuild with `aws-s3`"
+                )
+            }
+        }
     }
 }
 
@@ -365,6 +408,8 @@ pub fn env_to_cfg() -> ServerConfig {
             access_key_id: env_str("PDS_BLOBSTORE_S3_ACCESS_KEY_ID"),
             secret_access_key: env_str("PDS_BLOBSTORE_S3_SECRET_ACCESS_KEY"),
         },
+        opendal_kind: env_str("PDS_BLOBSTORE_OPENDAL_KIND"),
+        opendal_bucket: env_str("PDS_BLOBSTORE_OPENDAL_BUCKET"),
     })
     .expect("invalid blobstore configuration");
 
@@ -608,6 +653,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "aws-s3")]
     #[test]
     fn blobstore_cfg_reads_the_reference_s3_settings() {
         let s3 = S3Config {
@@ -643,6 +689,85 @@ mod tests {
                 access_key_id: Some("key".to_owned()),
                 ..Default::default()
             },
+            ..Default::default()
+        })
+        .is_err());
+    }
+
+    #[cfg(not(feature = "aws-s3"))]
+    #[test]
+    fn blobstore_cfg_refuses_s3_without_the_aws_feature() {
+        assert!(blobstore_cfg_from(BlobstoreEnv::default()).is_err());
+        // an explicit disk location still configures a store
+        assert_eq!(
+            blobstore_cfg_from(BlobstoreEnv {
+                disk_location: Some("/data/blobs".to_owned()),
+                ..Default::default()
+            })
+            .unwrap(),
+            BlobstoreConfig::Disk {
+                location: "/data/blobs".to_owned(),
+                tmp_location: None,
+            }
+        );
+    }
+
+    #[cfg(feature = "opendal")]
+    #[test]
+    fn blobstore_cfg_builds_the_opendal_store_from_its_env() {
+        let cfg = blobstore_cfg_from(BlobstoreEnv {
+            opendal_kind: Some("s3".to_owned()),
+            opendal_bucket: Some("my-bucket".to_owned()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            cfg,
+            BlobstoreConfig::Opendal {
+                operator_kind: "s3".to_owned(),
+                bucket: "my-bucket".to_owned(),
+            }
+        );
+    }
+
+    #[cfg(feature = "opendal")]
+    #[test]
+    fn blobstore_cfg_requires_both_opendal_vars_and_refuses_mixing() {
+        assert!(blobstore_cfg_from(BlobstoreEnv {
+            opendal_kind: Some("s3".to_owned()),
+            ..Default::default()
+        })
+        .is_err());
+        assert!(blobstore_cfg_from(BlobstoreEnv {
+            opendal_bucket: Some("my-bucket".to_owned()),
+            ..Default::default()
+        })
+        .is_err());
+        assert!(blobstore_cfg_from(BlobstoreEnv {
+            opendal_kind: Some("s3".to_owned()),
+            opendal_bucket: Some("my-bucket".to_owned()),
+            disk_location: Some("/data/blobs".to_owned()),
+            ..Default::default()
+        })
+        .is_err());
+        assert!(blobstore_cfg_from(BlobstoreEnv {
+            opendal_kind: Some("s3".to_owned()),
+            opendal_bucket: Some("my-bucket".to_owned()),
+            s3: S3Config {
+                bucket: Some("another-bucket".to_owned()),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .is_err());
+    }
+
+    #[cfg(not(feature = "opendal"))]
+    #[test]
+    fn blobstore_cfg_refuses_opendal_without_the_feature() {
+        assert!(blobstore_cfg_from(BlobstoreEnv {
+            opendal_kind: Some("s3".to_owned()),
+            opendal_bucket: Some("my-bucket".to_owned()),
             ..Default::default()
         })
         .is_err());

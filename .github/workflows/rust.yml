@@ -110,6 +110,32 @@ jobs:
       - name: Run cargo check for ${{ matrix.package }}
         run: cargo check -p ${{ matrix.package }}
 
+  # The per-package jobs above never look at a non-default feature set: the
+  # matrix builds rsky-blobstore with no features at all and rsky-pds with its
+  # default `disk aws-s3`, so the opendal backend and every reduced build would
+  # rot unbuilt. This job compiles each combination the crate documents.
+  blobstore-features:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: blobstore-features
+      - name: Check each rsky-blobstore backend
+        run: |
+          cargo check -p rsky-blobstore --features disk
+          cargo check -p rsky-blobstore --features opendal
+          cargo check -p rsky-blobstore --features "disk opendal"
+      - name: Run the backend tests
+        run: cargo test -p rsky-blobstore --features "disk opendal"
+      - name: Check each rsky-pds backend combination
+        run: |
+          cargo check -p rsky-pds --no-default-features --features disk
+          cargo check -p rsky-pds --no-default-features --features aws-s3
+          cargo check -p rsky-pds --features "disk opendal"
+
   # Parallel build and test job for each package
   build-and-test:
     needs: [determine-workspace-members, check]

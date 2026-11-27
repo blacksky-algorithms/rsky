@@ -433,6 +433,7 @@ mod tests {
     use crate::background::BackgroundQueue;
     use crate::config::ActorStoreConfig;
     use crate::lifecycle::PurgeObligation;
+    use futures::TryStreamExt;
     use secp256k1::{Keypair, Secp256k1, SecretKey};
 
     const DID: &str = "did:plc:collectme";
@@ -596,13 +597,11 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("PDS_COEXISTENCE"));
-        let factory = BlobstoreFactory::new(
-            crate::config::BlobstoreConfig::Disk {
+        let factory =
+            crate::actor_store::blobstore::test_factory(crate::config::BlobstoreConfig::Disk {
                 location: "/nonexistent".into(),
                 tmp_location: None,
-            },
-            aws_config::SdkConfig::builder().build(),
-        );
+            });
         assert!(world
             .collector(true)
             .collect_all(&world.actor_store, &factory)
@@ -708,15 +707,13 @@ mod tests {
         // through the registry the content is unavailable at the retired
         // key and a re-upload lands at the generation key the old delete
         // never named
-        let factory = BlobstoreFactory::new(
-            crate::config::BlobstoreConfig::Disk {
+        let factory =
+            crate::actor_store::blobstore::test_factory(crate::config::BlobstoreConfig::Disk {
                 location: "/nonexistent".into(),
                 tmp_location: None,
-            },
-            aws_config::SdkConfig::builder().build(),
-        )
-        .with_attempts(world.attempts.clone())
-        .with_generations(world.generations.clone());
+            })
+            .with_attempts(world.attempts.clone())
+            .with_generations(world.generations.clone());
         let aware = factory.generation_aware(DID.to_owned(), world.blobstore());
         let cid: lexicon_cid::Cid = CID.parse().unwrap();
         assert!(!aware.has_stored(cid).await.unwrap());
@@ -729,14 +726,17 @@ mod tests {
             .physical_keys()
             .contains(&format!("permanent/{CID}.g1")));
         // the stream and copy-only paths follow the generation too
-        let streamed = aware
+        let chunks: Vec<bytes::Bytes> = aware
             .get_stream(cid)
             .await
             .unwrap()
-            .collect()
+            .try_collect()
             .await
-            .unwrap()
-            .into_bytes();
+            .unwrap();
+        let streamed: Vec<u8> = chunks
+            .iter()
+            .flat_map(|chunk| chunk.iter().copied())
+            .collect();
         assert_eq!(&streamed[..], b"again");
         let temp = aware.put_temp(b"again".to_vec()).await.unwrap();
         aware.make_permanent_copy_only(temp, cid).await.unwrap();
@@ -1057,6 +1057,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "disk")]
     #[tokio::test]
     async fn every_actor_and_obligation_is_visited() {
         let world = world().await;
@@ -1071,8 +1072,8 @@ mod tests {
             .record_purge_obligation(&obligation)
             .await
             .unwrap();
-        let factory = BlobstoreFactory::new(
-            crate::config::BlobstoreConfig::Disk {
+        let factory =
+            crate::actor_store::blobstore::test_factory(crate::config::BlobstoreConfig::Disk {
                 location: world
                     ._dir
                     .path()
@@ -1081,11 +1082,9 @@ mod tests {
                     .unwrap()
                     .to_owned(),
                 tmp_location: None,
-            },
-            aws_config::SdkConfig::builder().build(),
-        )
-        .with_attempts(world.attempts.clone())
-        .with_generations(world.generations.clone());
+            })
+            .with_attempts(world.attempts.clone())
+            .with_generations(world.generations.clone());
         // entries that are not actor directories are skipped
         let actors = world._dir.path().join("actors");
         std::fs::create_dir_all(actors.join("reserved_keys")).unwrap();
