@@ -6,11 +6,12 @@ use clap::Parser;
 pub const SPACE_TYPE: &str = "community.blacksky.feed";
 pub const SPACE_SKEY: &str = "main";
 
+/// The baseline policies every PDS must support (spec §Baseline policies).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum PolicyMode {
-    MemberList,
-    Public,
-    ManagingApp,
+    Personalspace,
+    Memberspace,
+    Managedspace,
 }
 
 #[derive(Debug, Parser)]
@@ -27,21 +28,38 @@ pub struct Config {
     #[arg(long, env = "SPACEHOST_SIGNING_KEY_HEX")]
     pub signing_key_hex: String,
 
-    /// How the authority authorizes users at credential-mint time.
+    /// How the authority authorizes users: `personalspace` (authority only),
+    /// `memberspace` (member list), or `managedspace` (managing app).
     #[arg(
         long,
         env = "SPACEHOST_POLICY",
         value_enum,
-        default_value = "member-list"
+        default_value = "memberspace"
     )]
     pub policy: PolicyMode,
 
+    /// Memberspace flag: authorize anyone to read; no delegation token is
+    /// required.
+    #[arg(long, env = "SPACEHOST_PUBLIC_READ")]
+    pub public_read: bool,
+
+    /// Memberspace flag: track and forward notifications for any user's
+    /// writes.
+    #[arg(long, env = "SPACEHOST_PUBLIC_WRITE")]
+    pub public_write: bool,
+
+    /// Memberspace field: comma-separated OAuth client_ids the authority
+    /// authorizes. Any app when empty.
+    #[arg(long, env = "SPACEHOST_ALLOWED_APPS", default_value = "")]
+    pub allowed_apps: String,
+
     /// The managing app's service identifier (`did#fragment`); required when
-    /// the policy is `managing-app`.
+    /// the policy is `managedspace`.
     #[arg(long, env = "SPACEHOST_MANAGING_APP", default_value = "")]
     pub managing_app: String,
 
-    /// Comma-separated member DIDs seeding the `member-list` policy.
+    /// Comma-separated member DIDs seeding the `memberspace` member list,
+    /// each granted read and write access.
     #[arg(long, env = "SPACEHOST_MEMBERS", default_value = "")]
     pub members: String,
 
@@ -92,10 +110,21 @@ impl Config {
             .collect()
     }
 
+    pub fn allowed_app_list(&self) -> Option<Vec<String>> {
+        let list: Vec<String> = self
+            .allowed_apps
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        (!list.is_empty()).then_some(list)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
-        if self.policy == PolicyMode::ManagingApp && !self.managing_app.contains('#') {
+        if self.policy == PolicyMode::Managedspace && !self.managing_app.contains('#') {
             return Err(
-                "managing-app policy requires SPACEHOST_MANAGING_APP (did#fragment)".to_string(),
+                "managedspace policy requires SPACEHOST_MANAGING_APP (did#fragment)".to_string(),
             );
         }
         if self.public_url.trim_end_matches('/').is_empty() {
@@ -125,7 +154,7 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.authority_did, "did:plc:authority");
         assert_eq!(cfg.bind, "0.0.0.0:3600");
-        assert_eq!(cfg.policy, PolicyMode::MemberList);
+        assert_eq!(cfg.policy, PolicyMode::Memberspace);
         assert_eq!(cfg.db_path, "./space_host.db");
         assert_eq!(cfg.plc_url, "https://plc.directory");
         assert_eq!(cfg.space_type(), SPACE_TYPE);
@@ -153,7 +182,7 @@ mod tests {
 
         std::env::set_var("SPACEHOST_AUTHORITY_DID", "did:plc:envauthority");
         std::env::set_var("SPACEHOST_SIGNING_KEY_HEX", "bb".repeat(32));
-        std::env::set_var("SPACEHOST_POLICY", "managing-app");
+        std::env::set_var("SPACEHOST_POLICY", "managedspace");
         std::env::set_var("SPACEHOST_MANAGING_APP", "did:web:app#svc");
         std::env::set_var("SPACEHOST_MEMBERS", "did:plc:aaa, did:plc:bbb,");
         std::env::set_var("SPACEHOST_MEMBERSHIP_DB_URL", "postgres://env");
@@ -175,7 +204,7 @@ mod tests {
             std::env::remove_var(k);
         }
         assert_eq!(cfg.authority_did, "did:plc:envauthority");
-        assert_eq!(cfg.policy, PolicyMode::ManagingApp);
+        assert_eq!(cfg.policy, PolicyMode::Managedspace);
         assert_eq!(cfg.managing_app, "did:web:app#svc");
         assert_eq!(
             cfg.member_dids(),
@@ -186,7 +215,7 @@ mod tests {
         assert_eq!(cfg.bind, "127.0.0.1:1234");
         assert!(cfg.validate().is_ok());
 
-        // managing-app policy without a service identifier is invalid.
+        // managedspace policy without a service identifier is invalid.
         let mut invalid = cfg;
         invalid.managing_app = String::new();
         assert!(invalid.validate().is_err());

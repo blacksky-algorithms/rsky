@@ -37,7 +37,7 @@ fn codec_err<E: std::fmt::Display>(e: E) -> SpaceError {
     SpaceError::Decode(e.to_string())
 }
 
-fn cid_for_block(codec: u64, bytes: &[u8]) -> Cid {
+pub fn cid_for_block(codec: u64, bytes: &[u8]) -> Cid {
     let digest = Sha256::digest(bytes);
     let multihash = Multihash::wrap(SHA2_256, &digest).expect("sha256 digest fits in multihash");
     Cid::new_v1(codec, multihash)

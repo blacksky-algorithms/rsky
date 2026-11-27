@@ -30,6 +30,7 @@ pub mod error;
 pub mod jwk;
 pub mod lthash;
 pub mod space_id;
+pub mod star;
 pub mod types;
 
 pub use car::{repo_car_bytes, write_repo_car, RepoCarValidator};

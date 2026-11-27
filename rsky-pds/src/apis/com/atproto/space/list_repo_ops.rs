@@ -55,6 +55,7 @@ pub async fn space_list_repo_ops(
         &account_manager,
         &repo,
         false,
+        &auth,
     )
     .await?;
     let (rows, has_more) = reader

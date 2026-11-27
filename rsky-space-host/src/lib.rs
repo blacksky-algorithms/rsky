@@ -7,18 +7,19 @@
 //! permissioned data is a parallel protocol.
 //!
 //! Authorization is two-axis (spec §Access control): the per-user decision is a
-//! [`policy::Policy`] (`public`, `member-list`, or `managing-app`, where the
-//! host defers to the space's managing app via `checkUserAccess` and never
-//! reads the membership decision itself), and the per-app decision is
-//! [`appaccess::AppAccess`], enforced against a verified
-//! [client attestation](attestation).
+//! [`policy::Policy`] (`personalspace`, `memberspace`, or `managedspace`, where
+//! the host defers to the space's managing app via `checkUserAccess` and never
+//! reads the access decision itself), and the per-app decision is a
+//! `memberspace` `allowedApps` list, enforced against a verified
+//! [client attestation](attestation). Reading and writing are independent
+//! permissions: read controls credential issuance, write controls writer-set
+//! tracking and `notifyWrite` forwarding.
 //!
 //! The XRPC surface ([`http`]) serves `getSpace`, `getSpaceCredential`,
 //! `listRepos`, `registerNotify`, and `notifyWrite` using the
 //! `com.atproto.space.*` DTOs from rsky-lexicon, backed by in-memory or SQLite
 //! [stores](store).
 
-pub mod appaccess;
 pub mod attestation;
 pub mod authority;
 pub mod config;

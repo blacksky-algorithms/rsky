@@ -1,0 +1,11 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.personalspace.policy",
+  "defs": {
+    "main": {
+      "type": "object",
+      "description": "Policy for a space only its authority can read and write: personal data such as bookmarks, mutes, or drafts. Carries no configuration fields and defines no methods.",
+      "properties": {}
+    }
+  }
+}

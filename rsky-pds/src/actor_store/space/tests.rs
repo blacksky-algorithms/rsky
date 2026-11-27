@@ -601,10 +601,7 @@ async fn space_def_crud_and_members() {
         space_uri: uri.clone(),
         space_type: SPACE_TYPE.to_string(),
         skey: SKEY.to_string(),
-        policy: "member-list".to_string(),
-        app_access: "open".to_string(),
-        allowed_clients: None,
-        managing_app: None,
+        policy: SpacePolicy::Memberspace(Default::default()),
         deleted: false,
     };
     assert!(store.get_space_def(&uri).await.unwrap().is_none());
@@ -625,10 +622,10 @@ async fn space_def_crud_and_members() {
     ));
 
     let updated = SpaceDefRow {
-        policy: "managing-app".to_string(),
-        app_access: "allow-list".to_string(),
-        allowed_clients: Some(vec!["https://app.example.com/client.json".to_string()]),
-        managing_app: Some("did:web:app.example.com#managing_app".to_string()),
+        policy: SpacePolicy::Managedspace(rsky_lexicon::com::atproto::managedspace::Policy {
+            managing_app: "did:web:app.example.com#managing_app".to_string(),
+            publish_policy: None,
+        }),
         ..def.clone()
     };
     store.update_space_def(updated.clone()).await.unwrap();
@@ -647,45 +644,64 @@ async fn space_def_crud_and_members() {
     ));
 
     // members
-    store.add_member(&uri, "did:plc:m2").await.unwrap();
-    store.add_member(&uri, "did:plc:m1").await.unwrap();
-    store.add_member(&uri, "did:plc:m1").await.unwrap(); // idempotent
-                                                         // Rows carry (did, memberRev, addedAt); the metadata is non-empty.
-    let dids = |rows: Vec<(String, String, String)>| -> Vec<String> {
-        rows.into_iter().map(|(did, _, _)| did).collect()
-    };
+    store
+        .put_member(&uri, "did:plc:m2", true, false)
+        .await
+        .unwrap();
+    store
+        .put_member(&uri, "did:plc:m1", true, true)
+        .await
+        .unwrap();
+    let dids =
+        |rows: Vec<MemberRow>| -> Vec<String> { rows.into_iter().map(|row| row.did).collect() };
     let all = store.list_members(&uri, 10, None).await.unwrap();
     assert!(all
         .iter()
-        .all(|(_, rev, at)| !rev.is_empty() && !at.is_empty()));
-    assert_eq!(dids(all), vec!["did:plc:m1", "did:plc:m2"]);
+        .all(|row| !row.member_rev.is_empty() && !row.added_at.is_empty()));
+    assert_eq!(dids(all.clone()), vec!["did:plc:m1", "did:plc:m2"]);
+    assert!(all[0].read && all[0].write);
+    assert!(all[1].read && !all[1].write);
     let page = store.list_members(&uri, 1, None).await.unwrap();
     assert_eq!(dids(page.clone()), vec!["did:plc:m1"]);
     assert_eq!(
         dids(
             store
-                .list_members(&uri, 10, Some(page[0].0.clone()))
+                .list_members(&uri, 10, Some(page[0].did.clone()))
                 .await
                 .unwrap()
         ),
         vec!["did:plc:m2"]
     );
-    // A row whose metadata predates the columns (empty strings) is filled in
-    // by an idempotent re-add; a populated row keeps its original values.
+    // putMember replaces both booleans together and restamps the row.
     let before = store.list_members(&uri, 10, None).await.unwrap();
-    let (m1_rev, m1_at) = (before[0].1.clone(), before[0].2.clone());
-    store.add_member(&uri, "did:plc:m1").await.unwrap();
+    let m1_rev = before[0].member_rev.clone();
+    store
+        .put_member(&uri, "did:plc:m1", true, false)
+        .await
+        .unwrap();
     let after = store.list_members(&uri, 10, None).await.unwrap();
+    assert!(!after[0].write, "putMember must replace the write boolean");
+    assert_ne!(after[0].member_rev, m1_rev, "putMember restamps memberRev");
     assert_eq!(
-        (after[0].1.clone(), after[0].2.clone()),
-        (m1_rev, m1_at),
-        "re-add must not rewrite existing metadata"
+        store.member_access(&uri, "did:plc:m2").await.unwrap(),
+        Some((true, false))
     );
+    assert_eq!(store.member_access(&uri, "did:plc:m9").await.unwrap(), None);
     store.remove_member(&uri, "did:plc:m1").await.unwrap();
+    assert!(matches!(
+        store
+            .remove_member(&uri, "did:plc:m1")
+            .await
+            .unwrap_err()
+            .downcast_ref::<SpaceStoreError>(),
+        Some(SpaceStoreError::MemberNotFound(_))
+    ));
     assert_eq!(
         dids(store.list_members(&uri, 10, None).await.unwrap()),
         vec!["did:plc:m2"]
     );
+    store.clear_members(&uri).await.unwrap();
+    assert!(store.list_members(&uri, 10, None).await.unwrap().is_empty());
 
     // deletion flags and blocks re-creation and updates
     assert!(store.flag_space_def_deleted(&uri).await.unwrap());

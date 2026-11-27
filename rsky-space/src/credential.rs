@@ -32,7 +32,7 @@ pub const ATTESTATION_TYP: &str = "atproto-client-attestation+jwt";
 
 /// Default lifetimes (proposal defaults).
 pub const DELEGATION_TTL_SECS: u64 = 60;
-pub const CREDENTIAL_TTL_SECS: u64 = 7200;
+pub const CREDENTIAL_TTL_SECS: u64 = 600;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JwtHeader {
@@ -139,7 +139,7 @@ pub fn verify_signature(decoded: &DecodedJwt, did_key: &str) -> Result<()> {
 ///
 /// - `typ` is the delegation type
 /// - `sub` matches the requested space URI
-/// - `aud` matches `{authority}#atproto_space_host`
+/// - `aud` matches `{authority}#atproto_pds`
 /// - not expired
 /// - signature verifies against the user's `did:key`
 ///
@@ -161,7 +161,7 @@ pub fn verify_delegation_token(
     if decoded.claims.sub != space_uri {
         return Err(SpaceError::InvalidClaim("sub != space".into()));
     }
-    let want_aud = format!("{authority_did}#atproto_space_host");
+    let want_aud = format!("{authority_did}#atproto_pds");
     if decoded.claims.aud.as_deref() != Some(want_aud.as_str()) {
         return Err(SpaceError::InvalidClaim("aud != space host".into()));
     }
@@ -303,7 +303,7 @@ mod tests {
         let claims = SpaceClaims {
             iss: "did:plc:user".to_string(),
             sub: space.to_string(),
-            aud: Some("did:plc:authority#atproto_space_host".to_string()),
+            aud: Some("did:plc:authority#atproto_pds".to_string()),
             iat: 1000,
             exp: 1060,
             jti: "es256-nonce".to_string(),
@@ -443,7 +443,7 @@ mod tests {
         let claims = SpaceClaims {
             iss: "did:plc:user".to_string(),
             sub: space.to_string(),
-            aud: Some("did:plc:authority#atproto_space_host".to_string()),
+            aud: Some("did:plc:authority#atproto_pds".to_string()),
             iat: 1000,
             exp: 1060,
             jti: "n".to_string(),
@@ -483,7 +483,7 @@ mod tests {
         let claims = SpaceClaims {
             iss: "did:plc:user".to_string(),
             sub: space.to_string(),
-            aud: Some("did:plc:authority#atproto_space_host".to_string()),
+            aud: Some("did:plc:authority#atproto_pds".to_string()),
             iat: 1000,
             exp: 1060,
             jti: "n".to_string(),

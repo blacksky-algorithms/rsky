@@ -218,6 +218,47 @@ pub const ACTOR_DB_MIGRATIONS: &[Migration] = &[
         PRIMARY KEY (\"repairId\", \"stepNo\")\
     );",
     },
+    // Member-list entries carry independent read/write booleans, and a
+    // space's configuration is a `$type`-tagged policy object stored as JSON
+    // (spec §Space policy). The legacy `policy` scalar and `app_access`/
+    // `allowed_clients`/`managing_app` columns are folded into the object;
+    // pre-migration rows map 'public' onto a fully public memberspace (the
+    // old code tracked every writer), 'member-list' onto a plain memberspace
+    // (preserving allowed_clients as allowedApps), and 'managing-app' onto a
+    // managedspace.
+    Migration {
+        name: "006",
+        sql: "\
+    ALTER TABLE space_member ADD COLUMN read INTEGER NOT NULL DEFAULT 1;\
+    ALTER TABLE space_member ADD COLUMN write INTEGER NOT NULL DEFAULT 1;\
+    UPDATE space_def SET policy = \
+    CASE \
+        WHEN policy = 'managing-app' AND managing_app IS NOT NULL \
+            THEN json_set('{\"$type\":\"com.atproto.managedspace.policy\"}', '$.managingApp', managing_app) \
+        WHEN app_access = 'allow-list' AND allowed_clients IS NOT NULL \
+            THEN json_set( \
+                CASE WHEN policy = 'public' \
+                    THEN '{\"$type\":\"com.atproto.memberspace.policy\",\"publicRead\":true,\"publicWrite\":true}' \
+                    ELSE '{\"$type\":\"com.atproto.memberspace.policy\"}' END, \
+                '$.allowedApps', json(allowed_clients)) \
+        WHEN policy = 'public' \
+            THEN '{\"$type\":\"com.atproto.memberspace.policy\",\"publicRead\":true,\"publicWrite\":true}' \
+        ELSE '{\"$type\":\"com.atproto.memberspace.policy\"}' \
+    END;",
+    },
+    // Revoked space credentials (spec §Access control): a repo host keeps
+    // each revoked jti for at least 60 minutes, by which time every
+    // credential with it has expired anyway.
+    Migration {
+        name: "007",
+        sql: "\
+    CREATE TABLE space_revoked (\
+        space_uri TEXT NOT NULL, \
+        jti TEXT NOT NULL, \
+        revoked_at INTEGER NOT NULL, \
+        PRIMARY KEY (space_uri, jti)\
+    );",
+    },
 ];
 
 /// The first migration is the reference actor-store schema; the rest are
@@ -354,6 +395,7 @@ mod tests {
                 "space_record",
                 "space_repo",
                 "space_repo_notify",
+                "space_revoked",
                 "space_used_jti",
                 "space_writer"
             ]

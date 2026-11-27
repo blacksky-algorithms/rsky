@@ -1,12 +1,13 @@
-//! The managing-app access check (spec §The managing app).
+//! The managing-app access check (spec §managedspace).
 //!
-//! Under the `managing-app` policy the authority does NOT read the membership
-//! decision itself: at mint time it asks the space's `managingApp` via
-//! `com.atproto.simplespace.checkUserAccess`, authenticated with a service-auth
-//! JWT so the app can verify the call originates from the space's authority.
+//! Under the `managedspace` policy the authority does NOT read the access
+//! decision itself: it asks the space's `managingApp` via
+//! `com.atproto.managedspace.checkUserAccess`, authenticated with a
+//! service-auth JWT so the app can verify the call originates from the
+//! space's authority. Reads and writes are checked separately.
 
 use async_trait::async_trait;
-use rsky_lexicon::com::atproto::simplespace::CheckUserAccessOutput;
+use rsky_lexicon::com::atproto::managedspace::{Access, CheckUserAccessOutput};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,16 +16,17 @@ use crate::keys::{service_endpoint_from_doc, DocSource};
 use crate::service_jwt;
 use crate::signing::Signer;
 
-pub const CHECK_USER_ACCESS_LXM: &str = "com.atproto.simplespace.checkUserAccess";
+pub const CHECK_USER_ACCESS_LXM: &str = "com.atproto.managedspace.checkUserAccess";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Asks the managing app whether a user (and optionally a client) may read a space.
+/// Asks the managing app whether a user may read or write a space.
 #[async_trait]
 pub trait ManagingAppClient: Send + Sync {
     async fn check_user_access(
         &self,
         space: &str,
         user_did: &str,
+        access: Access,
         client_id: Option<&str>,
     ) -> Result<bool>;
 }
@@ -123,6 +125,7 @@ impl ManagingAppClient for HttpManagingApp {
         &self,
         space: &str,
         user_did: &str,
+        access: Access,
         client_id: Option<&str>,
     ) -> Result<bool> {
         let endpoint = self.endpoint().await?;
@@ -134,7 +137,12 @@ impl ManagingAppClient for HttpManagingApp {
             (self.now)(),
             (self.jti)(),
         )?;
-        let mut query: Vec<(&str, &str)> = vec![("space", space), ("did", user_did)];
+        let access_str = match access {
+            Access::Read => "read",
+            Access::Write => "write",
+        };
+        let mut query: Vec<(&str, &str)> =
+            vec![("space", space), ("did", user_did), ("access", access_str)];
         if let Some(client_id) = client_id {
             query.push(("clientId", client_id));
         }
@@ -217,6 +225,7 @@ mod tests {
             .and(path(format!("/xrpc/{CHECK_USER_ACCESS_LXM}")))
             .and(query_param("space", SPACE))
             .and(query_param("did", "did:plc:member"))
+            .and(query_param("access", "read"))
             .and(query_param("clientId", "https://app.example.com/client"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({"allowed": true})),
@@ -237,6 +246,7 @@ mod tests {
             .check_user_access(
                 SPACE,
                 "did:plc:member",
+                Access::Read,
                 Some("https://app.example.com/client"),
             )
             .await
@@ -279,7 +289,7 @@ mod tests {
             .await;
         let app = client(&server.uri(), DEFAULT_TIMEOUT);
         let allowed = app
-            .check_user_access(SPACE, "did:plc:stranger", None)
+            .check_user_access(SPACE, "did:plc:stranger", Access::Write, None)
             .await
             .unwrap();
         assert!(!allowed);
@@ -296,7 +306,9 @@ mod tests {
             .mount(&server)
             .await;
         let app = client(&server.uri(), DEFAULT_TIMEOUT);
-        let res = app.check_user_access(SPACE, "did:plc:member", None).await;
+        let res = app
+            .check_user_access(SPACE, "did:plc:member", Access::Read, None)
+            .await;
         assert!(matches!(res, Err(HostError::ManagingApp(msg)) if msg.contains("500")));
 
         let server = MockServer::start().await;
@@ -306,7 +318,7 @@ mod tests {
             .await;
         let app = client(&server.uri(), DEFAULT_TIMEOUT);
         assert!(app
-            .check_user_access(SPACE, "did:plc:member", None)
+            .check_user_access(SPACE, "did:plc:member", Access::Read, None)
             .await
             .is_err());
     }
@@ -323,7 +335,9 @@ mod tests {
             .mount(&server)
             .await;
         let app = client(&server.uri(), Duration::from_millis(100));
-        let res = app.check_user_access(SPACE, "did:plc:member", None).await;
+        let res = app
+            .check_user_access(SPACE, "did:plc:member", Access::Read, None)
+            .await;
         assert!(matches!(res, Err(HostError::ManagingApp(_))));
     }
 
@@ -347,7 +361,7 @@ mod tests {
         // A doc pointing at a non-https endpoint fails before any request.
         let app = client("http://app.example.com", DEFAULT_TIMEOUT);
         assert!(app
-            .check_user_access(SPACE, "did:plc:member", None)
+            .check_user_access(SPACE, "did:plc:member", Access::Read, None)
             .await
             .is_err());
     }

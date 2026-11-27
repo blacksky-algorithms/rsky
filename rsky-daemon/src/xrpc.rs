@@ -112,6 +112,7 @@ impl SpaceHostClient for HttpSpaceHost {
     ) -> Result<String> {
         let input = GetSpaceCredentialInput {
             space: space.to_string(),
+            delegation_token: None,
             client_attestation: client_attestation.map(str::to_string),
         };
         // The delegation token is the request's bearer credential; the proof

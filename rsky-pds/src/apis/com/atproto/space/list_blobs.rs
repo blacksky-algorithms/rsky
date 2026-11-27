@@ -41,6 +41,7 @@ pub async fn space_list_blobs(
         &account_manager,
         &repo,
         false,
+        &auth,
     )
     .await?;
     // Proves the repo exists in this space before any listing is returned.
