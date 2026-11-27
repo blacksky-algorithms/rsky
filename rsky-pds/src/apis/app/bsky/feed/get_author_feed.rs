@@ -82,6 +82,7 @@ pub async fn get_author_feed(
             "posts_with_media",
             "posts_and_author_threads",
             "posts_with_video",
+            "posts_and_replies_only",
         ]
         .contains(filter.as_str())
         {
