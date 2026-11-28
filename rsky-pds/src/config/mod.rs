@@ -239,15 +239,23 @@ fn sessions_since_from(value: Option<String>) -> Option<u64> {
     })
 }
 
+fn hostname_from_env() -> String {
+    env_str("PDS_HOSTNAME").unwrap_or("localhost".to_string())
+}
+
+pub fn service_did() -> String {
+    env_str("PDS_SERVICE_DID").unwrap_or_else(|| format!("did:web:{}", hostname_from_env()))
+}
+
 pub fn env_to_cfg() -> ServerConfig {
     let port = env_int("PDS_PORT").unwrap_or(2583);
-    let hostname = env_str("PDS_HOSTNAME").unwrap_or("localhost".to_string());
+    let hostname = hostname_from_env();
     let public_url = if hostname == "localhost" {
         format!("http://localhost:{port}")
     } else {
         format!("https://{hostname}")
     };
-    let did = env_str("PDS_SERVICE_DID").unwrap_or(format!("did:web:{hostname}"));
+    let did = service_did();
     let service_cfg = CoreConfig {
         port,
         hostname: hostname.clone(),
